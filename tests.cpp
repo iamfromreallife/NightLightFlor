@@ -264,19 +264,19 @@ int main() {
         // Each monitor tab fits its complete name and its independent switch,
         // with no standalone Enabled button or truncated-label width cap.
         const std::vector<int> tabs{260,250,270};
-        check(kCardOuterMarginDip==16 && kCardsTopMarginDip==8 &&
+        check(kCardOuterMarginDip==8 && kCardsTopMarginDip==8 &&
               kCardsGapDip==8 && kCardInnerInsetDip==16,
-            "Outer/top/card gaps are four DIP tighter; internal padding is unchanged");
+            "All outer edges and section gaps are equal at eight DIP");
         const auto singleVisible=calculateWindowContentMinimum(96,980,
             {200},1,true,true);
         const auto singleHidden=calculateWindowContentMinimum(96,980,
             {200},1,true,false);
         check(singleVisible.screenRows==1 && singleVisible.clientHeight==
             8+(46+38)+8+kTemperatureUnlockedHeightDip+8+
-            (kDdcSectionBaseDip+kDdcRowStepDip)+16,
+            (kDdcSectionBaseDip+kDdcRowStepDip)+8,
             "Visible three-card minimum height respects top, both gaps and bottom margin");
         check(singleHidden.clientHeight==
-            8+(46+38)+8+kTemperatureUnlockedHeightDip+16 &&
+            8+(46+38)+8+kTemperatureUnlockedHeightDip+8 &&
             singleVisible.clientHeight-singleHidden.clientHeight==
                 8+kDdcSectionBaseDip+kDdcRowStepDip,
             "Hidden DDC eliminates only its card and one 8-DIP inter-card gap");
@@ -335,6 +335,11 @@ int main() {
                 const RECT track{(clientWidth-trackWidth)/2,42,
                     (clientWidth-trackWidth)/2+trackWidth,46};
                 const auto labels=temperatureScaleLabelRects(track,56,18);
+                const auto kelvinValue=temperatureValueRect(track,100,8,24);
+                check(kelvinValue.right==track.right &&
+                      kelvinValue.top==8 && kelvinValue.bottom==32 &&
+                      kelvinValue.left>=track.left,
+                    "Kelvin value right edge always coincides with slider endpoint");
                 check(labels.low.left==track.left &&
                       labels.high.right==track.right &&
                       labels.low.right==labels.high.left,
@@ -364,15 +369,49 @@ int main() {
             "Narrow clients wrap monitor tabs but do not force a wider window");
         check(tiny.clientHeight>narrow.clientHeight,
             "Compact temperature layout receives additional vertical clearance");
-        check(temperatureSliderWidth(96,200)==128 &&
-              temperatureSliderWidth(96,800)==728,
-            "Temperature slider expands with the new 36px side insets");
-        check(ddcSliderWidth(96,200)==52 &&
-              ddcSliderWidth(96,800)==652,
-            "DDC sliders reclaim four pixels at each outside edge");
-        check(temperatureSliderWidth(144,300)==192 &&
-              ddcSliderWidth(144,300)==78,
-            "Reduced side insets scale correctly with DPI");
+        check(temperatureSliderWidth(96,200)==144 &&
+              temperatureSliderWidth(96,800)==744,
+            "Temperature slider follows reduced 8 DIP outer margins");
+        check(ddcSliderWidth(96,200)==68 &&
+              ddcSliderWidth(96,800)==668,
+            "DDC sliders follow reduced 8 DIP outer margins");
+        check(temperatureSliderWidth(144,300)==216 &&
+              ddcSliderWidth(144,300)==102,
+            "Equalized external margins scale correctly with DPI");
+        // Tray selection must toggle on every physical down, including the
+        // second press of a double-click, but not again on its release.
+        nightlight::TrayClickFilter tray;
+        using Click=nightlight::TrayClickEvent;
+        check(tray.shouldToggle(Click::MouseDown,1000),
+            "First left mouse press opens or hides the tray window immediately");
+        check(!tray.shouldToggle(Click::MouseUp,1040),
+            "Mouse-up after a handled press cannot toggle the window twice");
+        check(!tray.shouldToggle(Click::Select,1041),
+            "NIN_SELECT following mouse-up is a duplicate activation");
+        check(tray.shouldToggle(Click::MouseDoubleClick,1130),
+            "Second fast press in a double-click always toggles immediately");
+        check(!tray.shouldToggle(Click::MouseUp,1160) &&
+              !tray.shouldToggle(Click::Select,1161),
+            "Double-click's trailing release and select cannot undo the toggle");
+        check(tray.shouldToggle(Click::MouseDown,1200) &&
+              !tray.shouldToggle(Click::MouseUp,1210),
+            "Third fast physical click is never throttled");
+        check(tray.shouldToggle(Click::KeySelect,1220),
+            "Keyboard activation works independently of prior mouse activity");
+        nightlight::TrayClickFilter selectOnly;
+        check(selectOnly.shouldToggle(Click::Select,5000) &&
+              selectOnly.shouldToggle(Click::Select,5015),
+            "Shells emitting only NIN_SELECT handle rapid repeated clicks");
+        nightlight::TrayClickFilter upOnly;
+        check(upOnly.shouldToggle(Click::MouseUp,5000) &&
+              !upOnly.shouldToggle(Click::Select,5002) &&
+              upOnly.shouldToggle(Click::MouseUp,5200),
+            "Legacy mouse-up fallback avoids duplicate Shell selection");
+        nightlight::TrayClickFilter swapped;
+        check(swapped.shouldToggle(Click::MouseDown,5000) &&
+              !swapped.shouldToggle(Click::Select,5001) &&
+              !swapped.shouldToggle(Click::MouseUp,5015),
+            "Reordered Shell selection and release stay deduplicated");
         check(resolveStartup(L"normal",L"",true)==L"normal","Normal startup");
         check(resolveStartup(L"minimized",L"",true)==L"minimized","Minimized startup");
         check(resolveStartup(L"tray",L"",true)==L"tray","Tray startup");
