@@ -249,6 +249,9 @@ int main() {
             check(model.preferences().locale==L"pt-PT","PT language");
             check(model.preferences().theme==L"light","Light theme");
             check(model.preferences().startup==L"tray","Tray mode");
+            check(!model.windowPosition().has_value(),"Legacy config without a window position keeps default placement");
+            check(model.rememberWindowPosition(-1900,235),"Remember position on monitor left of primary");
+            check(!model.rememberWindowPosition(-1900,235),"Unchanged window location requires no new write");
             Preferences updated=model.preferences();
             updated.locale=L"en-US";
             updated.startup=L"minimized";
@@ -268,6 +271,9 @@ int main() {
             check(model.load(),"Reload from same folder");
             check(model.preferences().locale==L"en-US","Saved language");
             check(model.preferences().startup==L"minimized","Saved startup mode");
+            const auto restoredWindow=model.windowPosition();
+            check(restoredWindow && restoredWindow->x==-1900 && restoredWindow->y==235,
+                "Persist and restore screen position across application starts");
             check(model.hardwarePercent(L"test-display-1",false)==23 &&
                   model.hardwarePercent(L"test-display-1",true)==67 &&
                   model.hardwarePercent(L"test-display-2",false)==81 &&
@@ -281,6 +287,9 @@ int main() {
             check(ReadFile(handle,content.data(),size,&received,nullptr),"Read bytes");
             CloseHandle(handle);
             auto saved=Json::parse(content);
+            check(saved.get("general").get("window_position").get("x").integer()==-1900 &&
+                saved.get("general").get("window_position").get("y").integer()==235,
+                "Portable config stores signed window position in general settings");
             check(std::holds_alternative<std::nullptr_t>(saved.get("screen").get("brightness").value),
                   "Unused software brightness discarded");
             check(!saved.get("old_module").isObject(),
