@@ -164,23 +164,34 @@ public:
         wc.style = CS_HREDRAW | CS_VREDRAW;
         if (!RegisterClassExW(&wc)) return 3;
 
-        int x = (GetSystemMetrics(SM_CXSCREEN) - 560) / 2;
-        const int initialHeight=std::clamp((gammaUnlocked_?338:388)+56+
-            104*static_cast<int>(model_.monitors().size()),260,std::max(260,GetSystemMetrics(SM_CYSCREEN)-80));
-        int y = (GetSystemMetrics(SM_CYSCREEN) - initialHeight) / 2;
-        if (const auto saved=model_.windowPosition()) {
-            // Physical desktop coordinates may be negative (secondary display
-            // on the left). If that display was disconnected, use the nearest
-            // available work area instead of creating an off-screen window.
-            RECT savedRect{saved->x,saved->y,saved->x+560,saved->y+initialHeight};
-            MONITORINFO screen{sizeof(screen)};
-            if (GetMonitorInfoW(MonitorFromRect(&savedRect,MONITOR_DEFAULTTONEAREST),&screen)) {
-                const auto& area=screen.rcWork;
-                x=std::clamp(static_cast<int>(saved->x),static_cast<int>(area.left),
-                    std::max(static_cast<int>(area.left),static_cast<int>(area.right)-560));
-                y=std::clamp(static_cast<int>(saved->y),static_cast<int>(area.top),
-                    std::max(static_cast<int>(area.top),static_cast<int>(area.bottom)-initialHeight));
-            }
+        int windowWidth=560;
+        int windowHeight=std::clamp((gammaUnlocked_?338:388)+56+
+            128*static_cast<int>(model_.monitors().size()),260,
+            std::max(260,GetSystemMetrics(SM_CYSCREEN)-80));
+        if (const auto savedSize=model_.windowSize()) {
+            windowWidth=static_cast<int>(savedSize->cx);
+            windowHeight=static_cast<int>(savedSize->cy);
+            sizeCustomized_=true; // Do not auto-fit away the saved window height.
+        }
+        const auto savedPosition=model_.windowPosition();
+        int x=savedPosition?static_cast<int>(savedPosition->x):
+            (GetSystemMetrics(SM_CXSCREEN)-windowWidth)/2;
+        int y=savedPosition?static_cast<int>(savedPosition->y):
+            (GetSystemMetrics(SM_CYSCREEN)-windowHeight)/2;
+        // Keep both saved dimensions and saved coordinates inside a current
+        // monitor's work area; left-hand monitors may use negative coordinates.
+        RECT proposed{x,y,x+windowWidth,y+windowHeight};
+        MONITORINFO screen{sizeof(screen)};
+        if (GetMonitorInfoW(MonitorFromRect(&proposed,MONITOR_DEFAULTTONEAREST),&screen)) {
+            const RECT area=screen.rcWork;
+            windowWidth=std::clamp(windowWidth,px(420),
+                std::max(px(420),static_cast<int>(area.right-area.left)));
+            windowHeight=std::clamp(windowHeight,px(260),
+                std::max(px(260),static_cast<int>(area.bottom-area.top)));
+            x=std::clamp(x,static_cast<int>(area.left),
+                std::max(static_cast<int>(area.left),static_cast<int>(area.right)-windowWidth));
+            y=std::clamp(y,static_cast<int>(area.top),
+                std::max(static_cast<int>(area.top),static_cast<int>(area.bottom)-windowHeight));
         }
         // A hidden owner keeps the visible window off the taskbar without
         // changing its regular title bar, resizing, or caption buttons.
@@ -189,7 +200,7 @@ public:
         if (!taskbarOwner_) return 4;
         window_ = CreateWindowExW(0, CLASS_NAME, L"NightLight",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
-            x, y, 560, initialHeight,
+            x, y, windowWidth, windowHeight,
             taskbarOwner_, nullptr, instance_, this);
         if (!window_) return 4;
 
@@ -201,6 +212,8 @@ public:
             ShowWindow(window_, show == SW_SHOWDEFAULT ? SW_SHOWNORMAL : show);
         }
         UpdateWindow(window_);
+        initializingWindow_=false;
+        noteWindowPosition();
         MSG msg{};
         BOOL messageResult=0;
         while ((messageResult=GetMessageW(&msg, nullptr, 0, 0)) > 0) {
@@ -267,6 +280,7 @@ private:
     RECT slider_ = {};
     int scrollOffset_=0, contentHeight_=0;
     bool layingOut_=false;
+    bool sizeCustomized_=false, sizingByUser_=false, initializingWindow_=true;
     unsigned layoutDepth_=0;
     ULONGLONG layoutTime_=0;
     int panelTop_ = 84, panelHeight_ = 142, secondPanelTop_ = 238;
@@ -785,8 +799,9 @@ private:
         const int tabH=px(32),tabGap=px(6);
         const int enableW=textWidth(tr(L"Enabled",L"Ativo"))+px(42);
         const int tabsRight=innerRight-enableW-gap;
-        place(btnRefresh_,innerLeft,panelTop_+px(40),px(32),tabH,TRUE);
-        const int tabStart=innerLeft+px(38);
+        // The refresh glyph belongs in the header's top-right corner.
+        place(btnRefresh_,innerRight-px(32),panelTop_+px(4),px(32),tabH,TRUE);
+        const int tabStart=innerLeft;
         int tabX=tabStart,tabY=panelTop_+px(40),rows=1;
         for (size_t i=0;i<tabs_.size();++i) {
             const auto& m=model_.monitors()[i];
@@ -826,7 +841,8 @@ private:
             static_cast<int>(std::round((hardwareHeight_+px(12))*hardwareProgress));
         // Fit the outer frame to the measured content, preserving the user's
         // width. Keep the window inside its own monitor's usable work area.
-        if (!IsZoomed(window_) && !IsIconic(window_)) {
+        if (!sizeCustomized_ && !sizingByUser_ &&
+            !IsZoomed(window_) && !IsIconic(window_)) {
             RECT outer{}; GetWindowRect(window_,&outer);
             MONITORINFO monitor{}; monitor.cbSize=sizeof(monitor);
             if (GetMonitorInfoW(MonitorFromWindow(window_,MONITOR_DEFAULTTONEAREST),&monitor)) {
@@ -1043,7 +1059,7 @@ private:
         const RECT card2{px(20),secondPanelTop_,client.right-px(20),secondPanelTop_+temperatureHeight_};
         rounded(mem,card2,px(16),p.card,p.border);
         drawSectionIcon(mem,0,px(36),panelTop_+px(11),p.subtle);
-        RECT screensTitle{px(60),panelTop_+px(8),client.right-px(36),panelTop_+px(30)};
+        RECT screensTitle{px(60),panelTop_+px(8),client.right-px(84),panelTop_+px(30)};
         drawTextAt(mem,tr(L"Screens",L"Ecrãs"),screensTitle,boldFont_,p.text);
         drawSectionIcon(mem,1,px(36),secondPanelTop_+px(11),p.subtle);
         RECT label{px(60),secondPanelTop_+px(8),client.right-px(176),secondPanelTop_+px(30)};
@@ -1259,7 +1275,7 @@ private:
                 foreground=p.selectedText;
             }
         }
-        if(id==ID_REFRESH){label.clear();background=p.accent;border=p.accent;foreground=RGB(255,255,255);}
+        if(id==ID_REFRESH){label.clear();background=p.card;border=p.card;foreground=p.accent;}
         auto& interaction=interactions_[item.hwndItem];
         const auto now=uiTime();
         const double hover=interaction.hover.value(now);
@@ -1271,7 +1287,8 @@ private:
         RECT text=rc;
         const int inset=static_cast<int>(std::round(px(1)*push));
         RECT surface=rc; InflateRect(&surface,-inset,-inset);
-        if (id!=ID_ENABLE) rounded(dc,surface,px(8),background,border);
+        // The refresh action is glyph-only, with no coloured button surface.
+        if (id!=ID_ENABLE && id!=ID_REFRESH) rounded(dc,surface,px(8),background,border);
         if(id==ID_REFRESH) {
             Gdiplus::Graphics g(dc);g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
@@ -1408,9 +1425,13 @@ private:
         if (model_.isReady() && window_ && IsWindowVisible(window_) &&
             !IsIconic(window_) && !IsZoomed(window_) && !opening_) {
             RECT current{};
-            if (GetWindowRect(window_,&current) &&
-                model_.rememberWindowPosition(current.left,current.top))
-                SetTimer(window_,TIMER_SAVE_WINDOW,600,nullptr);
+            if (GetWindowRect(window_,&current)) {
+                const bool moved=model_.rememberWindowPosition(current.left,current.top);
+                const bool sized=model_.rememberWindowSize(
+                    current.right-current.left,current.bottom-current.top);
+                if (moved || sized)
+                    SetTimer(window_,TIMER_SAVE_WINDOW,600,nullptr);
+            }
         }
         if (flush) {
             KillTimer(window_,TIMER_SAVE_WINDOW);
@@ -1612,6 +1633,9 @@ private:
             }
             break;
         case WM_SIZE:
+            if (wParam==SIZE_RESTORED && !initializingWindow_ &&
+                !layingOut_ && !opening_ && IsWindowVisible(hwnd))
+                sizeCustomized_=true;
             if (wParam==SIZE_MINIMIZED) {
                 // Fallback for ShowWindow(SW_MINIMIZE), Win+M and external
                 // minimize requests that bypass WM_SYSCOMMAND. Never hide
@@ -1657,9 +1681,11 @@ private:
             paintClient(reinterpret_cast<HDC>(wParam),client); return 0;
         }
         case WM_ENTERSIZEMOVE:
+            sizingByUser_=true;
             finishEntrance();finishReordering(); hardwareReveal_.finish();
             sizeAnchorValid_=false; layout(); return 0;
         case WM_EXITSIZEMOVE:
+            sizingByUser_=false;
             noteWindowPosition(true);
             return 0;
         case WM_WINDOWPOSCHANGED: {
