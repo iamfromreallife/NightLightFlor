@@ -1441,10 +1441,10 @@ private:
             active=index==selected_;
             label=screenButton && editingName_ && mon.device==editingDevice_?L"":mon.displayName();
             if (active) {
-                // Make only the selected tab in Screens slightly darker.
-                // Preserve the existing DDC chip treatment and Windows
-                // high-contrast palette for accessibility.
-                background=(screenButton && !highContrast_)
+                // Give the selected monitor the same darker background in
+                // both Screens and DDC/CI, without affecting unselected chips.
+                // Preserve the system palette in Windows high-contrast mode.
+                background=!highContrast_
                     ? mix(p.selected,RGB(0,0,0),0.07) : p.selected;
                 foreground=p.selectedText;
                 border=p.border;
