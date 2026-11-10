@@ -447,6 +447,20 @@ int main() {
             check(percent.right==(width-sliderWidth)/2+sliderWidth,
                 "Odd window sizes keep percentages exactly aligned with Kelvin labels");
         }
+        // Close (X), minimize-to-tray, and tray-icon toggles use one
+        // nonactivating hide operation. SW_HIDE would request activation of
+        // Explorer and can cause its Start tooltip to appear unexpectedly.
+        check((kHideToTrayFlags&SWP_HIDEWINDOW)!=0 &&
+              (kHideToTrayFlags&SWP_NOACTIVATE)!=0,
+            "Closing to tray hides without activating another window");
+        check((kHideToTrayFlags&SWP_NOMOVE)!=0 &&
+              (kHideToTrayFlags&SWP_NOSIZE)!=0 &&
+              (kHideToTrayFlags&SWP_NOZORDER)!=0 &&
+              (kHideToTrayFlags&SWP_NOOWNERZORDER)!=0,
+            "Hiding preserves saved position, size, z-order and hidden owner");
+        check((kHideToTrayFlags&SWP_SHOWWINDOW)==0 &&
+              (kHideToTrayFlags&SWP_FRAMECHANGED)==0,
+            "The hide path cannot accidentally show or reframe the window");
         // Tray selection must toggle on every physical down, including the
         // second press of a double-click, but not again on its release.
         nightlight::TrayClickFilter tray;
