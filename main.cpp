@@ -30,7 +30,7 @@ using nightlight::Preferences;
 
 namespace {
 constexpr int ID_DDC = 1011, ID_DDC_SLIDER_BASE = 5000, ID_DDC_MONITOR_BASE = 6000;
-constexpr int ID_ENABLE = 1005, ID_RENAME_EDIT = 1006;
+constexpr int ID_RENAME_EDIT = 1006;
 constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012;
 constexpr UINT TIMER_GAMMA = 11;
 constexpr UINT TIMER_STATE = 12;
@@ -261,7 +261,8 @@ private:
     unsigned recoveryAttempt_=0;
     int hardwareTop_ = 0;
     int hardwareHeight_ = 186;
-    HWND btnRefresh_=nullptr, btnEnable_=nullptr, editName_=nullptr;
+    HWND btnRefresh_=nullptr, editName_=nullptr;
+    HWND armedTabSwitch_=nullptr;
     bool editingName_=false;
     std::wstring editingDevice_;
     std::map<std::wstring,int> tabDesiredWidths_;
@@ -338,7 +339,7 @@ private:
                 InvalidateRect(item.first,nullptr,FALSE);
             }
             stopAnimationTimer();
-            if (btnEnable_) layout();
+            if (window_) layout();
         }
     }
     void startAnimationTimer() {
@@ -594,7 +595,7 @@ private:
             CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe Fluent Icons");
         if (fluentIconFont_) fonts_.push_back(fluentIconFont_);
         tabDesiredWidths_.clear();
-        const HWND controls[] = {btnRefresh_,btnEnable_,btnGamma_,editName_};
+        const HWND controls[] = {btnRefresh_,btnGamma_,editName_};
         for (HWND control : controls) {
             if (control) SendMessageW(control, WM_SETFONT,
                 reinterpret_cast<WPARAM>(font_), TRUE);
@@ -619,7 +620,6 @@ private:
         updateMotionPreference();
         ddc_.setWindow(window_);
         btnRefresh_=createButton(ID_REFRESH,L"");
-        btnEnable_ = createButton(ID_ENABLE, L"");
         btnGamma_ = createButton(ID_GAMMA, L"");
         ShowWindow(btnGamma_, gammaUnlocked_ ? SW_HIDE : SW_SHOW);
         gammaTooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
@@ -670,7 +670,7 @@ private:
         DwmSetWindowAttribute(window_,34,&frameBorder,sizeof(frameBorder));
         repaint();
         for (HWND h : tabs_) InvalidateRect(h, nullptr,FALSE);
-        const HWND buttons[] = {btnRefresh_,btnEnable_,btnGamma_};
+        const HWND buttons[] = {btnRefresh_,btnGamma_};
         for (HWND b : buttons) if (b) InvalidateRect(b, nullptr,FALSE);
         for (const auto& row:hardwareRows_) { InvalidateRect(row.nameButton,nullptr,FALSE); InvalidateRect(row.brightness,nullptr,FALSE); InvalidateRect(row.contrast,nullptr,FALSE); }
     }
@@ -682,7 +682,6 @@ private:
             SetWindowTextW(row.contrast,(tr(L"Contrast",L"Contraste")+suffix).c_str());
         }
         SetWindowTextW(btnRefresh_,tr(L"Refresh displays",L"Atualizar ecrãs").c_str());
-        SetWindowTextW(btnEnable_, tr(L"Enabled", L"Ativo").c_str());
         gammaHelp_ = tr(
             L"Requests administrator permission to set HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ICM: GdiICMGammaRange = 256. Applies system-wide; restart Windows afterwards. Enables stronger independent monitor warmth without overlays.",
             L"Pede autorização de administrador para definir HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ICM: GdiICMGammaRange = 256. Aplica-se ao sistema; reinicie o Windows. Permite cores mais quentes por ecrã sem sobreposições.");
@@ -747,7 +746,6 @@ private:
         selected_ = index;
         finishInlineRename(true);
         repaint();
-        InvalidateRect(btnEnable_, nullptr,FALSE);
         for (HWND tab : tabs_) InvalidateRect(tab, nullptr,FALSE);
         for (const auto& row:hardwareRows_) InvalidateRect(row.nameButton,nullptr,FALSE);
     }
@@ -773,13 +771,13 @@ private:
         std::vector<int> tabWidths;
         tabWidths.reserve(model_.monitors().size());
         for (const auto& monitor:model_.monitors())
-            tabWidths.push_back(textWidth(monitor.displayName(),boldFont_)+px(50));
-        const int enableWidth=textWidth(tr(L"Enabled",L"Ativo"))+px(42);
+            tabWidths.push_back(std::max(px(108),
+                textWidth(monitor.displayName(),boldFont_)+px(88)));
         // The exit animation still draws hardware while it is collapsing.
         const bool hardwareShown=ddcVisible_ ||
             (hardwareReveal_.active(uiTime()) && hardwareReveal_.value(uiTime())>0);
         return nightlight::calculateWindowContentMinimum(
-            static_cast<int>(dpi_),clientWidth,enableWidth,tabWidths,
+            static_cast<int>(dpi_),clientWidth,tabWidths,
             hardwareRows_.size(),gammaUnlocked_,hardwareShown);
     }
     SIZE frameThickness() const {
@@ -848,27 +846,27 @@ private:
         panelTop_=px(12);
         const int innerLeft=margin+inset,innerRight=width_-margin-inset;
         const int tabH=px(32),tabGap=px(6);
-        const int enableW=textWidth(tr(L"Enabled",L"Ativo"))+px(42);
-        const int tabsRight=innerRight-enableW-gap;
-        // The refresh glyph belongs in the header's top-right corner.
-        // 8px inset from both the top and right edges of the Screens card.
-        place(btnRefresh_,width_-margin-px(8)-px(32),panelTop_+px(8),px(32),tabH,TRUE);
+        const int tabsRight=innerRight;
+        // Exactly 4px from the top and right edges of the Screens card.
+        place(btnRefresh_,width_-margin-px(4)-px(32),panelTop_+px(4),px(32),tabH,TRUE);
         const int tabStart=innerLeft;
         int tabX=tabStart,tabY=panelTop_+px(40),rows=1;
         for (size_t i=0;i<tabs_.size();++i) {
             const auto& m=model_.monitors()[i];
             auto stored=tabDesiredWidths_.find(m.device);
-            if(stored==tabDesiredWidths_.end())stored=tabDesiredWidths_.emplace(m.device,textWidth(m.displayName(),boldFont_)+px(50)).first;
-            const int tabW=std::max(px(44),std::min({stored->second,px(279),tabsRight-tabStart}));
+            if(stored==tabDesiredWidths_.end())stored=tabDesiredWidths_.emplace(
+                m.device,std::max(px(108),textWidth(m.displayName(),boldFont_)+px(88))).first;
+            const int tabW=stored->second;
             if (tabX>tabStart && tabX+tabW>tabsRight) { tabX=tabStart; tabY+=px(38); ++rows; }
             place(tabs_[i],tabX,tabY,tabW,tabH,TRUE);
             if(editingName_ && m.device==editingDevice_) {
-                // Edit directly in the tab; Enter saves and Escape cancels.
-                place(editName_,tabX,tabY,tabW,tabH,TRUE);
+                // Rename occupies only the text zone: monitor icon and
+                // individual toggle stay visible and usable.
+                place(editName_,tabX+px(32),tabY+px(3),
+                    std::max(px(24),tabW-px(86)),tabH-px(6),TRUE);
             }
             tabX+=tabW+tabGap;
         }
-        place(btnEnable_,std::min(tabX,tabsRight+gap),tabY,enableW,tabH,TRUE);
         panelHeight_=px(46+rows*38);
         secondPanelTop_=panelTop_+panelHeight_+px(12);
         temperatureHeight_=px(gammaUnlocked_?112:162);
@@ -936,8 +934,8 @@ private:
             }
             const int lineH=metrics.tmHeight>0?metrics.tmHeight:px(17);
             const int lineTop=std::max(0,(static_cast<int>(bounds.bottom)-lineH)/2);
-            const RECT textRect{px(8),lineTop,
-                std::max(px(9),static_cast<int>(bounds.right)-px(8)),
+            const RECT textRect{0,lineTop,
+                std::max(px(1),static_cast<int>(bounds.right)),
                 std::min(static_cast<int>(bounds.bottom),lineTop+lineH)};
             SendMessageW(editName_,EM_SETRECT,0,reinterpret_cast<LPARAM>(&textRect));
         }
@@ -949,8 +947,7 @@ private:
                 clip={0,hardwareTop_,width_,hardwareTop_+hardwareVisibleHeight_}; clipped=hardwareProgress<1;
             }
             if (placement.control==editName_ && editingName_) {
-                HRGN roundedEdit=CreateRoundRectRgn(0,0,placement.w+1,placement.h+1,px(16),px(16));
-                if (!SetWindowRgn(placement.control,roundedEdit,FALSE)) DeleteObject(roundedEdit);
+                SetWindowRgn(placement.control,nullptr,FALSE);
             } else if (composedTransition_ && placement.control!=editName_) {
                 HRGN empty=CreateRectRgn(0,0,0,0);
                 if (!SetWindowRgn(placement.control,empty,FALSE)) DeleteObject(empty);
