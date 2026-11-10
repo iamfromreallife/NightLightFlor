@@ -278,7 +278,6 @@ private:
     HFONT font_ = nullptr, boldFont_ = nullptr, headlineFont_ = nullptr, smallFont_ = nullptr;
     // All three section headings share exactly the same HFONT handle.
     HFONT sectionTitleFont_ = nullptr;
-    HFONT fluentIconFont_ = nullptr, fluentContrastFont_ = nullptr;
     std::vector<HFONT> fonts_;
     size_t selected_ = 0;
     UINT dpi_ = 96;
@@ -635,14 +634,6 @@ private:
         // across Screens, Color temperature and DDC/CI Controls.
         sectionTitleFont_ = boldFont_;
         headlineFont_ = create(20, FW_NORMAL);
-        fluentIconFont_=CreateFontW(-px(18),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
-            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe Fluent Icons");
-        if (fluentIconFont_) fonts_.push_back(fluentIconFont_);
-        fluentContrastFont_=CreateFontW(-px(15),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
-            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe Fluent Icons");
-        if (fluentContrastFont_) fonts_.push_back(fluentContrastFont_);
         tabDesiredWidths_.clear();
         const HWND controls[] = {btnRefresh_,btnGamma_,editName_};
         for (HWND control : controls) {
@@ -1293,6 +1284,34 @@ private:
         layout();
         repaint();
     }
+    void drawCenteredDdcGlyph(HDC dc,const wchar_t* glyph,POINT center,
+        int sizeDip,COLORREF foreground) {
+        // Draw the actual *ink* of the glyph about the slider track's
+        // centre, not the font's line box (whose asymmetric bearing made
+        // brightness and contrast appear vertically offset).
+        Gdiplus::FontFamily fluent(L"Segoe Fluent Icons");
+        Gdiplus::FontFamily fallback(L"Segoe MDL2 Assets");
+        const Gdiplus::FontFamily* family=fluent.IsAvailable()?&fluent:&fallback;
+        Gdiplus::GraphicsPath path;
+        const Gdiplus::StringFormat* typography=
+            Gdiplus::StringFormat::GenericTypographic();
+        if (path.AddString(glyph,1,family,Gdiplus::FontStyleRegular,
+                static_cast<Gdiplus::REAL>(px(sizeDip)),Gdiplus::PointF(0,0),
+                typography)!=Gdiplus::Ok) return;
+        Gdiplus::RectF ink{};
+        if (path.GetBounds(&ink)!=Gdiplus::Ok || ink.Width<=0 || ink.Height<=0)
+            return;
+        Gdiplus::Matrix centerInk;
+        centerInk.Translate(-ink.X-ink.Width/2.0f,-ink.Y-ink.Height/2.0f);
+        path.Transform(&centerInk);
+        Gdiplus::Graphics g(dc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        g.TranslateTransform(static_cast<Gdiplus::REAL>(center.x),
+            static_cast<Gdiplus::REAL>(center.y));
+        Gdiplus::SolidBrush brush(drawingColor(foreground));
+        g.FillPath(&brush,&path);
+    }
     void drawHardware(HDC dc) {
         const Palette p=palette();
         RECT card{px(20),hardwareTop_,width_-px(20),hardwareTop_+hardwareHeight_};
@@ -1308,17 +1327,15 @@ private:
         for (size_t i=0;i<hardwareRows_.size();++i) {
             const auto& row=hardwareRows_[i];
             const auto state=ddc_.state(row.device);
-            // Fluent icons adapt to the palette in both light and dark mode.
-            // The smaller contrast font is deliberate; screen reader names
-            // remain on the native brightness/contrast trackbar controls.
+            // Centre the actual visible Fluent glyph with the middle of
+            // each 28-DIP slider, and the percentage in that same row.
+            // Contrast intentionally remains smaller (15 vs. 18 DIP).
             auto drawChannel=[&](HWND slider,int y,bool contrast) {
-                RECT symbol{left+px(2),y,left+px(30),y+px(32)};
-                const HFONT symbolFont=contrast?
-                    (fluentContrastFont_?fluentContrastFont_:font_):
-                    (fluentIconFont_?fluentIconFont_:font_);
-                drawTextAt(dc,contrast?L"\uE7A1":L"\uE706",symbol,
-                    symbolFont,p.subtle,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-                RECT number{right-px(54),y,right-px(4),y+px(32)};
+                const POINT iconCenter=nightlight::ddcSliderIconCenter(
+                    left+px(16),y,px(28));
+                drawCenteredDdcGlyph(dc,contrast?L"\uE7A1":L"\uE706",
+                    iconCenter,contrast?15:18,p.subtle);
+                RECT number{right-px(54),y,right-px(4),y+px(28)};
                 const int percent=GetCapture()==slider?
                     (static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100:
                     model_.hardwarePercent(row.device,contrast);
