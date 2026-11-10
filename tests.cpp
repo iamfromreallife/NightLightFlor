@@ -385,7 +385,10 @@ int main() {
             "Tighter DDC spacing remains DPI aware");
         for (int dpi:{96,120,144,192}) {
             const auto dip=[dpi](int v) { return MulDiv(v,dpi,96); };
-            for (int clientWidth:{200,350,560,1024}) {
+            for (int widthDip:{200,350,560,1024}) {
+                // Pixel widths scale with DPI just as the real 200-DIP
+                // minimum Win32 window width does.
+                const int clientWidth=dip(widthDip);
                 const int contentLeft=dip(kCardOuterMarginDip+kCardInnerInsetDip);
                 const int right=clientWidth-contentLeft;
                 const int sliderLeft=contentLeft+dip(kDdcSliderLeftInsetDip);
