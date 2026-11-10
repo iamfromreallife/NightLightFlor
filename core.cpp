@@ -266,7 +266,7 @@ Model::~Model() { save(); restoreOriginals(); }
 
 bool Model::load() {
     lastError_.clear();
-    loaded_=false; savedStampValid_=false; windowPosition_.reset();
+    loaded_=false; savedStampValid_=false; windowPosition_.reset(); windowSize_.reset();
     std::error_code ec;
     const bool exists=fs::exists(configPath_,ec);
     if (ec) { lastError_=L"Cannot access config.json; your file has not been modified."; return false; }
@@ -310,6 +310,10 @@ bool Model::load() {
         if (x!=INT_MIN && y!=INT_MIN &&
             x>=-1000000 && x<=1000000 && y>=-1000000 && y<=1000000)
             windowPosition_=POINT{x,y};
+        const int width=position.get("width").integer(-1);
+        const int height=position.get("height").integer(-1);
+        if (width>=420 && width<=10000 && height>=260 && height<=10000)
+            windowSize_=SIZE{width,height};
     }
     loaded_ = true;
     // Read legacy profiles once, then retain only settings this app implements.
@@ -343,6 +347,14 @@ bool Model::rememberWindowPosition(int x,int y) {
     windowPosition_=POINT{x,y};
     return true;
 }
+bool Model::rememberWindowSize(int width,int height) {
+    if (!loaded_ || width<420 || width>10000 || height<260 || height>10000)
+        return false;
+    if (windowSize_ && windowSize_->cx==width && windowSize_->cy==height)
+        return false;
+    windowSize_=SIZE{width,height};
+    return true;
+}
 bool Model::save() {
     if (!loaded_) return false;
     root_["general"]["language"] = toUtf8(preferences_.locale);
@@ -364,6 +376,10 @@ bool Model::save() {
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
         clean["general"]["window_position"]["y"]=windowPosition_->y;
+    }
+    if (windowSize_) {
+        clean["general"]["window_position"]["width"]=windowSize_->cx;
+        clean["general"]["window_position"]["height"]=windowSize_->cy;
     }
     auto profiles=portable::Json::object();
     if(auto values=std::get_if<portable::Json::Object>(&root_.get("screen").get("monitor_profiles").value))
