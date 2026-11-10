@@ -94,6 +94,56 @@ int main() {
             "DDC writes must retain VCP fallback and honor a known hardware range");
         check(!writeDdcValue(false,0,0,45,[](DWORD){return false;},[](DWORD){return false;}),
             "DDC must report failed writes rather than claim success");
+        check(kDdcReadbackIntervalMs==3000 &&
+              kDdcPostWriteGraceMs>=1000 && kDdcPostWriteGraceMs<=3000,
+            "Read actual monitor levels every three seconds, with settling grace after writes");
+        {
+            DdcValue saved;
+            saved.percent=77; saved.hasValue=true; saved.managed=true;
+            saved.generation=9; saved.protectUntilTickMs=1234;
+            DdcValue hardware;
+            hardware.supported=true; hardware.readable=true;
+            hardware.hasValue=true; hardware.percent=26;
+            hardware.backend=DdcBackend::DdcCi;
+            applyDdcObservation(saved,hardware,false);
+            check(saved.percent==26 && saved.hasValue && saved.managed &&
+                  saved.readable && saved.supported &&
+                  saved.backend==DdcBackend::DdcCi,
+                "A valid physical brightness/contrast reading overrides old saved values");
+            check(saved.generation==9 && saved.protectUntilTickMs==1234,
+                "Hardware reads never alter local write ordering or the settling deadline");
+            hardware.percent=68;
+            applyDdcObservation(saved,hardware,false);
+            check(saved.percent==68,
+                "An external monitor OSD adjustment updates the live slider");
+            saved.pending=true; saved.percent=91; saved.generation=10;
+            hardware.percent=15;
+            applyDdcObservation(saved,hardware,true);
+            check(saved.percent==91 && saved.pending && saved.generation==10,
+                "A queued or active user adjustment is never overwritten by stale DDC data");
+            saved.pending=false;
+            applyDdcObservation(saved,hardware,true);
+            check(saved.percent==91,
+                "A display still settling after a local write does not move the slider back");
+            applyDdcObservation(saved,hardware,false);
+            check(saved.percent==15,
+                "Hardware readback resumes after the local write grace period");
+            hardware.readable=false; hardware.hasValue=false;
+            hardware.supported=true;
+            applyDdcObservation(saved,hardware,false);
+            check(saved.percent==15 && saved.hasValue && saved.managed &&
+                  saved.supported && !saved.readable,
+                "Unreadable DDC hardware keeps the last known valid value as fallback");
+            hardware.supported=false;
+            applyDdcObservation(saved,hardware,false);
+            check(saved.percent==15 && !saved.supported,
+                "Unsupported monitors are not assigned fictional readings");
+            hardware.supported=true; hardware.readable=true;
+            hardware.hasValue=true; hardware.percent=120;
+            applyDdcObservation(saved,hardware,false);
+            check(saved.percent==100,
+                "Out-of-range monitor percentages are safely clamped");
+        }
         check(normalizeMonitorInstance(L"\\\\?\\DISPLAY#AUO1234#4&ABC&0&UID100#{GUID}")==
               normalizeMonitorInstance(L"DISPLAY\\AUO1234\\4&ABC&0&UID100_0"),
             "WMI panel identity must match its Windows display interface");
