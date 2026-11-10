@@ -293,11 +293,11 @@ int main() {
                 "Window continues rising while alpha increases");
         }
         const std::vector<int> tabs{260,250,270};
-        check(kCardOuterMarginDip==12 &&
+        check(kCardOuterMarginDip==16 &&
               kCardsTopMarginDip==kCardOuterMarginDip &&
               kCardsGapDip==8 &&
               kCardInnerInsetDip==16,
-            "Outer top, side and bottom margins are all 12 DIP; card gaps stay 8 DIP");
+            "Outer top, side and bottom margins are all 16 DIP; card gaps stay 8 DIP");
         check(kCardCornerRadiusDip==8 &&
               kCardCornerRadiusDip*2==16,
             "All section cards use an explicit 8 DIP radius (16 DIP arc diameter)");
@@ -309,7 +309,7 @@ int main() {
             kCardsTopMarginDip+(46+38)+kCardsGapDip+
             kTemperatureUnlockedHeightDip+kCardsGapDip+
             (kDdcSectionBaseDip+kDdcRowStepDip)+kCardOuterMarginDip,
-            "Visible three-card height has 12 DIP top/bottom and 8 DIP between sections");
+            "Visible three-card height has 16 DIP top/bottom and 8 DIP between sections");
         check(singleHidden.clientHeight==
             kCardsTopMarginDip+(46+38)+kCardsGapDip+
             kTemperatureUnlockedHeightDip+kCardOuterMarginDip &&
@@ -408,17 +408,17 @@ int main() {
             "Narrow clients wrap monitor tabs but do not force a wider window");
         check(tiny.clientHeight>narrow.clientHeight,
             "Compact temperature layout receives additional vertical clearance");
-        check(temperatureSliderWidth(96,200)==136 &&
-              temperatureSliderWidth(96,800)==736,
-            "Temperature slider tracks the symmetric 12 DIP outside margins");
+        check(temperatureSliderWidth(96,200)==128 &&
+              temperatureSliderWidth(96,800)==728,
+            "Temperature slider tracks the symmetric 16 DIP outside margins");
         // Reserve the width of the longest percentage once. This avoids
         // changing the trackbar's geometry when 99 % becomes 100 %.
-        check(ddcSliderWidth(96,200,30)==86 &&
-              ddcSliderWidth(96,800,30)==686,
+        check(ddcSliderWidth(96,200,30)==78 &&
+              ddcSliderWidth(96,800,30)==678,
             "DDC trackbars retain right-aligned percentages inside the new margins");
-        check(temperatureSliderWidth(144,300)==204 &&
-              ddcSliderWidth(144,300,45)==129,
-            "DDC alignment and 12 DIP symmetric outside margins scale with DPI");
+        check(temperatureSliderWidth(144,300)==192 &&
+              ddcSliderWidth(144,300,45)==117,
+            "DDC alignment and 16 DIP symmetric outside margins scale with DPI");
         for (int dpi:{96,120,144,192}) {
             const auto dip=[dpi](int v) { return MulDiv(v,dpi,96); };
             for (int widthDip:{200,350,560,1024}) {
