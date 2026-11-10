@@ -85,8 +85,11 @@ inline constexpr UINT kHideToTrayFlags =
 
 // The entrance uses one shared 150-ms motion for both opacity and the
 // upward slide. A small initial alpha makes the first frame perceptible.
-// Four-second guard to prevent wake-up from the click or keyboard input.
+// Temporarily suppress input after display sleep. The preparation grace
+// also bounds input suppression if Windows' monitor command stalls.
 inline constexpr unsigned kScreenOffInputGuardMs = 4000;
+inline constexpr unsigned kScreenOffPreparationGraceMs = 3000;
+inline constexpr unsigned kScreenOffResleepDelayMs = 80;
 inline constexpr unsigned kWindowOpeningDurationMs = 150;
 inline constexpr int kWindowOpeningSlideDip = 12;
 inline constexpr unsigned char kWindowOpeningInitialAlpha = 24;
