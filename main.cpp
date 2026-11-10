@@ -36,6 +36,7 @@ constexpr UINT TIMER_GAMMA = 11;
 constexpr UINT TIMER_STATE = 12;
 constexpr UINT TIMER_SAVE_DDC = 13;
 constexpr UINT TIMER_ANIMATION = 16;
+constexpr UINT TIMER_SAVE_WINDOW = 17;
 constexpr UINT TIMER_VERIFY_COLOR = 14, TIMER_RESTORE_DDC = 15;
 // The interactive-session notification also covers display sleep without a
 // topology change (WM_DISPLAYCHANGE alone does not).
@@ -163,10 +164,24 @@ public:
         wc.style = CS_HREDRAW | CS_VREDRAW;
         if (!RegisterClassExW(&wc)) return 3;
 
-        const int x = (GetSystemMetrics(SM_CXSCREEN) - 560) / 2;
+        int x = (GetSystemMetrics(SM_CXSCREEN) - 560) / 2;
         const int initialHeight=std::clamp((gammaUnlocked_?338:388)+56+
             104*static_cast<int>(model_.monitors().size()),260,std::max(260,GetSystemMetrics(SM_CYSCREEN)-80));
-        const int y = (GetSystemMetrics(SM_CYSCREEN) - initialHeight) / 2;
+        int y = (GetSystemMetrics(SM_CYSCREEN) - initialHeight) / 2;
+        if (const auto saved=model_.windowPosition()) {
+            // Physical desktop coordinates may be negative (secondary display
+            // on the left). If that display was disconnected, use the nearest
+            // available work area instead of creating an off-screen window.
+            RECT savedRect{saved->x,saved->y,saved->x+560,saved->y+initialHeight};
+            MONITORINFO screen{sizeof(screen)};
+            if (GetMonitorInfoW(MonitorFromRect(&savedRect,MONITOR_DEFAULTTONEAREST),&screen)) {
+                const auto& area=screen.rcWork;
+                x=std::clamp(saved->x,static_cast<int>(area.left),
+                    std::max(static_cast<int>(area.left),static_cast<int>(area.right)-560));
+                y=std::clamp(saved->y,static_cast<int>(area.top),
+                    std::max(static_cast<int>(area.top),static_cast<int>(area.bottom)-initialHeight));
+            }
+        }
         // A hidden owner keeps the visible window off the taskbar without
         // changing its regular title bar, resizing, or caption buttons.
         taskbarOwner_ = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"NightLight Owner",
@@ -174,7 +189,7 @@ public:
         if (!taskbarOwner_) return 4;
         window_ = CreateWindowExW(0, CLASS_NAME, L"NightLight",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
-            std::max(0, x), std::max(0, y), 560, initialHeight,
+            x, y, 560, initialHeight,
             taskbarOwner_, nullptr, instance_, this);
         if (!window_) return 4;
 
@@ -1387,6 +1402,21 @@ private:
         updateLanguage();
         updateTheme();
     }
+    void noteWindowPosition(bool flush=false) {
+        // Do not capture startup, minimized, maximized or entrance-animation
+        // coordinates, which are not the user's chosen normal window location.
+        if (model_.isReady() && window_ && IsWindowVisible(window_) &&
+            !IsIconic(window_) && !IsZoomed(window_) && !opening_) {
+            RECT current{};
+            if (GetWindowRect(window_,&current) &&
+                model_.rememberWindowPosition(current.left,current.top))
+                SetTimer(window_,TIMER_SAVE_WINDOW,600,nullptr);
+        }
+        if (flush) {
+            KillTimer(window_,TIMER_SAVE_WINDOW);
+            model_.save();
+        }
+    }
     void openWindow() {
         syncGammaButton();
         updateMotionPreference();
@@ -1415,7 +1445,10 @@ private:
     void hideWindowToTray() {
         // Hide rather than minimize: this keeps the window out of the taskbar
         // without destroying it or interrupting per-monitor adjustments.
-        if (trayReady_ && !shuttingDown_) ShowWindow(window_,SW_HIDE);
+        if (trayReady_ && !shuttingDown_) {
+            noteWindowPosition(true);
+            ShowWindow(window_,SW_HIDE);
+        }
     }
     void toggleTrayWindow() {
         // Minimized windows are not displayed, so a click should restore them.
@@ -1596,7 +1629,7 @@ private:
             return 0;
         case WM_CLOSE:
             if (trayReady_ && !shuttingDown_) hideWindowToTray();
-            else DestroyWindow(hwnd);
+            else { noteWindowPosition(true); DestroyWindow(hwnd); }
             return 0;
         case WM_GETMINMAXINFO: {
             auto* sizes=reinterpret_cast<MINMAXINFO*>(lParam);
@@ -1626,6 +1659,16 @@ private:
         case WM_ENTERSIZEMOVE:
             finishEntrance();finishReordering(); hardwareReveal_.finish();
             sizeAnchorValid_=false; layout(); return 0;
+        case WM_EXITSIZEMOVE:
+            noteWindowPosition(true);
+            return 0;
+        case WM_WINDOWPOSCHANGED: {
+            const auto* position=reinterpret_cast<const WINDOWPOS*>(lParam);
+            if (position && !(position->flags & SWP_NOMOVE))
+                noteWindowPosition();
+            // Default processing must still generate WM_MOVE and WM_SIZE.
+            break;
+        }
         case WM_SHOWWINDOW:
             if (!wParam) {
                 finishEntrance();finishReordering(); hardwareReveal_.finish();
@@ -1814,6 +1857,7 @@ private:
                 return 0;
             }
             if (wParam==TIMER_SAVE_DDC) { KillTimer(hwnd,TIMER_SAVE_DDC); model_.save(); return 0; }
+            if (wParam==TIMER_SAVE_WINDOW) { KillTimer(hwnd,TIMER_SAVE_WINDOW); model_.save(); return 0; }
             if (wParam==TIMER_STATE) { syncGammaButton(); return 0; }
             if (wParam==TIMER_GAMMA && gammaHelper_ && WaitForSingleObject(gammaHelper_,0)==WAIT_OBJECT_0) {
                 DWORD code=1; GetExitCodeProcess(gammaHelper_, &code);
@@ -1843,14 +1887,16 @@ private:
             }
             return 0;
         case WM_QUERYENDSESSION:
-            commitDrag(); model_.save(); return TRUE;
+            noteWindowPosition(true); commitDrag(); model_.save(); return TRUE;
         case WM_ENDSESSION:
             if (wParam) {
+                noteWindowPosition(true);
                 model_.save();
                 model_.restoreOriginals();
             }
             return 0;
         case WM_DESTROY:
+            noteWindowPosition(true);
             shuttingDown_=true;
             endHardwareDrag();finishScreenDrag();
             finishEntrance(); stopAnimationTimer();
@@ -1859,6 +1905,7 @@ private:
             if (displayPowerNotification_) { UnregisterPowerSettingNotification(displayPowerNotification_); displayPowerNotification_=nullptr; }
             KillTimer(hwnd,TIMER_GAMMA);
             KillTimer(hwnd,TIMER_SAVE_DDC);
+            KillTimer(hwnd,TIMER_SAVE_WINDOW);
             commitDrag();
                 model_.save();
             model_.restoreOriginals();
