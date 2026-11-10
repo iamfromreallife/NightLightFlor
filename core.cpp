@@ -292,6 +292,46 @@ TemperatureScaleLabelRects temperatureScaleLabelRects(
     };
 }
 
+RECT temperatureValueRect(const RECT& sliderTrack,int desiredWidth,int top,int height) {
+    const int right=sliderTrack.right;
+    return RECT{std::max(static_cast<int>(sliderTrack.left),
+        right-std::max(1,desiredWidth)),top,right,top+height};
+}
+bool TrayClickFilter::shouldToggle(TrayClickEvent event,unsigned long timestamp) {
+    switch (event) {
+    case TrayClickEvent::MouseDown:
+    case TrayClickEvent::MouseDoubleClick:
+        // Windows reports the second physical press as WM_LBUTTONDBLCLK,
+        // not another WM_LBUTTONDOWN. Both presses must toggle immediately.
+        mousePressPending=true;
+        recentRelease=false;
+        return true;
+    case TrayClickEvent::MouseUp:
+        releaseTime=timestamp;
+        recentRelease=true;
+        if (mousePressPending) {
+            mousePressPending=false;
+            return false; // Release of the press we already processed.
+        }
+        return true; // Legacy shells that report only mouse-up.
+    case TrayClickEvent::Select:
+        if (mousePressPending) {
+            // Some shells send NIN_SELECT before the corresponding mouse-up.
+            // Do not consume the pending release.
+            return false;
+        }
+        if (recentRelease && (timestamp-releaseTime)<=150UL) {
+            recentRelease=false; // The same mouse-up produced NIN_SELECT.
+            return false;
+        }
+        recentRelease=false;
+        return true; // Shells that report only NIN_SELECT.
+    case TrayClickEvent::KeySelect:
+        return true;
+    }
+    return false;
+}
+
 POINT ddcSliderIconCenter(int iconColumnCenterX,int sliderTop,int sliderHeight) {
     return POINT{iconColumnCenterX,sliderTop+sliderHeight/2};
 }
