@@ -29,7 +29,7 @@ using nightlight::Monitor;
 using nightlight::Preferences;
 
 namespace {
-constexpr int ID_DDC = 1011, ID_DDC_SLIDER_BASE = 5000;
+constexpr int ID_DDC = 1011, ID_DDC_SLIDER_BASE = 5000, ID_DDC_MONITOR_BASE = 6000;
 constexpr int ID_ENABLE = 1005, ID_RENAME_EDIT = 1006;
 constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012;
 constexpr UINT TIMER_GAMMA = 11;
@@ -212,7 +212,7 @@ private:
     HWND taskbarOwner_ = nullptr;
     struct HardwareRow {
         std::wstring device;
-        HWND brightness = nullptr, contrast = nullptr;
+        HWND nameButton = nullptr, brightness = nullptr, contrast = nullptr;
         int top = 0;
         nightlight::Motion topMotion;
     };
@@ -356,6 +356,7 @@ private:
         move(tabs_);move(hardwareRows_);
         for(size_t i=0;i<tabs_.size();++i) {
             SetWindowLongPtrW(tabs_[i],GWLP_ID,ID_MONITOR_BASE+i);
+            SetWindowLongPtrW(hardwareRows_[i].nameButton,GWLP_ID,ID_DDC_MONITOR_BASE+i);
             SetWindowLongPtrW(hardwareRows_[i].brightness,GWLP_ID,ID_DDC_SLIDER_BASE+i*2);
             SetWindowLongPtrW(hardwareRows_[i].contrast,GWLP_ID,ID_DDC_SLIDER_BASE+i*2+1);
             if(monitors[i].device==selected)selected_=i;
@@ -562,8 +563,11 @@ private:
             if (control) SendMessageW(control, WM_SETFONT,
                 reinterpret_cast<WPARAM>(font_), TRUE);
         }
-        for (auto& row:hardwareRows_) for (HWND slider:{row.brightness,row.contrast})
-            SendMessageW(slider,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
+        for (auto& row:hardwareRows_) {
+            SendMessageW(row.nameButton,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
+            for (HWND slider:{row.brightness,row.contrast})
+                SendMessageW(slider,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
+        }
         for (HWND tab : tabs_) SendMessageW(tab, WM_SETFONT,
             reinterpret_cast<WPARAM>(font_), TRUE);
     }
@@ -632,7 +636,7 @@ private:
         for (HWND h : tabs_) InvalidateRect(h, nullptr,FALSE);
         const HWND buttons[] = {btnRefresh_,btnEnable_,btnGamma_};
         for (HWND b : buttons) if (b) InvalidateRect(b, nullptr,FALSE);
-        for (const auto& row:hardwareRows_) { InvalidateRect(row.brightness,nullptr,FALSE); InvalidateRect(row.contrast,nullptr,FALSE); }
+        for (const auto& row:hardwareRows_) { InvalidateRect(row.nameButton,nullptr,FALSE); InvalidateRect(row.brightness,nullptr,FALSE); InvalidateRect(row.contrast,nullptr,FALSE); }
     }
     void updateLanguage() {
         for (size_t i=0;i<hardwareRows_.size();++i) {
@@ -714,6 +718,7 @@ private:
         repaint();
         InvalidateRect(btnEnable_, nullptr,FALSE);
         for (HWND tab : tabs_) InvalidateRect(tab, nullptr,FALSE);
+        for (const auto& row:hardwareRows_) InvalidateRect(row.nameButton,nullptr,FALSE);
     }
     void syncGammaButton() {
         const bool unlocked = nightlight::gammaRangeUnlocked();
@@ -745,7 +750,7 @@ private:
         std::vector<Placement> placements;
         auto place=[&](HWND control,int x,int y,int w,int h,BOOL) {
             if(!control)return;
-            if(!hardwareRow(control)) {
+            if(!hardwareRow(control) && !hardwareNameButton(control)) {
                 auto& motion=reorderPositions_[control];
                 motion.x.to(x,layoutTime_,180,reorderInProgress_ && animations_ && IsWindowVisible(window_));
                 motion.y.to(y,layoutTime_,180,reorderInProgress_ && animations_ && IsWindowVisible(window_));
@@ -787,13 +792,16 @@ private:
         const int sliderLeft=(width_-sliderW)/2;
         slider_={sliderLeft,secondPanelTop_+px(62),sliderLeft+sliderW,secondPanelTop_+px(66)};
         hardwareTop_=secondPanelTop_+temperatureHeight_+px(12);
-        hardwareHeight_=px(hardwareRows_.empty()?72:44+104*static_cast<int>(hardwareRows_.size()));
+        hardwareHeight_=px(hardwareRows_.empty()?72:44+128*static_cast<int>(hardwareRows_.size()));
         for (size_t i=0;i<hardwareRows_.size();++i) {
             auto& row=hardwareRows_[i];
-            row.topMotion.to(hardwareTop_+px(36+104*static_cast<int>(i)),layoutTime_,180,reorderInProgress_ && animations_ && IsWindowVisible(window_));
+            row.topMotion.to(hardwareTop_+px(36+128*static_cast<int>(i)),layoutTime_,180,reorderInProgress_ && animations_ && IsWindowVisible(window_));
             row.top=static_cast<int>(std::round(row.topMotion.value(layoutTime_)));
-            place(row.brightness,innerLeft+px(92),row.top+px(20),innerRight-innerLeft-px(144),px(32),TRUE);
-            place(row.contrast,innerLeft+px(92),row.top+px(52),innerRight-innerLeft-px(144),px(32),TRUE);
+            const auto& name=model_.monitors()[i].displayName();
+            const int nameWidth=std::max(px(44),std::min({textWidth(name,boldFont_)+px(50),px(279),innerRight-innerLeft}));
+            place(row.nameButton,innerLeft,row.top,nameWidth,tabH,TRUE);
+            place(row.brightness,innerLeft+px(92),row.top+px(38),innerRight-innerLeft-px(144),px(32),TRUE);
+            place(row.contrast,innerLeft+px(92),row.top+px(70),innerRight-innerLeft-px(144),px(32),TRUE);
         }
         hardwareVisibleHeight_=static_cast<int>(std::round(hardwareHeight_*hardwareProgress));
         contentHeight_=secondPanelTop_+temperatureHeight_+margin+
@@ -836,7 +844,7 @@ private:
         auto visibility=[&](HWND control) -> UINT {
             if (control==btnGamma_) return gammaUnlocked_?SWP_HIDEWINDOW:SWP_SHOWWINDOW;
             if(control==editName_)return editingName_?SWP_SHOWWINDOW:SWP_HIDEWINDOW;
-            if (hardwareRow(control)) return hardwareProgress>0?SWP_SHOWWINDOW:SWP_HIDEWINDOW;
+            if (hardwareRow(control) || hardwareNameButton(control)) return hardwareProgress>0?SWP_SHOWWINDOW:SWP_HIDEWINDOW;
             return 0;
         };
         HDWP batch=BeginDeferWindowPos(static_cast<int>(placements.size()));
@@ -869,7 +877,7 @@ private:
         // into a neighboring card while its section is still being revealed.
         for (const auto& placement:placements) {
             RECT clip{}; bool clipped=false;
-            if (hardwareRow(placement.control)) {
+            if (hardwareRow(placement.control) || hardwareNameButton(placement.control)) {
                 clip={0,hardwareTop_-scrollOffset_,width_,hardwareTop_+hardwareVisibleHeight_-scrollOffset_}; clipped=hardwareProgress<1;
             }
             if (placement.control==editName_ && editingName_) {
@@ -1047,6 +1055,10 @@ private:
         paintClient(dc,client);
         EndPaint(window_,&ps);
     }
+    bool hardwareNameButton(HWND control) const {
+        for (const auto& row:hardwareRows_) if (row.nameButton==control) return true;
+        return false;
+    }
     HardwareRow* hardwareRow(HWND slider) {
         for (auto& row:hardwareRows_) if (row.brightness==slider || row.contrast==slider) return &row;
         return nullptr;
@@ -1056,10 +1068,12 @@ private:
         bool same=hardwareRows_.size()==monitors.size();
         for (size_t i=0;same && i<monitors.size();++i) same=hardwareRows_[i].device==monitors[i].device;
         if (same) return;
-        for (auto& row:hardwareRows_) { DestroyWindow(row.brightness); DestroyWindow(row.contrast); }
+        for (auto& row:hardwareRows_) { DestroyWindow(row.nameButton); DestroyWindow(row.brightness); DestroyWindow(row.contrast); }
         hardwareRows_.clear();
         for (size_t i=0;i<monitors.size();++i) {
             HardwareRow row; row.device=monitors[i].device;
+            row.nameButton=createButton(ID_DDC_MONITOR_BASE+static_cast<int>(i),L"");
+            if (font_) SendMessageW(row.nameButton,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
             auto create=[&](int offset,const std::wstring& name) {
                 HWND slider=CreateWindowExW(0,TRACKBAR_CLASSW,name.c_str(),WS_CHILD|WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,
                     0,0,1,1,window_,reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DDC_SLIDER_BASE+i*2+offset)),instance_,nullptr);
@@ -1138,11 +1152,8 @@ private:
         }
         for (size_t i=0;i<hardwareRows_.size();++i) {
             const auto& row=hardwareRows_[i];
-            const auto& monitor=model_.monitors()[i];
             const auto state=ddc_.state(row.device);
-            drawSectionIcon(dc,0,px(36),row.top+px(2),p.subtle);
-            RECT name{px(60),row.top,width_-px(36),row.top+px(20)};
-            drawTextAt(dc,monitor.displayName(),name,boldFont_,p.text);
+            // The name/icon chip is now a child button using the Screens tab painter.
             auto label=[&](const std::wstring& text,HWND slider,int y,bool contrast) {
                 RECT caption{px(36),y,px(120),y+px(32)};
                 drawTextAt(dc,text,caption,font_,p.text);
@@ -1151,15 +1162,15 @@ private:
                     model_.hardwarePercent(row.device,contrast);
                 drawTextAt(dc,formatNumber(percent)+L" %",number,smallFont_,p.subtle,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
             };
-            label(tr(L"Brightness",L"Brilho"),row.brightness,row.top+px(20),false);
-            label(tr(L"Contrast",L"Contraste"),row.contrast,row.top+px(52),true);
+            label(tr(L"Brightness",L"Brilho"),row.brightness,row.top+px(38),false);
+            label(tr(L"Contrast",L"Contraste"),row.contrast,row.top+px(70),true);
             std::wstring message;
             if (state.brightness.failed || state.contrast.failed)
                 message=tr(L"The monitor did not accept the adjustment. Try again.",L"O monitor não aceitou o ajuste. Tente novamente.");
-            RECT status{px(36),row.top+px(84),width_-px(36),row.top+px(100)};
+            RECT status{px(36),row.top+px(106),width_-px(36),row.top+px(122)};
             drawTextAt(dc,message,status,smallFont_,p.muted);
             if (i+1<hardwareRows_.size()) {
-                RECT divider{px(36),row.top+px(103),width_-px(36),row.top+px(104)};
+                RECT divider{px(36),row.top+px(127),width_-px(36),row.top+px(128)};
                 fill(dc,divider,p.border);
             }
         }
@@ -1206,11 +1217,16 @@ private:
         int id=static_cast<int>(item.CtlID);
         fill(dc,rc,p.card);
         std::wstring label;
-        if (id>=ID_MONITOR_BASE && id<ID_MONITOR_BASE+static_cast<int>(model_.monitors().size())) {
-            const size_t index=static_cast<size_t>(id-ID_MONITOR_BASE);
+        const bool screenButton=id>=ID_MONITOR_BASE &&
+            id<ID_MONITOR_BASE+static_cast<int>(model_.monitors().size());
+        const bool ddcButton=id>=ID_DDC_MONITOR_BASE &&
+            id<ID_DDC_MONITOR_BASE+static_cast<int>(model_.monitors().size());
+        const bool monitorButton=screenButton || ddcButton;
+        if (monitorButton) {
+            const size_t index=static_cast<size_t>(screenButton?id-ID_MONITOR_BASE:id-ID_DDC_MONITOR_BASE);
             const auto& mon=model_.monitors()[index];
             active=index==selected_;
-            label=editingName_ && mon.device==editingDevice_?L"":mon.displayName();
+            label=screenButton && editingName_ && mon.device==editingDevice_?L"":mon.displayName();
             if (active) { background=p.selected; foreground=p.selectedText; border=p.border; }
         } else if (id==ID_ENABLE) {
             active=hasMonitor() && selectedMonitor()->enabled;
@@ -1235,7 +1251,6 @@ private:
             border=mix(p.border,p.accent,0.55);
         if (item.itemState&ODS_DISABLED) foreground=p.muted;
         RECT text=rc;
-        const bool monitorButton=id>=ID_MONITOR_BASE && id<ID_MONITOR_BASE+static_cast<int>(model_.monitors().size());
         const int inset=static_cast<int>(std::round(px(1)*push));
         RECT surface=rc; InflateRect(&surface,-inset,-inset);
         if (id!=ID_ENABLE) rounded(dc,surface,px(8),background,border);
@@ -1262,7 +1277,7 @@ private:
             Gdiplus::SolidBrush tip(drawingColor(foreground));
             g.FillPolygon(&tip,arrow,3);
         }
-        if (monitorButton && !(editingName_ && model_.monitors()[id-ID_MONITOR_BASE].device==editingDevice_)) {
+        if (monitorButton && !(screenButton && editingName_ && model_.monitors()[id-ID_MONITOR_BASE].device==editingDevice_)) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
             text.left+=px(32);text.right-=px(8);
         }
@@ -1511,6 +1526,9 @@ private:
             else if (id>=ID_MONITOR_BASE &&
                      id<ID_MONITOR_BASE+static_cast<int>(tabs_.size())) {
                 select(static_cast<size_t>(id-ID_MONITOR_BASE));
+            } else if (id>=ID_DDC_MONITOR_BASE &&
+                       id<ID_DDC_MONITOR_BASE+static_cast<int>(hardwareRows_.size())) {
+                select(static_cast<size_t>(id-ID_DDC_MONITOR_BASE));
             }
         }
     }
