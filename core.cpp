@@ -258,18 +258,16 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
     const int tabGap=px(6);
     const int tabStart=px(36);
-    int widestTab=px(108);
-    for (int desired:tabDesiredWidths)
-        widestTab=std::max(widestTab,desired);
-    // Screen tabs need their full name and switch. DDC controls stack
-    // vertically, so their monitor count does not increase minimum width.
-    const int tabMinimum=px(72)+widestTab;
-    const int minimumWidth=std::max(px(420),tabMinimum);
+    // Width is user-controlled down to an outer-frame minimum of 200 DIP.
+    // Never enlarge the window to fit labels: instead ellipsize monitor tabs
+    // when they cannot fit within a narrow client area.
+    const int minimumWidth=px(1);
     const int width=std::max(clientWidth,minimumWidth);
     const int tabsRight=width-px(36);
+    const int availableTabWidth=std::max(px(1),tabsRight-tabStart);
     int x=tabStart, rows=1;
     for (int desired:tabDesiredWidths) {
-        const int tabWidth=std::max(px(108),desired);
+        const int tabWidth=std::min(std::max(px(108),desired),availableTabWidth);
         if (x>tabStart && x+tabWidth>tabsRight) { x=tabStart; ++rows; }
         x+=tabWidth+tabGap;
     }
