@@ -35,9 +35,14 @@ struct Monitor {
 
 struct Preferences {
     std::wstring locale = L"en-US";
-    std::wstring theme = L"dark";
+    std::wstring theme = L"system"; // system, light, dark
     std::wstring startup = L"normal";
 };
+
+// System app mode is AppsUseLightTheme (not the separate system/taskbar mode).
+// Read this only on startup and Windows setting-change notifications.
+bool systemAppsUseDarkTheme();
+bool effectiveDarkTheme(const std::wstring& preference,bool systemDark);
 
 std::wstring fromUtf8(const std::string& input);
 std::string toUtf8(const std::wstring& input);
@@ -57,16 +62,16 @@ RECT sliderHitRect(RECT visualTrack, int horizontalPadding, int verticalPadding)
 // DIP-based DDC/CI spacing shared by layout and minimum-size calculations.
 // Each row fits a 32-DIP monitor button and two 28-DIP sliders; errors
 // appear beside the name instead of reserving a blank footer.
-inline constexpr int kDdcFirstRowTopDip = 36; // +2 DIP under section heading
-inline constexpr int kDdcRowStepDip = 100;
-inline constexpr int kDdcSectionBaseDip = 34; // +2 DIP to preserve bottom padding
+inline constexpr int kDdcFirstRowTopDip = 46; // +10 DIP below title, before first monitor
+inline constexpr int kDdcRowStepDip = 110;     // +10 DIP before each later monitor
+inline constexpr int kDdcSectionBaseDip = 34; // Retain bottom padding of 4 DIP
 
 // Spacing around the three cards (DIPs, scaled with Windows DPI).
-// The outer edges (top/left/right/bottom) are 16 DIP; gaps between cards
-// remain 8 DIP. Internal content padding stays 16 DIP.
+// The outer edges (top/left/right/bottom) remain 16 DIP; gaps between
+// cards are now also 16 DIP (+8). Internal content padding stays 16 DIP.
 inline constexpr int kCardOuterMarginDip = 16;
 inline constexpr int kCardsTopMarginDip = kCardOuterMarginDip;
-inline constexpr int kCardsGapDip = 8;
+inline constexpr int kCardsGapDip = 16;
 inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
