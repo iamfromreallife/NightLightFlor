@@ -338,10 +338,15 @@ POINT ddcSliderIconCenter(int iconColumnCenterX,int sliderTop,int sliderHeight) 
 
 int ddcSliderWidth(int dpi,int clientWidth) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
-    // Preserve the DDC slider's in-card padding on both sides while
-    // reclaiming the same four pixels at each outer edge.
-    return std::max(px(16),clientWidth-
-        px(2*kCardOuterMarginDip+2*kCardInnerInsetDip+84));
+    // Left: outer + card padding + 24 DIP from the content edge.
+    // Right: reserve a 48-DIP, left-aligned percentage field.
+    // The native trackbar's channel is inset within this rectangle, leaving
+    // clearance between its thumb and the percentage characters.
+    const int innerLeft=px(kCardOuterMarginDip+kCardInnerInsetDip);
+    const int sliderLeft=innerLeft+px(kDdcSliderLeftInsetDip);
+    const int right=clientWidth-innerLeft;
+    const int percentLeft=right-px(kDdcPercentageBlockDip);
+    return std::max(px(16),percentLeft-sliderLeft);
 }
 
 WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
