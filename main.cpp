@@ -1179,11 +1179,15 @@ private:
         drawSlider(mem);
         const int footerY=secondPanelTop_+
             px(nightlight::kTemperatureScaleTopDip)+temperatureShift;
-        const int midpoint=client.right/2;
-        RECT low{px(36),footerY,midpoint-px(4),footerY+px(22)};
-        RECT high{midpoint+px(4),footerY,client.right-px(36),footerY+px(22)};
-        drawTextAt(mem,L"1000 K",low,smallFont_,p.muted);
-        drawTextAt(mem,L"6500 K",high,smallFont_,p.muted,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+        // Use the slider's actual horizontal endpoints instead of card
+        // padding, so the first and last scale labels stay precisely aligned
+        // as the user changes the window width.
+        const auto scaleLabels=nightlight::temperatureScaleLabelRects(
+            slider_,footerY,px(18));
+        drawTextAt(mem,L"1000 K",scaleLabels.low,smallFont_,p.muted,
+            DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+        drawTextAt(mem,L"6500 K",scaleLabels.high,smallFont_,p.muted,
+            DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
 
         if (hardwareVisibleHeight_>0) {
             const int saved=SaveDC(mem);
