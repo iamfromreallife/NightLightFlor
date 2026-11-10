@@ -58,21 +58,42 @@ constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
 constexpr int ICON_RESOURCE = 101;
 constexpr UINT TRAY_ID = 100;
 
-// Dedicated low-level hooks avoid blocking the UI thread, which needs to
-// remain responsive for startup and painting. The input-suppression deadline
-// is checked inside each callback, so suppression expires after four seconds
-// even if a timer message is delayed. Secure-attention keys are OS-managed.
+// When display power management processes a physical wake before the
+// application queue, low-level hooks alone cannot reliably keep a monitor
+// asleep. Try BlockInput on the guard's own worker thread; it must be
+// released by that SAME thread. If policy disallows BlockInput, low-level
+// hooks still suppress application input and request a prompt display re-sleep.
+// The thread itself owns the deadline and releases everything automatically.
+constexpr UINT WM_SCREEN_GUARD_WAKE = WM_APP + 44;
+constexpr UINT TIMER_SCREEN_GUARD_WAKE = 18;
 std::atomic<ULONGLONG> gScreenOffBlockedUntil{0};
+std::atomic<HWND> gScreenOffGuardWindow{nullptr};
+std::atomic<bool> gScreenOffWakeQueued{false};
+
+bool screenOffGuarded() {
+    const auto deadline=gScreenOffBlockedUntil.load(std::memory_order_relaxed);
+    return deadline!=0 && GetTickCount64()<deadline;
+}
+void requestScreenOffReassert() {
+    if (!screenOffGuarded()) return;
+    const HWND hwnd=gScreenOffGuardWindow.load(std::memory_order_relaxed);
+    if (hwnd && !gScreenOffWakeQueued.exchange(true,std::memory_order_relaxed)) {
+        if (!PostMessageW(hwnd,WM_SCREEN_GUARD_WAKE,0,0))
+            gScreenOffWakeQueued.store(false,std::memory_order_relaxed);
+    }
+}
 LRESULT CALLBACK screenOffMouseHook(int code,WPARAM wp,LPARAM lp) {
-    if (code==HC_ACTION && GetTickCount64()<
-            gScreenOffBlockedUntil.load(std::memory_order_relaxed))
+    if (code==HC_ACTION && screenOffGuarded()) {
+        requestScreenOffReassert();
         return 1;
+    }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
 LRESULT CALLBACK screenOffKeyboardHook(int code,WPARAM wp,LPARAM lp) {
-    if (code==HC_ACTION && GetTickCount64()<
-            gScreenOffBlockedUntil.load(std::memory_order_relaxed))
+    if (code==HC_ACTION && screenOffGuarded()) {
+        requestScreenOffReassert();
         return 1;
+    }
     return CallNextHookEx(nullptr,code,wp,lp);
 }
 class ScreenOffInputGuard {
@@ -82,50 +103,69 @@ public:
         stop();
         if (stopEvent_) CloseHandle(stopEvent_);
     }
-    bool start() {
+    bool start(HWND target) {
         if (!stopEvent_ || active_.load()) return false;
         if (worker_.joinable()) worker_.join();
         ResetEvent(stopEvent_);
         auto started=std::make_shared<std::promise<bool>>();
         auto ready=started->get_future();
         try {
-            worker_=std::thread([this,started] {
+            worker_=std::thread([this,target,started] {
+                MSG dummy{};
+                PeekMessageW(&dummy,nullptr,0,0,PM_NOREMOVE);
+                workerThreadId_.store(GetCurrentThreadId(),std::memory_order_relaxed);
                 const HINSTANCE module=GetModuleHandleW(nullptr);
                 HHOOK mouse=SetWindowsHookExW(WH_MOUSE_LL,screenOffMouseHook,module,0);
                 HHOOK keyboard=SetWindowsHookExW(WH_KEYBOARD_LL,screenOffKeyboardHook,module,0);
-                const bool both=mouse && keyboard &&
+                // This API can fail under Windows policy / integrity rules.
+                // It is attempted on the worker which will also unblock it.
+                const bool blocked=BlockInput(TRUE)!=FALSE;
+                const bool hooks=mouse!=nullptr && keyboard!=nullptr;
+                const bool protectedNow=(blocked || hooks) &&
                     WaitForSingleObject(stopEvent_,0)!=WAIT_OBJECT_0;
-                // Reserve the maximum time of the sleep request; the true
-                // four-second deadline is set immediately after it returns.
-                const ULONGLONG deadline=GetTickCount64()+
-                    nightlight::kScreenOffInputGuardMs+1000;
-                if (both) {
-                    gScreenOffBlockedUntil.store(deadline,std::memory_order_relaxed);
-                    active_.store(true);
+                if (protectedNow) {
+                    gScreenOffWakeQueued.store(false,std::memory_order_relaxed);
+                    gScreenOffGuardWindow.store(target,std::memory_order_relaxed);
+                    gScreenOffBlockedUntil.store(GetTickCount64()+
+                        nightlight::kScreenOffInputGuardMs+
+                        nightlight::kScreenOffPreparationGraceMs,
+                        std::memory_order_relaxed);
+                    active_.store(true,std::memory_order_release);
                 }
-                started->set_value(both);
-                if (both) {
+                started->set_value(protectedNow);
+                if (protectedNow) {
                     MSG message{};
+                    bool quit=false;
                     while (WaitForSingleObject(stopEvent_,0)!=WAIT_OBJECT_0) {
-                        const ULONGLONG now=GetTickCount64();
-                        if (now>=deadline) break;
-                        const DWORD remaining=static_cast<DWORD>(deadline-now);
-                        // Input hooks are dispatched to this thread's queue.
-                        // Pump it while waiting, with no expensive work here.
+                        const auto deadline=gScreenOffBlockedUntil.load(
+                            std::memory_order_relaxed);
+                        const auto now=GetTickCount64();
+                        if (!deadline || now>=deadline) break;
+                        const DWORD remaining=static_cast<DWORD>(
+                            std::min<ULONGLONG>(deadline-now,MAXDWORD));
+                        // Low-level hooks are delivered via this worker's
+                        // message queue. Wake for input, stop, or the deadline.
                         const DWORD wait=MsgWaitForMultipleObjectsEx(
                             1,&stopEvent_,remaining,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
                         if (wait==WAIT_OBJECT_0) break;
                         while (PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
-                            if (message.message==WM_QUIT) break;
+                            if (message.message==WM_QUIT) { quit=true; break; }
                             TranslateMessage(&message);
                             DispatchMessageW(&message);
                         }
+                        if (quit) break;
                     }
                 }
                 gScreenOffBlockedUntil.store(0,std::memory_order_relaxed);
+                gScreenOffGuardWindow.store(nullptr,std::memory_order_relaxed);
+                gScreenOffWakeQueued.store(false,std::memory_order_relaxed);
+                // Always release input on the installing/blocking thread,
+                // including stop requests and startup failures.
+                if (blocked) BlockInput(FALSE);
                 if (keyboard) UnhookWindowsHookEx(keyboard);
                 if (mouse) UnhookWindowsHookEx(mouse);
-                active_.store(false);
+                active_.store(false,std::memory_order_release);
+                workerThreadId_.store(0,std::memory_order_relaxed);
             });
         } catch (...) {
             return false;
@@ -138,23 +178,31 @@ public:
         return ready.get();
     }
     void screenOffDispatched() {
-        // Start the requested four seconds AFTER sending the sleep signal,
-        // not when the hooks were first installed.
-        if (active_.load())
+        // Reset to exactly four seconds AFTER the display-sleep request.
+        if (active_.load(std::memory_order_acquire)) {
             gScreenOffBlockedUntil.store(
                 GetTickCount64()+nightlight::kScreenOffInputGuardMs,
                 std::memory_order_relaxed);
+            // The worker might be waiting against the earlier preparation
+            // deadline: notify it to recompute the shorter final deadline.
+            const DWORD id=workerThreadId_.load(std::memory_order_relaxed);
+            if (id) PostThreadMessageW(id,WM_NULL,0,0);
+        }
+    }
+    bool guarding() const {
+        return active_.load(std::memory_order_acquire) && screenOffGuarded();
     }
     void stop() {
         if (stopEvent_) SetEvent(stopEvent_);
         gScreenOffBlockedUntil.store(0,std::memory_order_relaxed);
         if (worker_.joinable()) worker_.join();
-        active_.store(false);
+        active_.store(false,std::memory_order_release);
     }
 private:
     HANDLE stopEvent_=nullptr;
     std::thread worker_;
     std::atomic<bool> active_{false};
+    std::atomic<DWORD> workerThreadId_{0};
 };
 
 struct Palette {
