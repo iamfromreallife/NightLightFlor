@@ -292,6 +292,7 @@ private:
     bool dragging_ = false;
     bool trayReady_ = false, shuttingDown_ = false;
     bool trayVersion4_ = false;
+    nightlight::TrayClickFilter trayClickFilter_;
     UINT taskbarCreated_ = 0;
     NOTIFYICONDATAW notify_ = {};
 
@@ -1175,11 +1176,12 @@ private:
             secondPanelTop_+px(32)};
         drawTextAt(mem,tr(L"Color temperature",L"Temperatura de cor"),
             label,sectionTitleFont_,p.text);
-        RECT valueRect{
-            narrowTemperature?innerLeft:innerRight-valueReserve,
-            secondPanelTop_+(narrowTemperature?px(32):px(8)),
-            innerRight,
-            secondPanelTop_+(narrowTemperature?px(56):px(32))};
+        // Use exactly the same right edge as the temperature slider:
+        // the final K stays vertically aligned with the 6500 K endpoint.
+        const int valueTop=secondPanelTop_+
+            (narrowTemperature?px(32):px(8));
+        RECT valueRect=nightlight::temperatureValueRect(slider_,
+            valueReserve,valueTop,px(24));
         drawTextAt(mem,temperatureText,valueRect,headlineFont_,p.accent,
             DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
         drawSlider(mem);
@@ -1625,13 +1627,16 @@ private:
             const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
             entranceAddedLayer_=(style&WS_EX_LAYERED)==0;
             SetWindowLongPtrW(window_,GWL_EXSTYLE,style|WS_EX_LAYERED);
-            if (SetLayeredWindowAttributes(window_,0,0,LWA_ALPHA)) {
-                // Restore behind zero opacity so a minimized window never
-                // flashes at full opacity or animates from its iconic bounds.
+            // Show a small but visible first frame instead of spending the
+            // first timer interval at 0 alpha, which can resemble a missed
+            // tray click when DWM/compositor is briefly occupied.
+            constexpr BYTE initialAlpha=48;
+            if (SetLayeredWindowAttributes(window_,0,initialAlpha,LWA_ALPHA)) {
                 ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
                 GetWindowRect(window_,&entranceBounds_);
                 entranceMove_=!IsZoomed(window_);
-                opening_=true; entrance_.snap(0); animate(entrance_,1,200);
+                opening_=true; entrance_.snap(initialAlpha/255.0);
+                animate(entrance_,1,200);
                 startAnimationTimer();
             } else {
                 if (entranceAddedLayer_) SetWindowLongPtrW(window_,GWL_EXSTYLE,style);
@@ -1676,8 +1681,10 @@ private:
         wcscpy_s(notify_.szTip,L"NightLight");
         if (!Shell_NotifyIconW(NIM_ADD,&notify_)) return false;
         notify_.uVersion=NOTIFYICON_VERSION_4;
-        // Prefer NIN_SELECT on version-4 trays; legacy shells use WM_LBUTTONUP.
+        // Version 4 changes the callback wParam/lParam layout; mouse-down
+        // remains the fastest reliable activation on either Shell version.
         trayVersion4_=Shell_NotifyIconW(NIM_SETVERSION,&notify_)!=FALSE;
+        trayClickFilter_={};
         trayReady_=true;
         return true;
     }
@@ -1920,13 +1927,45 @@ private:
         case WM_COMMAND:
             handleCommand(LOWORD(wParam),HIWORD(wParam)); return 0;
         case WM_TRAY_ICON: {
-            const UINT event=LOWORD(lParam);
-            if(event==WM_CONTEXTMENU || event==WM_RBUTTONUP)popupTray();
-            else if (event==NIN_SELECT || event==NIN_KEYSELECT ||
-                     (!trayVersion4_ && event==WM_LBUTTONUP)) {
-                handleTrayActivation();
+            // For NOTIFYICON_VERSION_4, LOWORD(lParam) is the message and
+            // HIWORD(lParam) is our icon ID; legacy Shells use wParam as ID.
+            if (trayVersion4_) {
+                if (HIWORD(lParam)!=TRAY_ID) return 0;
+            } else if (static_cast<UINT>(wParam)!=TRAY_ID) return 0;
+            const UINT event=trayVersion4_?LOWORD(lParam):
+                static_cast<UINT>(lParam);
+            if (event==WM_CONTEXTMENU || event==WM_RBUTTONUP) {
+                popupTray();
+                return 0;
             }
-            // Do not also handle WM_LBUTTONDBLCLK: it would undo the toggle.
+            // Handle the second click in a quick pair: Windows replaces
+            // WM_LBUTTONDOWN with WM_LBUTTONDBLCLK on that physical press.
+            // A following mouse-up/NIN_SELECT must not toggle twice.
+            bool toggle=false;
+            const auto messageTime=static_cast<unsigned long>(GetMessageTime());
+            switch (event) {
+            case WM_LBUTTONDOWN:
+                toggle=trayClickFilter_.shouldToggle(
+                    nightlight::TrayClickEvent::MouseDown,messageTime);
+                break;
+            case WM_LBUTTONDBLCLK:
+                toggle=trayClickFilter_.shouldToggle(
+                    nightlight::TrayClickEvent::MouseDoubleClick,messageTime);
+                break;
+            case WM_LBUTTONUP:
+                toggle=trayClickFilter_.shouldToggle(
+                    nightlight::TrayClickEvent::MouseUp,messageTime);
+                break;
+            case NIN_SELECT:
+                toggle=trayClickFilter_.shouldToggle(
+                    nightlight::TrayClickEvent::Select,messageTime);
+                break;
+            case NIN_KEYSELECT:
+                toggle=trayClickFilter_.shouldToggle(
+                    nightlight::TrayClickEvent::KeySelect,messageTime);
+                break;
+            }
+            if (toggle) handleTrayActivation();
             return 0;
         }
         case WM_SHOW_EXISTING: openWindow(); return 0;
