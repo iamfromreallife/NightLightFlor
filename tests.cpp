@@ -237,8 +237,17 @@ int main() {
         check(noDdc.clientHeight<narrow.clientHeight,
             "Expanded DDC rows require a taller window");
         const auto moreDdc=calculateWindowContentMinimum(96,420,110,tabs,3,false,true);
-        check(moreDdc.clientHeight>narrow.clientHeight,
-            "Additional displays increase the DDC minimum height");
+        check(moreDdc.clientWidth>narrow.clientWidth,
+            "Additional displays increase the DDC minimum width for horizontal columns");
+        check(narrow.clientWidth>=72+2*320+14 &&
+              moreDdc.clientWidth>=72+3*320+2*14,
+            "Each DDC monitor gets a full-width side-by-side control column");
+        const auto twoMonitorsWide=calculateWindowContentMinimum(96,1600,110,tabs,2,false,true);
+        const auto threeMonitorsWide=calculateWindowContentMinimum(96,1600,110,tabs,3,false,true);
+        check(twoMonitorsWide.clientHeight==threeMonitorsWide.clientHeight,
+            "DDC controls always share one row rather than stacking vertically");
+        check(twoMonitorsWide.screenRows==1 && threeMonitorsWide.screenRows==1,
+            "DDC column count does not change the Screens tab layout when space is ample");
         const auto unlocked=calculateWindowContentMinimum(96,420,110,tabs,2,true,true);
         check(unlocked.clientHeight<narrow.clientHeight,
             "Gamma-unlocked layout uses shorter temperature section");
