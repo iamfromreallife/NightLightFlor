@@ -252,6 +252,31 @@ bool updateGammaRamp(const Ramp& target,GammaRefresh refresh,GammaRampState& sta
     return ok;
 }
 
+namespace {
+// Keep the Kelvin-to-RGB calibration untouched. This exponent only changes
+// how physical slider distance is distributed across the same 1000-6500 K
+// range: the cool end becomes more responsive when dragged toward warm.
+constexpr double kWarmBiasedSliderExponent=1.25;
+}
+int kelvinFromTemperatureSliderX(int x,int left,int right) {
+    const int span=right-left;
+    if(span<=0) return 1000;
+    const double position=std::clamp(
+        (static_cast<double>(x)-left)/span,0.0,1.0);
+    const double progress=std::pow(position,kWarmBiasedSliderExponent);
+    const int result=1000+static_cast<int>(std::lround(progress*550.0))*10;
+    return std::clamp(result,1000,6500);
+}
+int temperatureSliderXFromKelvin(int kelvin,int left,int right) {
+    const int span=right-left;
+    if(span<=0) return left;
+    const double kelvinProgress=
+        std::clamp((kelvin-1000)/5500.0,0.0,1.0);
+    const double position=std::pow(kelvinProgress,
+        1.0/kWarmBiasedSliderExponent);
+    return left+static_cast<int>(std::lround(position*span));
+}
+
 int temperatureSliderWidth(int dpi,int clientWidth) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
     // 40-DIP card inset on each side, including the outer card margin.
