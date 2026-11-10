@@ -62,9 +62,9 @@ inline constexpr int kDdcRowStepDip = 100;
 inline constexpr int kDdcSectionBaseDip = 32;
 
 // Spacing around the three cards (DIPs, scaled with Windows DPI).
-// Outer horizontal/bottom insets are 16 instead of 20; the first card
-// starts 8 instead of 12 from the top, and inter-card gaps are 8, not 12.
-inline constexpr int kCardOuterMarginDip = 16;
+// All outside edges (top/left/right/bottom) and inter-card gaps use
+// the same 8 DIP, while internal card content padding remains 16 DIP.
+inline constexpr int kCardOuterMarginDip = 8;
 inline constexpr int kCardsTopMarginDip = 8;
 inline constexpr int kCardsGapDip = 8;
 inline constexpr int kCardInnerInsetDip = 16;
@@ -99,6 +99,19 @@ int temperatureSliderWidth(int dpi, int clientWidth);
 struct TemperatureScaleLabelRects { RECT low{}, high{}; };
 TemperatureScaleLabelRects temperatureScaleLabelRects(
     const RECT& sliderTrack, int top, int height);
+// Right-align the Kelvin value to the visual gradient's right endpoint.
+RECT temperatureValueRect(const RECT& sliderTrack,int desiredWidth,int top,int height);
+
+// Convert tray notifications into one immediate activation per physical
+// click. In particular the second click arrives as a double-click message,
+// and its later mouse-up/select must not toggle a second time.
+enum class TrayClickEvent { MouseDown, MouseDoubleClick, MouseUp, Select, KeySelect };
+struct TrayClickFilter {
+    bool mousePressPending = false;
+    bool recentRelease = false;
+    unsigned long releaseTime = 0;
+    bool shouldToggle(TrayClickEvent event,unsigned long timestamp);
+};
 int ddcSliderWidth(int dpi, int clientWidth);
 // Returns the exact centre of a DDC slider's horizontal track in parent
 // coordinates. Use this for glyphs, not the font's typographic line box.
