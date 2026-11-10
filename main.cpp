@@ -178,7 +178,7 @@ public:
         return ready.get();
     }
     void screenOffDispatched() {
-        // Reset to exactly four seconds AFTER the display-sleep request.
+        // Reset to exactly three seconds AFTER the display-sleep request.
         if (active_.load(std::memory_order_acquire)) {
             gScreenOffBlockedUntil.store(
                 GetTickCount64()+nightlight::kScreenOffInputGuardMs,
@@ -1882,8 +1882,8 @@ private:
         // dispatched. Do not proceed without either protective mechanism.
         if (!screenOffGuard_.start(window_)) {
             MessageBoxW(window_,tr(
-                L"Could not activate the four-second mouse and keyboard guard. Screens were not turned off.",
-                L"Não foi possível ativar a proteção do rato e teclado durante quatro segundos. Os ecrãs não foram desligados.").c_str(),
+                L"Could not activate the three-second mouse and keyboard guard. Screens were not turned off.",
+                L"Não foi possível ativar a proteção do rato e teclado durante três segundos. Os ecrãs não foram desligados.").c_str(),
                 L"NightLight",MB_OK|MB_ICONWARNING);
             return;
         }
