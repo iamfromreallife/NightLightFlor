@@ -71,6 +71,13 @@ inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
 
+// Hide-to-tray must not request activation of Explorer/Start or alter the
+// window's size/position. ShowWindow(SW_HIDE) explicitly activates another
+// window; this SetWindowPos combination avoids that activation request.
+inline constexpr UINT kHideToTrayFlags =
+    SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE |
+    SWP_NOZORDER | SWP_NOOWNERZORDER;
+
 // The entrance uses one shared 150-ms motion for both opacity and the
 // upward slide. A small initial alpha makes the first frame perceptible.
 inline constexpr unsigned kWindowOpeningDurationMs = 150;
