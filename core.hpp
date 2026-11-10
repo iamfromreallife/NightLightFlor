@@ -64,12 +64,12 @@ inline constexpr int kDdcSectionBaseDip = 32;
 // Compact temperature card: title and Kelvin value share the first row,
 // gradient sits immediately below, and its scale labels use the last row.
 // The gamma-unlock button, when present, fits below the scale labels.
-inline constexpr int kTemperatureUnlockedHeightDip = 94;
-inline constexpr int kTemperatureLockedHeightDip = 126;
+inline constexpr int kTemperatureUnlockedHeightDip = 80;
+inline constexpr int kTemperatureLockedHeightDip = 112;
 inline constexpr int kTemperatureNarrowExtraDip = 24;
-inline constexpr int kTemperatureSliderTopDip = 44;
-inline constexpr int kTemperatureScaleTopDip = 64;
-inline constexpr int kTemperatureGammaTopDip = 86;
+inline constexpr int kTemperatureSliderTopDip = 42;
+inline constexpr int kTemperatureScaleTopDip = 56;
+inline constexpr int kTemperatureGammaTopDip = 75;
 
 // Minimum dimensions are derived from the live monitor-tab wrapping and the
 // visible sections. The computation is independent of the window manager so
@@ -85,6 +85,12 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
 // Shared DPI-aware widths used by the live temperature and DDC sliders.
 // Neither slider has a fixed maximum width.
 int temperatureSliderWidth(int dpi, int clientWidth);
+// These bounds follow the exact visual slider endpoints at any window width,
+// not the card's fixed insets. Left label starts at track.left; right label
+// ends at track.right.
+struct TemperatureScaleLabelRects { RECT low{}, high{}; };
+TemperatureScaleLabelRects temperatureScaleLabelRects(
+    const RECT& sliderTrack, int top, int height);
 int ddcSliderWidth(int dpi, int clientWidth);
 // Returns the exact centre of a DDC slider's horizontal track in parent
 // coordinates. Use this for glyphs, not the font's typographic line box.
