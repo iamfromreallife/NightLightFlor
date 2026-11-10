@@ -10,6 +10,10 @@
 
 namespace nightlight {
 constexpr UINT WM_DDC_COMPLETE = WM_APP + 42;
+// Hardware can be changed by monitor OSD controls, other software or hotkeys.
+// Poll only while the controls are visible; all I2C/WMI reads stay on the worker.
+inline constexpr UINT kDdcReadbackIntervalMs = 3000;
+inline constexpr std::uint64_t kDdcPostWriteGraceMs = 1500;
 enum class DdcFeature { Brightness = 0, Contrast = 1 };
 enum class DdcBackend { None, DdcCi, WindowsWmi };
 struct DdcValue {
@@ -22,7 +26,13 @@ struct DdcValue {
     int percent = 50;
     DdcBackend backend = DdcBackend::None;
     std::uint64_t generation = 0;
+    std::uint64_t protectUntilTickMs = 0; // prevents stale reads right after our own write
 };
+// Merge a hardware observation without overwriting an in-flight local slider
+// adjustment. A valid read is authoritative; an unsupported/unreadable read
+// keeps the last displayed or stored percentage.
+void applyDdcObservation(DdcValue& current,const DdcValue& observed,
+                         bool protectUserValue);
 struct DdcState {
     bool loading = false;
     DdcValue brightness;
@@ -43,10 +53,9 @@ auto nextMonitorJob(Map& jobs,const typename Map::key_type& previous,bool first)
     return next==jobs.end()?jobs.begin():next;
 }
 
-// All potentially slow monitor I/O runs on one worker. No hardware writes occur
-// until a known saved setting is restored or the user moves an available slider. Readback is not a prerequisite for
-// a direct hardware write (matching upstream NightLight). Writes coalesce by display
-// and feature, so changing tabs cannot redirect a queued request to another monitor.
+// All potentially slow monitor I/O runs on one worker. Reading the real
+// hardware value never writes to a display. Local slider writes coalesce by
+// display and feature; unreadable devices retain their saved UI fallback.
 class DdcController {
 public:
     DdcController();
@@ -55,6 +64,7 @@ public:
     void seed(const std::wstring& device,int brightness,int contrast,bool savedBrightness=false,bool savedContrast=false);
     void restore(const std::wstring& device,int brightness,int contrast,bool savedBrightness,bool savedContrast);
     void refresh(const std::wstring& device);
+    void poll(const std::wstring& device); // silent read; does not disable live sliders
     bool set(const std::wstring& device, DdcFeature feature, int percent);
     DdcState state(const std::wstring& device);
     void stop();
