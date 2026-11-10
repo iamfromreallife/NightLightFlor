@@ -574,13 +574,17 @@ private:
     void tickAnimations() {
         // Start work just after a compositor present, leaving a full frame
         // budget to resize, lay out and paint a coherent replacement surface.
-        if (IsWindowVisible(window_) && animations_) DwmFlush();
+        // Avoid blocking the short opening motion on DWM presentation.
+        // Position and opacity are sampled together every animation tick.
+        if (IsWindowVisible(window_) && animations_ && !opening_) DwmFlush();
         const auto now=uiTime();
         bool active=false;
         if (opening_) {
             const double progress=entrance_.value(now);
             SetLayeredWindowAttributes(window_,0,static_cast<BYTE>(std::round(255*progress)),LWA_ALPHA);
-            if (entranceMove_) SetWindowPos(window_,nullptr,entranceBounds_.left,entranceBounds_.top+static_cast<int>(std::round(px(8)*(1-progress))),
+            if (entranceMove_) SetWindowPos(window_,nullptr,entranceBounds_.left,
+                entranceBounds_.top+nightlight::windowOpeningSlideOffset(
+                    static_cast<int>(dpi_),progress),
                 0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
             if (!entrance_.active(now)) finishEntrance();
             else active=true;
@@ -1635,16 +1639,30 @@ private:
             const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
             entranceAddedLayer_=(style&WS_EX_LAYERED)==0;
             SetWindowLongPtrW(window_,GWL_EXSTYLE,style|WS_EX_LAYERED);
-            // Show a small but visible first frame instead of spending the
-            // first timer interval at 0 alpha, which can resemble a missed
-            // tray click when DWM/compositor is briefly occupied.
-            constexpr BYTE initialAlpha=48;
-            if (SetLayeredWindowAttributes(window_,0,initialAlpha,LWA_ALPHA)) {
-                ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
+            // First capture the resting position and move below it BEFORE
+            // showing the window. Otherwise the first visible frame appears
+            // at the final position and seems to jump when the slide begins.
+            // Restoring a minimized window happens at zero alpha for the
+            // same reason. Fade and slide then share one 150ms clock.
+            if (SetLayeredWindowAttributes(window_,0,0,LWA_ALPHA)) {
+                if (IsIconic(window_)) ShowWindow(window_,SW_RESTORE);
                 GetWindowRect(window_,&entranceBounds_);
                 entranceMove_=!IsZoomed(window_);
-                opening_=true; entrance_.snap(initialAlpha/255.0);
-                animate(entrance_,1,200);
+                opening_=true;
+                constexpr BYTE initialAlpha=
+                    nightlight::kWindowOpeningInitialAlpha;
+                const double initialProgress=initialAlpha/255.0;
+                entrance_.snap(initialProgress);
+                if (entranceMove_) {
+                    const int startY=entranceBounds_.top+
+                        nightlight::windowOpeningSlideOffset(
+                            static_cast<int>(dpi_),initialProgress);
+                    SetWindowPos(window_,nullptr,entranceBounds_.left,startY,0,0,
+                        SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
+                }
+                SetLayeredWindowAttributes(window_,0,initialAlpha,LWA_ALPHA);
+                if (!IsWindowVisible(window_)) ShowWindow(window_,SW_SHOW);
+                animate(entrance_,1,nightlight::kWindowOpeningDurationMs);
                 startAnimationTimer();
             } else {
                 if (entranceAddedLayer_) SetWindowLongPtrW(window_,GWL_EXSTYLE,style);
