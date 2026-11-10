@@ -1368,27 +1368,26 @@ private:
         // The refresh action is glyph-only, with no coloured button surface.
         if (id!=ID_REFRESH) rounded(dc,surface,px(8),background,border);
         if(id==ID_REFRESH) {
-            Gdiplus::Graphics g(dc);g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+            // The actual Segoe Fluent Icons U+E777 glyph replaces the
+            // previous hand-drawn arc. Retain the click-triggered spin.
+            Gdiplus::Graphics g(dc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
             const float scale=static_cast<float>(dpi_)/96.0f;
-            g.TranslateTransform(static_cast<float>(rc.left+rc.right)/2,static_cast<float>(rc.top+rc.bottom)/2);
+            g.TranslateTransform(static_cast<float>(rc.left+rc.right)/2.0f,
+                static_cast<float>(rc.top+rc.bottom)/2.0f);
             g.RotateTransform(static_cast<float>(std::fmod(refreshTurn_.value(now),360.0)));
             g.ScaleTransform(scale,scale);
-            Gdiplus::Pen pen(drawingColor(foreground),1.7f);
-            pen.SetStartCap(Gdiplus::LineCapRound);pen.SetEndCap(Gdiplus::LineCapRound);
-            constexpr float r=7.0f;
-            g.DrawArc(&pen,-r,-r,2*r,2*r,45.0f,315.0f);
-            constexpr float radians=0.0f;
-            const float ex=r*std::cos(radians),ey=r*std::sin(radians);
-            const float tx=-std::sin(radians),ty=std::cos(radians);
-            const float nx=std::cos(radians),ny=std::sin(radians);
-            // Close the stroke with a complete downward-pointing arrowhead.
-            const Gdiplus::PointF arrow[]{
-                {ex,ey+1.2f},
-                {ex-4.5f*tx+2.8f*nx,ey-4.5f*ty+2.8f*ny},
-                {ex-4.5f*tx-2.8f*nx,ey-4.5f*ty-2.8f*ny}};
-            Gdiplus::SolidBrush tip(drawingColor(foreground));
-            g.FillPolygon(&tip,arrow,3);
+            Gdiplus::FontFamily fluent(L"Segoe Fluent Icons");
+            Gdiplus::FontFamily mdl2(L"Segoe MDL2 Assets");
+            const Gdiplus::FontFamily* family=fluent.IsAvailable()?&fluent:&mdl2;
+            Gdiplus::Font iconFont(family,19.0f,Gdiplus::FontStyleRegular,Gdiplus::UnitPixel);
+            Gdiplus::StringFormat centered;
+            centered.SetAlignment(Gdiplus::StringAlignmentCenter);
+            centered.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            Gdiplus::SolidBrush brush(drawingColor(foreground));
+            g.DrawString(L"\uE777",1,&iconFont,
+                Gdiplus::RectF(-17.0f,-17.0f,34.0f,34.0f),&centered,&brush);
         }
         if (monitorButton) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
