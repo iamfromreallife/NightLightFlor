@@ -462,6 +462,25 @@ private:
         if(msg==WM_KEYDOWN && (wp==VK_RETURN || wp==VK_ESCAPE)) {
             app->finishInlineRename(wp==VK_RETURN);return 0;
         }
+        if(msg==WM_CHAR && (wp==L'\r' || wp==L'\n'))return 0;
+        if(msg==WM_PASTE && OpenClipboard(control)) {
+            HANDLE contents=GetClipboardData(CF_UNICODETEXT);
+            if(contents) {
+                const wchar_t* pasted=static_cast<const wchar_t*>(GlobalLock(contents));
+                if(pasted) {
+                    // Single-line paste behaviour despite ES_MULTILINE.
+                    std::wstring line=pasted;
+                    const auto end=line.find_first_of(L"\r\n");
+                    if(end!=std::wstring::npos)line.resize(end);
+                    GlobalUnlock(contents);
+                    CloseClipboard();
+                    SendMessageW(control,EM_REPLACESEL,TRUE,
+                        reinterpret_cast<LPARAM>(line.c_str()));
+                    return 0;
+                }
+            }
+            CloseClipboard();
+        }
         if(msg==WM_NCDESTROY)RemoveWindowSubclass(control,editFieldProc,id);
         return DefSubclassProc(control,msg,wp,lp);
     }
@@ -573,11 +592,11 @@ private:
         SendMessageW(gammaTooltip_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&gammaTool));
         SendMessageW(gammaTooltip_,TTM_SETMAXTIPWIDTH,0,px(430));
         editName_ = CreateWindowExW(0, L"EDIT", L"",
-            WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
+            WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL,
             0,0,1,1, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RENAME_EDIT)),
             instance_, nullptr);
         SendMessageW(editName_, EM_LIMITTEXT, 64, 0);
-        SendMessageW(editName_,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(0,px(6)));
+        SendMessageW(editName_,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(0,0));
         SetWindowSubclass(editName_,editFieldProc,1,reinterpret_cast<DWORD_PTR>(this));
         btnInlineSave_=createButton(ID_INLINE_SAVE,L"");
         refreshTabs();
@@ -679,6 +698,7 @@ private:
         if(save)for(size_t i=0;i<model_.monitors().size();++i)if(model_.monitors()[i].device==device) {
             const std::wstring alias=value==model_.monitors()[i].windowsName?L"":value;
             model_.renameMonitor(i,alias);
+            tabDesiredWidths_.erase(device); // Re-measure the label after editing.
             if(i<hardwareRows_.size()) {
                 const auto suffix=L" · "+model_.monitors()[i].displayName();
                 SetWindowTextW(hardwareRows_[i].brightness,(tr(L"Brightness",L"Brilho")+suffix).c_str());
@@ -751,16 +771,16 @@ private:
         for (size_t i=0;i<tabs_.size();++i) {
             const auto& m=model_.monitors()[i];
             auto stored=tabDesiredWidths_.find(m.device);
-            if(stored==tabDesiredWidths_.end())stored=tabDesiredWidths_.emplace(m.device,textWidth(m.displayName(),boldFont_)+px(46)).first;
-            const int tabW=std::max(px(40),std::min({stored->second,px(275),tabsRight-tabStart}));
+            if(stored==tabDesiredWidths_.end())stored=tabDesiredWidths_.emplace(m.device,textWidth(m.displayName(),boldFont_)+px(50)).first;
+            const int tabW=std::max(px(44),std::min({stored->second,px(279),tabsRight-tabStart}));
             if (tabX>tabStart && tabX+tabW>tabsRight) { tabX=tabStart; tabY+=px(38); ++rows; }
             place(tabs_[i],tabX,tabY,tabW,tabH,TRUE);
             if(editingName_ && m.device==editingDevice_) {
                 const int checkW=px(25);
-                const int editX=tabX+px(3);
-                const int editW=std::max(px(30),tabW-px(6));
-                place(editName_,editX,tabY+px(4),editW-checkW-px(3),tabH-px(8),TRUE);
-                place(btnInlineSave_,editX+editW-checkW,tabY+px(4),checkW,tabH-px(8),TRUE);
+                // The editable field retains the exact bounds of the tab.
+                // Keep the save button overlaid inside, never beside, the tab.
+                place(editName_,tabX,tabY,tabW,tabH,TRUE);
+                place(btnInlineSave_,tabX+tabW-checkW-px(3),tabY+px(4),checkW,tabH-px(8),TRUE);
             }
             tabX+=tabW+tabGap;
         }
@@ -833,6 +853,24 @@ private:
         const bool placed=batch && EndDeferWindowPos(batch);
         if (!placed) for (const auto& placement:placements)
             SetWindowPos(placement.control,nullptr,placement.x,placement.y,placement.w,placement.h,flags|visibility(placement.control));
+        if (editingName_) {
+            // EM_SETRECT works on multiline EDIT controls; constrain ours to
+            // a single left-aligned line at the font's vertical centre.
+            RECT bounds{}; GetClientRect(editName_,&bounds);
+            TEXTMETRICW metrics{};
+            if (HDC dc=GetDC(editName_)) {
+                HGDIOBJ old=SelectObject(dc,font_);
+                GetTextMetricsW(dc,&metrics);
+                SelectObject(dc,old);
+                ReleaseDC(editName_,dc);
+            }
+            const int lineH=metrics.tmHeight>0?metrics.tmHeight:px(17);
+            const int lineTop=std::max(0,(static_cast<int>(bounds.bottom)-lineH)/2);
+            const RECT textRect{px(8),lineTop,
+                std::max(px(9),static_cast<int>(bounds.right)-px(34)),
+                std::min(static_cast<int>(bounds.bottom),lineTop+lineH)};
+            SendMessageW(editName_,EM_SETRECT,0,reinterpret_cast<LPARAM>(&textRect));
+        }
         // Clip native child controls to the sliding panel. No control can draw
         // into a neighboring card while its section is still being revealed.
         for (const auto& placement:placements) {
@@ -840,7 +878,10 @@ private:
             if (hardwareRow(placement.control)) {
                 clip={0,hardwareTop_-scrollOffset_,width_,hardwareTop_+hardwareVisibleHeight_-scrollOffset_}; clipped=hardwareProgress<1;
             }
-            if (composedTransition_ && placement.control!=editName_) {
+            if (placement.control==editName_ && editingName_) {
+                HRGN roundedEdit=CreateRoundRectRgn(0,0,placement.w+1,placement.h+1,px(16),px(16));
+                if (!SetWindowRgn(placement.control,roundedEdit,FALSE)) DeleteObject(roundedEdit);
+            } else if (composedTransition_ && placement.control!=editName_) {
                 HRGN empty=CreateRectRgn(0,0,0,0);
                 if (!SetWindowRgn(placement.control,empty,FALSE)) DeleteObject(empty);
             } else if (clipped) {
