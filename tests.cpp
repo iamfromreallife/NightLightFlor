@@ -239,8 +239,12 @@ int main() {
         const auto moreDdc=calculateWindowContentMinimum(96,420,tabs,3,false,true);
         check(moreDdc.clientWidth==narrow.clientWidth,
             "Additional DDC monitor rows do not force a wider window");
-        check(moreDdc.clientHeight-narrow.clientHeight==128,
-            "Each additional monitor receives its own 128px-high DDC row");
+        check(moreDdc.clientHeight-narrow.clientHeight==kDdcRowStepDip,
+            "Each additional monitor receives a compact 112-DIP DDC row");
+        check(kDdcSectionBaseDip==40 &&
+              kDdcFirstRowTopDip+96+14<
+                  kDdcFirstRowTopDip+kDdcRowStepDip,
+            "Compact DDC status labels stay clear of the following monitor");
         const auto twoMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,2,false,true);
         const auto threeMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,3,false,true);
         check(threeMonitorsWide.clientHeight>twoMonitorsWide.clientHeight,
