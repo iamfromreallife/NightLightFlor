@@ -237,17 +237,18 @@ int main() {
         check(noDdc.clientHeight<narrow.clientHeight,
             "Expanded DDC rows require a taller window");
         const auto moreDdc=calculateWindowContentMinimum(96,420,tabs,3,false,true);
-        check(moreDdc.clientWidth>narrow.clientWidth,
-            "Additional displays increase the DDC minimum width for horizontal columns");
-        check(narrow.clientWidth>=72+2*320+14 &&
-              moreDdc.clientWidth>=72+3*320+2*14,
-            "Each DDC monitor gets a full-width side-by-side control column");
+        check(moreDdc.clientWidth==narrow.clientWidth,
+            "Additional DDC monitor rows do not force a wider window");
+        check(moreDdc.clientHeight-narrow.clientHeight==128,
+            "Each additional monitor receives its own 128px-high DDC row");
         const auto twoMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,2,false,true);
         const auto threeMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,3,false,true);
-        check(twoMonitorsWide.clientHeight==threeMonitorsWide.clientHeight,
-            "DDC controls always share one row rather than stacking vertically");
+        check(threeMonitorsWide.clientHeight>twoMonitorsWide.clientHeight,
+            "DDC controls stack monitor rows vertically rather than horizontally");
+        check(threeMonitorsWide.clientWidth==twoMonitorsWide.clientWidth,
+            "DDC stacking preserves the width regardless of monitor count");
         check(twoMonitorsWide.screenRows==1 && threeMonitorsWide.screenRows==1,
-            "DDC column count does not alter Screen tab rows with enough width");
+            "DDC row count does not alter Screen tab wrapping");
         const auto unlocked=calculateWindowContentMinimum(96,420,tabs,2,true,true);
         check(unlocked.clientHeight<narrow.clientHeight,
             "Gamma-unlocked layout uses shorter temperature section");
