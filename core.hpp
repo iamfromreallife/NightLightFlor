@@ -119,7 +119,12 @@ struct TrayClickFilter {
     unsigned long releaseTime = 0;
     bool shouldToggle(TrayClickEvent event,unsigned long timestamp);
 };
-int ddcSliderWidth(int dpi, int clientWidth);
+// The DDC percentages are right-aligned to the same endpoint as 6500 K.
+// Reserve the measured width of "100 %" (using the live small font) so
+// trackbar widths never jump when the displayed percentage changes.
+RECT ddcPercentageRect(int dpi, int clientWidth, int maxPercentTextWidth,
+                       int top, int height);
+int ddcSliderWidth(int dpi, int clientWidth, int maxPercentTextWidth);
 // Returns the exact centre of a DDC slider's horizontal track in parent
 // coordinates. Use this for glyphs, not the font's typographic line box.
 POINT ddcSliderIconCenter(int iconColumnCenterX, int sliderTop, int sliderHeight);
