@@ -356,7 +356,7 @@ bool Model::load() {
             windowPosition_=POINT{x,y};
         const int width=position.get("width").integer(-1);
         const int height=position.get("height").integer(-1);
-        if (width>=420 && width<=10000 && height>=260 && height<=10000)
+        if (width>=200 && width<=10000 && height>=260 && height<=10000)
             windowSize_=SIZE{width,height};
     }
     loaded_ = true;
@@ -392,7 +392,7 @@ bool Model::rememberWindowPosition(int x,int y) {
     return true;
 }
 bool Model::rememberWindowSize(int width,int height) {
-    if (!loaded_ || width<420 || width>10000 || height<260 || height>10000)
+    if (!loaded_ || width<200 || width>10000 || height<260 || height>10000)
         return false;
     if (windowSize_ && windowSize_->cx==width && windowSize_->cy==height)
         return false;
