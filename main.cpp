@@ -952,7 +952,7 @@ private:
                 textWidth(name,boldFont_)+px(42),px(279),innerRight-innerLeft}));
             place(row.nameButton,innerLeft,row.top,nameWidth,tabH,TRUE);
             // One full-width pair of sliders per monitor, beneath its name.
-            const int sliderLeft=innerLeft+px(38);
+            const int sliderLeft=innerLeft+px(nightlight::kDdcSliderLeftInsetDip);
             // The native trackbar reserves its own thumb inset. Extend the
             // HWND close enough to the percentage to remove the large gap,
             // while leaving room for a full 100 % reading.
@@ -1152,9 +1152,9 @@ private:
         SetViewportOrgEx(mem,0,0,nullptr);
         const int cardMargin=px(nightlight::kCardOuterMarginDip);
         const RECT card1{cardMargin,panelTop_,client.right-cardMargin,panelTop_+panelHeight_};
-        rounded(mem,card1,px(16),p.card,p.border);
+        rounded(mem,card1,px(2*nightlight::kCardCornerRadiusDip),p.card,p.border);
         const RECT card2{cardMargin,secondPanelTop_,client.right-cardMargin,secondPanelTop_+temperatureHeight_};
-        rounded(mem,card2,px(16),p.card,p.border);
+        rounded(mem,card2,px(2*nightlight::kCardCornerRadiusDip),p.card,p.border);
         const int innerLeft=cardMargin+px(nightlight::kCardInnerInsetDip);
         const int innerRight=client.right-innerLeft;
         drawSectionIcon(mem,0,innerLeft,panelTop_+px(11),p.subtle);
@@ -1328,7 +1328,7 @@ private:
         const Palette p=palette();
         const int cardMargin=px(nightlight::kCardOuterMarginDip);
         RECT card{cardMargin,hardwareTop_,width_-cardMargin,hardwareTop_+hardwareHeight_};
-        rounded(dc,card,px(16),p.card,p.border);
+        rounded(dc,card,px(2*nightlight::kCardCornerRadiusDip),p.card,p.border);
         const int left=cardMargin+px(nightlight::kCardInnerInsetDip);
         const int right=width_-left;
         drawSectionIcon(dc,2,left,hardwareTop_+px(13),p.subtle);
@@ -1349,12 +1349,15 @@ private:
                     left+px(16),y,px(28));
                 drawCenteredDdcGlyph(dc,contrast?L"\uE7A1":L"\uE706",
                     iconCenter,contrast?15:18,p.subtle);
-                RECT number{right-px(54),y,right-px(4),y+px(28)};
+                // Percentage begins beside the slider's channel, rather
+                // than being pushed to the right edge of a wide text box.
+                const int percentLeft=right-px(nightlight::kDdcPercentageBlockDip);
+                RECT number{percentLeft,y,right,y+px(28)};
                 const int percent=GetCapture()==slider?
                     (static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100:
                     model_.hardwarePercent(row.device,contrast);
                 drawTextAt(dc,formatNumber(percent)+L" %",number,
-                    smallFont_,p.subtle,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+                    smallFont_,p.subtle,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
             };
             drawChannel(row.brightness,row.top+px(36),false);
             drawChannel(row.contrast,row.top+px(66),true);
