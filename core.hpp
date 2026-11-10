@@ -65,9 +65,16 @@ inline constexpr int kDdcSectionBaseDip = 32;
 // All outside edges (top/left/right/bottom) and inter-card gaps use
 // the same 8 DIP, while internal card content padding remains 16 DIP.
 inline constexpr int kCardOuterMarginDip = 8;
-inline constexpr int kCardsTopMarginDip = 8;
-inline constexpr int kCardsGapDip = 8;
+inline constexpr int kCardsTopMarginDip = kCardOuterMarginDip;
+inline constexpr int kCardsGapDip = kCardOuterMarginDip;
 inline constexpr int kCardInnerInsetDip = 16;
+// GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
+inline constexpr int kCardCornerRadiusDip = 8;
+
+// DDC/CI row geometry: slide closer to both Fluent glyph and percentage.
+// The native trackbar keeps its own thumb inset inside the HWND.
+inline constexpr int kDdcSliderLeftInsetDip = 24;
+inline constexpr int kDdcPercentageBlockDip = 48;
 
 // Compact temperature card: title and Kelvin value share the first row,
 // gradient sits immediately below, and its scale labels use the last row.
