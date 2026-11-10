@@ -292,12 +292,22 @@ int main() {
             check(windowOpeningSlideOffset(dpi,opening.value(1075))>0,
                 "Window continues rising while alpha increases");
         }
+        check(Preferences{}.theme==L"system",
+            "Fresh installations default to following Windows");
+        check(effectiveDarkTheme(L"system",true) &&
+              !effectiveDarkTheme(L"system",false),
+            "Follow system uses Windows app colour preference");
+        check(effectiveDarkTheme(L"dark",false) &&
+              effectiveDarkTheme(L"dark",true) &&
+              !effectiveDarkTheme(L"light",true) &&
+              !effectiveDarkTheme(L"light",false),
+            "Manual dark and light choices override the Windows preference");
         const std::vector<int> tabs{260,250,270};
         check(kCardOuterMarginDip==16 &&
               kCardsTopMarginDip==kCardOuterMarginDip &&
-              kCardsGapDip==8 &&
+              kCardsGapDip==16 &&
               kCardInnerInsetDip==16,
-            "Outer top, side and bottom margins are all 16 DIP; card gaps stay 8 DIP");
+            "Outside top, side, bottom and inter-card spacing are each 16 DIP");
         check(kCardCornerRadiusDip==8 &&
               kCardCornerRadiusDip*2==16,
             "All section cards use an explicit 8 DIP radius (16 DIP arc diameter)");
@@ -309,13 +319,13 @@ int main() {
             kCardsTopMarginDip+(46+38)+kCardsGapDip+
             kTemperatureUnlockedHeightDip+kCardsGapDip+
             (kDdcSectionBaseDip+kDdcRowStepDip)+kCardOuterMarginDip,
-            "Visible three-card height has 16 DIP top/bottom and 8 DIP between sections");
+            "Visible three-card height has 16 DIP top/bottom and between sections");
         check(singleHidden.clientHeight==
             kCardsTopMarginDip+(46+38)+kCardsGapDip+
             kTemperatureUnlockedHeightDip+kCardOuterMarginDip &&
             singleVisible.clientHeight-singleHidden.clientHeight==
                 kCardsGapDip+kDdcSectionBaseDip+kDdcRowStepDip,
-            "Hidden DDC removes only its card and the intervening 8-DIP gap");
+            "Hidden DDC removes only its card and the intervening 16-DIP gap");
         const auto wide=calculateWindowContentMinimum(96,980,tabs,2,false,true);
         const auto narrow=calculateWindowContentMinimum(96,420,tabs,2,false,true);
         check(wide.screenRows==1 && narrow.screenRows>=2,
@@ -331,15 +341,18 @@ int main() {
         check(moreDdc.clientWidth==narrow.clientWidth,
             "Additional DDC monitor rows do not force a wider window");
         check(moreDdc.clientHeight-narrow.clientHeight==kDdcRowStepDip,
-            "Each additional monitor receives a compact 112-DIP DDC row");
-        check(kDdcFirstRowTopDip==36 &&
-              kDdcFirstRowTopDip-32==4,
-            "DDC title-to-monitor gap increases by exactly 2 DIP (2 to 4)");
-        check(kDdcSectionBaseDip==34 && kDdcRowStepDip==100 &&
+            "Each additional monitor adds exactly 110 DIP including the +10 DIP gap");
+        check(kDdcFirstRowTopDip==46 &&
+              kDdcFirstRowTopDip-32==14,
+            "DDC heading-to-first-monitor gap increased by exactly 10 DIP");
+        check(kDdcSectionBaseDip==34 && kDdcRowStepDip==110 &&
               kDdcFirstRowTopDip+66+28<=kDdcSectionBaseDip+kDdcRowStepDip,
-            "DDC card height grows by 2 DIP and still fits both sliders");
-        check(kDdcFirstRowTopDip+66+28<kDdcFirstRowTopDip+kDdcRowStepDip,
-            "Vertically stacked DDC monitor rows never overlap");
+            "DDC card grows with taller rows and preserves bottom padding");
+        check(kDdcRowStepDip-66-28==16,
+            "Contrast slider to next monitor has 16 DIP, 10 more than before");
+        check(kDdcFirstRowTopDip+66+28<
+              kDdcFirstRowTopDip+kDdcRowStepDip,
+            "Taller DDC monitor rows never overlap");
         const auto twoMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,2,false,true);
         const auto threeMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,3,false,true);
         check(threeMonitorsWide.clientHeight>twoMonitorsWide.clientHeight,
@@ -541,7 +554,10 @@ int main() {
             Preferences updated=model.preferences();
             updated.locale=L"en-US";
             updated.startup=L"minimized";
+            updated.theme=L"system";
             model.updatePreferences(updated);
+            check(model.preferences().theme==L"system",
+                "System-following theme remains a distinct persisted preference");
             check(model.lastError().empty(),"Persist preferences");
             check(model.hardwarePercent(L"test-display-1",false)==50,"Unseen controls have a numeric default");
             check(!model.hasHardwarePercent(L"test-display-1",false),"Unknown UI defaults are not eligible for hardware restoration");
@@ -557,6 +573,8 @@ int main() {
             check(model.load(),"Reload from same folder");
             check(model.preferences().locale==L"en-US","Saved language");
             check(model.preferences().startup==L"minimized","Saved startup mode");
+            check(model.preferences().theme==L"system",
+                "System-following theme round-trips through portable config");
             const auto restoredWindow=model.windowPosition();
             check(restoredWindow && restoredWindow->x==-1900 && restoredWindow->y==235,
                 "Persist and restore screen position across application starts");
@@ -578,6 +596,8 @@ int main() {
             check(ReadFile(handle,content.data(),size,&received,nullptr),"Read bytes");
             CloseHandle(handle);
             auto saved=Json::parse(content);
+            check(saved.get("general").get("appearance").str()=="system",
+                "Portable config retains system theme mode");
             check(saved.get("general").get("window_position").get("x").integer()==-1900 &&
                 saved.get("general").get("window_position").get("y").integer()==235 &&
                 saved.get("general").get("window_position").get("width").integer()==200 &&
