@@ -33,6 +33,25 @@ std::string toUtf8(const std::wstring& input) {
         static_cast<int>(input.size()), result.data(), size, nullptr, nullptr);
     return result;
 }
+bool systemAppsUseDarkTheme() {
+    // The Windows *app* theme is independent of the taskbar/system theme.
+    // A missing or unreadable value defaults to Windows' usual light mode.
+    constexpr wchar_t key[]=
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    DWORD useLight=1, type=0, bytes=sizeof(useLight);
+    HKEY handle=nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,key,0,KEY_QUERY_VALUE,&handle)!=ERROR_SUCCESS)
+        return false;
+    const LSTATUS result=RegQueryValueExW(handle,L"AppsUseLightTheme",
+        nullptr,&type,reinterpret_cast<LPBYTE>(&useLight),&bytes);
+    RegCloseKey(handle);
+    return result==ERROR_SUCCESS && type==REG_DWORD &&
+        bytes==sizeof(useLight) && useLight==0;
+}
+bool effectiveDarkTheme(const std::wstring& preference,bool systemDark) {
+    return preference==L"dark" ||
+        (preference==L"system" && systemDark);
+}
 fs::path executableDirectory() {
     std::vector<wchar_t> path(32768, 0);
     const DWORD written = GetModuleFileNameW(nullptr, path.data(),
@@ -445,7 +464,9 @@ bool Model::load() {
     const auto& general = root_.get("general");
     const std::string lang = general.get("language").str("en-US");
     preferences_.locale = (lang == "pt" || lang == "pt-PT") ? L"pt-PT" : L"en-US";
-    preferences_.theme = general.get("appearance").str() == "light" ? L"light" : L"dark";
+    const std::string appearance=general.get("appearance").str("system");
+    preferences_.theme=appearance=="light"?L"light":
+        appearance=="dark"?L"dark":L"system";
     const std::string startup = general.get("startup_mode").str("normal");
     preferences_.startup = (startup == "minimized" || startup == "tray")
         ? fromUtf8(startup) : L"normal";
@@ -827,7 +848,8 @@ bool Model::renameMonitor(size_t index, const std::wstring& alias) {
 }
 void Model::updatePreferences(const Preferences& updated) {
     preferences_.locale = updated.locale == L"pt-PT" ? L"pt-PT" : L"en-US";
-    preferences_.theme = updated.theme == L"light" ? L"light" : L"dark";
+    preferences_.theme = updated.theme==L"light"?L"light":
+        updated.theme==L"dark"?L"dark":L"system";
     preferences_.startup = (updated.startup == L"tray" ||
         updated.startup == L"minimized") ? updated.startup : L"normal";
     save();
