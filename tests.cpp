@@ -264,9 +264,14 @@ int main() {
         // Each monitor tab fits its complete name and its independent switch,
         // with no standalone Enabled button or truncated-label width cap.
         const std::vector<int> tabs{260,250,270};
-        check(kCardOuterMarginDip==8 && kCardsTopMarginDip==8 &&
-              kCardsGapDip==8 && kCardInnerInsetDip==16,
-            "All outer edges and section gaps are equal at eight DIP");
+        check(kCardOuterMarginDip==8 &&
+              kCardsTopMarginDip==kCardOuterMarginDip &&
+              kCardsGapDip==kCardOuterMarginDip &&
+              kCardInnerInsetDip==16,
+            "Top, side, bottom and inter-section margins share exactly 8 DIP");
+        check(kCardCornerRadiusDip==8 &&
+              kCardCornerRadiusDip*2==16,
+            "All section cards use an explicit 8 DIP radius (16 DIP arc diameter)");
         const auto singleVisible=calculateWindowContentMinimum(96,980,
             {200},1,true,true);
         const auto singleHidden=calculateWindowContentMinimum(96,980,
@@ -372,12 +377,29 @@ int main() {
         check(temperatureSliderWidth(96,200)==144 &&
               temperatureSliderWidth(96,800)==744,
             "Temperature slider follows reduced 8 DIP outer margins");
-        check(ddcSliderWidth(96,200)==68 &&
-              ddcSliderWidth(96,800)==668,
-            "DDC sliders follow reduced 8 DIP outer margins");
+        check(ddcSliderWidth(96,200)==80 &&
+              ddcSliderWidth(96,800)==680,
+            "DDC slider fills more of the area between icons and percent readings");
         check(temperatureSliderWidth(144,300)==216 &&
-              ddcSliderWidth(144,300)==102,
-            "Equalized external margins scale correctly with DPI");
+              ddcSliderWidth(144,300)==120,
+            "Tighter DDC spacing remains DPI aware");
+        for (int dpi:{96,120,144,192}) {
+            const auto dip=[dpi](int v) { return MulDiv(v,dpi,96); };
+            for (int clientWidth:{200,350,560,1024}) {
+                const int contentLeft=dip(kCardOuterMarginDip+kCardInnerInsetDip);
+                const int right=clientWidth-contentLeft;
+                const int sliderLeft=contentLeft+dip(kDdcSliderLeftInsetDip);
+                const int percentLeft=right-dip(kDdcPercentageBlockDip);
+                const int width=ddcSliderWidth(dpi,clientWidth);
+                check(width>0 && sliderLeft+width==percentLeft,
+                    "DDC slider HWND reaches exactly the percentage field boundary");
+                check(kDdcSliderLeftInsetDip==24 && kDdcPercentageBlockDip==48,
+                    "Compact DDC inset and percentage width are stable across DPI");
+                check(percentLeft<right &&
+                      percentLeft-sliderLeft>=dip(16),
+                    "DDC slider and label stay separated at 200px minimum window width");
+            }
+        }
         // Tray selection must toggle on every physical down, including the
         // second press of a double-click, but not again on its release.
         nightlight::TrayClickFilter tray;
