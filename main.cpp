@@ -256,6 +256,8 @@ private:
     int panelTop_ = 84, panelHeight_ = 142, secondPanelTop_ = 238;
     bool dragging_ = false;
     bool trayReady_ = false, shuttingDown_ = false;
+    bool trayVersion4_ = false;
+    ULONGLONG lastTrayClick_ = 0;
     UINT taskbarCreated_ = 0;
     NOTIFYICONDATAW notify_ = {};
 
@@ -1409,6 +1411,22 @@ private:
         }
         SetForegroundWindow(window_);
     }
+    void toggleTrayWindow() {
+        // Minimized windows are not displayed, so a click should restore them.
+        if (IsWindowVisible(window_) && !IsIconic(window_)) {
+            ShowWindow(window_,SW_HIDE);
+        } else {
+            openWindow();
+        }
+    }
+    void handleTrayActivation() {
+        // Ignore the second activation from a double-click. A single
+        // physical activation must never immediately undo the first toggle.
+        const ULONGLONG now=GetTickCount64();
+        if (lastTrayClick_ && now-lastTrayClick_<=GetDoubleClickTime()) return;
+        lastTrayClick_=now;
+        toggleTrayWindow();
+    }
     bool addTray() {
         ZeroMemory(&notify_,sizeof(notify_));
         notify_.cbSize=sizeof(notify_);
@@ -1420,13 +1438,14 @@ private:
         wcscpy_s(notify_.szTip,L"NightLight");
         if (!Shell_NotifyIconW(NIM_ADD,&notify_)) return false;
         notify_.uVersion=NOTIFYICON_VERSION_4;
-        Shell_NotifyIconW(NIM_SETVERSION,&notify_);
+        // Prefer NIN_SELECT on version-4 trays; legacy shells use WM_LBUTTONUP.
+        trayVersion4_=Shell_NotifyIconW(NIM_SETVERSION,&notify_)!=FALSE;
         trayReady_=true;
         return true;
     }
     void removeTray() {
         if (trayReady_) Shell_NotifyIconW(NIM_DELETE,&notify_);
-        trayReady_=false;
+        trayReady_=false; trayVersion4_=false;
     }
     HMENU buildTrayMenu(std::vector<HBITMAP>& icons) {
         auto createMenu=[] {
@@ -1614,7 +1633,11 @@ private:
         case WM_TRAY_ICON: {
             const UINT event=LOWORD(lParam);
             if(event==WM_CONTEXTMENU || event==WM_RBUTTONUP)popupTray();
-            else if(event==WM_LBUTTONDBLCLK || event==WM_LBUTTONUP || event==NIN_SELECT || event==NIN_KEYSELECT)openWindow();
+            else if (event==NIN_SELECT || event==NIN_KEYSELECT ||
+                     (!trayVersion4_ && event==WM_LBUTTONUP)) {
+                handleTrayActivation();
+            }
+            // Do not also handle WM_LBUTTONDBLCLK: it would undo the toggle.
             return 0;
         }
         case WM_SHOW_EXISTING: openWindow(); return 0;
