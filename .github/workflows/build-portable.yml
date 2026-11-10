@@ -1,0 +1,39 @@
+name: Build portable NightLight
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure Release build
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+
+      - name: Build portable executable and tests
+        run: cmake --build build --config Release --parallel
+
+      - name: Run native regression tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Prepare standalone EXE
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath "build/Release/NightLight.exe" -Destination "NightLight.exe" -Force
+          Get-FileHash -LiteralPath "NightLight.exe" -Algorithm SHA256
+
+      - name: Upload portable executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: NightLight-Portable-Win64
+          path: NightLight.exe
+          if-no-files-found: error
+          retention-days: 30
