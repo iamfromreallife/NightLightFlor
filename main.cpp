@@ -763,6 +763,58 @@ private:
         wchar_t label[256]{}; GetWindowTextW(control,label,256);
         return textWidth(label)+px(46);
     }
+    nightlight::WindowContentMinimum minimumContentForWidth(int clientWidth) const {
+        std::vector<int> tabWidths;
+        tabWidths.reserve(model_.monitors().size());
+        for (const auto& monitor:model_.monitors())
+            tabWidths.push_back(textWidth(monitor.displayName(),boldFont_)+px(50));
+        const int enableWidth=textWidth(tr(L"Enabled",L"Ativo"))+px(42);
+        // The exit animation still draws hardware while it is collapsing.
+        const bool hardwareShown=ddcVisible_ ||
+            (hardwareReveal_.active(uiTime()) && hardwareReveal_.value(uiTime())>0);
+        return nightlight::calculateWindowContentMinimum(
+            static_cast<int>(dpi_),clientWidth,enableWidth,tabWidths,
+            hardwareRows_.size(),gammaUnlocked_,hardwareShown);
+    }
+    SIZE frameThickness() const {
+        RECT frame{};
+        const DWORD style=window_?static_cast<DWORD>(GetWindowLongPtrW(window_,GWL_STYLE)):
+            (WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN);
+        const DWORD exstyle=window_?static_cast<DWORD>(GetWindowLongPtrW(window_,GWL_EXSTYLE)):0;
+        AdjustWindowRectExForDpi(&frame,style,FALSE,exstyle,dpi_);
+        return SIZE{frame.right-frame.left,frame.bottom-frame.top};
+    }
+    SIZE requiredWindowSizeForWidth(int outerWidth) const {
+        const SIZE frame=frameThickness();
+        const auto needed=minimumContentForWidth(std::max(1,outerWidth-frame.cx));
+        return SIZE{needed.clientWidth+frame.cx,needed.clientHeight+frame.cy};
+    }
+    bool ensureWindowFitsContents() {
+        if (!window_ || IsIconic(window_) || IsZoomed(window_)) return false;
+        RECT rect{};
+        if (!GetWindowRect(window_,&rect)) return false;
+        const int originalWidth=rect.right-rect.left;
+        const int originalHeight=rect.bottom-rect.top;
+        const SIZE needed=requiredWindowSizeForWidth(originalWidth);
+        const int newWidth=std::max(originalWidth,static_cast<int>(needed.cx));
+        // The minimum height depends on the eventual width because screen
+        // tabs can wrap to additional rows.
+        const SIZE finalNeeded=requiredWindowSizeForWidth(newWidth);
+        const int newHeight=std::max(originalHeight,static_cast<int>(finalNeeded.cy));
+        if (newWidth==originalWidth && newHeight==originalHeight) return false;
+        int x=rect.left,y=rect.top;
+        MONITORINFO screen{sizeof(screen)};
+        if (GetMonitorInfoW(MonitorFromRect(&rect,MONITOR_DEFAULTTONEAREST),&screen)) {
+            const RECT& work=screen.rcWork;
+            x=std::clamp(x,static_cast<int>(work.left),
+                std::max(static_cast<int>(work.left),static_cast<int>(work.right)-newWidth));
+            y=std::clamp(y,static_cast<int>(work.top),
+                std::max(static_cast<int>(work.top),static_cast<int>(work.bottom)-newHeight));
+        }
+        SetWindowPos(window_,nullptr,x,y,newWidth,newHeight,
+            SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS);
+        return true;
+    }
     void layout() {
         if (!window_ || layingOut_) return;
         if (!layoutDepth_) layoutTime_=uiTime();
@@ -1619,9 +1671,34 @@ private:
             return 0;
         case WM_GETMINMAXINFO: {
             auto* sizes=reinterpret_cast<MINMAXINFO*>(lParam);
-            sizes->ptMinTrackSize.x=px(420);
-            sizes->ptMinTrackSize.y=px(260);
+            RECT current{}; GetWindowRect(hwnd,&current);
+            const SIZE minimum=requiredWindowSizeForWidth(
+                std::max(px(420),static_cast<int>(current.right-current.left)));
+            sizes->ptMinTrackSize.x=std::max(static_cast<LONG>(minimum.cx),sizes->ptMinTrackSize.x);
+            sizes->ptMinTrackSize.y=std::max(static_cast<LONG>(minimum.cy),sizes->ptMinTrackSize.y);
             return 0;
+        }
+        case WM_SIZING: {
+            // When a side border is dragged, narrower width may wrap tabs and
+            // require a taller window. Clamp the actual drag rectangle.
+            auto* proposed=reinterpret_cast<RECT*>(lParam);
+            if (!proposed) return TRUE;
+            const SIZE minimum=requiredWindowSizeForWidth(
+                proposed->right-proposed->left);
+            const int minWidth=static_cast<int>(minimum.cx);
+            if (proposed->right-proposed->left<minWidth) {
+                if (wParam==WMSZ_LEFT || wParam==WMSZ_TOPLEFT || wParam==WMSZ_BOTTOMLEFT)
+                    proposed->left=proposed->right-minWidth;
+                else proposed->right=proposed->left+minWidth;
+            }
+            const SIZE finalMinimum=requiredWindowSizeForWidth(
+                proposed->right-proposed->left);
+            if (proposed->bottom-proposed->top<finalMinimum.cy) {
+                if (wParam==WMSZ_TOP || wParam==WMSZ_TOPLEFT || wParam==WMSZ_TOPRIGHT)
+                    proposed->top=proposed->bottom-finalMinimum.cy;
+                else proposed->bottom=proposed->top+finalMinimum.cy;
+            }
+            return TRUE;
         }
         case WM_DPICHANGED: {
                 dpi_=HIWORD(wParam);
