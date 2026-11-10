@@ -55,11 +55,11 @@ int sliderPositionFromX(int x,int left,int right,int minimum,int maximum);
 RECT sliderHitRect(RECT visualTrack, int horizontalPadding, int verticalPadding);
 
 // DIP-based DDC/CI spacing shared by layout and minimum-size calculations.
-// Each row fits a 32-DIP monitor button, two 28-DIP sliders and the optional
-// inline error message, without an inter-monitor separator.
+// Each row fits a 32-DIP monitor button and two 28-DIP sliders; errors
+// appear beside the name instead of reserving a blank footer.
 inline constexpr int kDdcFirstRowTopDip = 34;
-inline constexpr int kDdcRowStepDip = 112;
-inline constexpr int kDdcSectionBaseDip = 40;
+inline constexpr int kDdcRowStepDip = 100;
+inline constexpr int kDdcSectionBaseDip = 32;
 
 // Minimum dimensions are derived from the live monitor-tab wrapping and the
 // visible sections. The computation is independent of the window manager so
