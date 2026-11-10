@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include "json.hpp"
 
@@ -89,6 +90,9 @@ public:
     bool hasHardwarePercent(const std::wstring& device,bool contrast) const;
     int hardwarePercent(const std::wstring& device,bool contrast) const;
     bool rememberHardwarePercent(const std::wstring& device,bool contrast,int percent);
+    // Physical desktop coordinates; keep negative values for monitors to the left.
+    bool rememberWindowPosition(int x, int y);
+    std::optional<POINT> windowPosition() const { return windowPosition_; }
     void restoreOriginals();
     void migrateAutorunEntry() const;
 
@@ -127,6 +131,7 @@ private:
     std::filesystem::path configPath_;
     portable::Json root_ = portable::Json::object();
     Preferences preferences_;
+    std::optional<POINT> windowPosition_;
     std::vector<Monitor> monitors_;
     std::map<std::wstring, Ramp> originals_;
     std::string savedDocument_;
