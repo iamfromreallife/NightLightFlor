@@ -1572,7 +1572,9 @@ private:
                 // BEFORE Windows enters its minimized state. Calling
                 // ShowWindow(SW_HIDE) reentrantly from WM_SIZE can recurse
                 // into WM_SHOWWINDOW/layout while the client is minimized.
-                hideWindowToTray();
+                // Defer hiding until the current system command returns.
+                // No nested WM_SHOWWINDOW or layout inside the system handler.
+                PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,TRUE,0);
                 return 0;
             }
             break;
@@ -1586,9 +1588,10 @@ private:
             } else layout();
             return 0;
         case WM_MINIMIZE_TO_TRAY:
-            // The user might already have restored the window; only hide
-            // if it is still minimized when this deferred message arrives.
-            if (trayReady_ && !shuttingDown_ && IsIconic(hwnd))
+            // wParam=TRUE is a queued SC_MINIMIZE, intercepted before iconify.
+            // wParam=FALSE is an external minimize, which may have been restored.
+            if (trayReady_ && !shuttingDown_ && IsWindowVisible(hwnd) &&
+                (wParam != FALSE || IsIconic(hwnd)))
                 hideWindowToTray();
             return 0;
         case WM_CLOSE:
