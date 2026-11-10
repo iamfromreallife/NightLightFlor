@@ -30,7 +30,7 @@ using nightlight::Preferences;
 
 namespace {
 constexpr int ID_DDC = 1011, ID_DDC_SLIDER_BASE = 5000;
-constexpr int ID_ENABLE = 1005, ID_RENAME_EDIT = 1006, ID_INLINE_SAVE = 1007;
+constexpr int ID_ENABLE = 1005, ID_RENAME_EDIT = 1006;
 constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012;
 constexpr UINT TIMER_GAMMA = 11;
 constexpr UINT TIMER_STATE = 12;
@@ -230,7 +230,7 @@ private:
     unsigned recoveryAttempt_=0;
     int hardwareTop_ = 0;
     int hardwareHeight_ = 186;
-    HWND btnRefresh_=nullptr, btnEnable_=nullptr, editName_=nullptr, btnInlineSave_=nullptr;
+    HWND btnRefresh_=nullptr, btnEnable_=nullptr, editName_=nullptr;
     bool editingName_=false;
     std::wstring editingDevice_;
     std::map<std::wstring,int> tabDesiredWidths_;
@@ -557,7 +557,7 @@ private:
         boldFont_ = create(14, FW_SEMIBOLD);
         headlineFont_ = create(30, FW_NORMAL);
         tabDesiredWidths_.clear();
-        const HWND controls[] = {btnRefresh_,btnEnable_,btnGamma_,editName_,btnInlineSave_};
+        const HWND controls[] = {btnRefresh_,btnEnable_,btnGamma_,editName_};
         for (HWND control : controls) {
             if (control) SendMessageW(control, WM_SETFONT,
                 reinterpret_cast<WPARAM>(font_), TRUE);
@@ -598,7 +598,6 @@ private:
         SendMessageW(editName_, EM_LIMITTEXT, 64, 0);
         SendMessageW(editName_,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(0,0));
         SetWindowSubclass(editName_,editFieldProc,1,reinterpret_cast<DWORD_PTR>(this));
-        btnInlineSave_=createButton(ID_INLINE_SAVE,L"");
         refreshTabs();
         updateFonts();
         updateLanguage();
@@ -631,7 +630,7 @@ private:
         DwmSetWindowAttribute(window_,34,&frameBorder,sizeof(frameBorder));
         repaint();
         for (HWND h : tabs_) InvalidateRect(h, nullptr,FALSE);
-        const HWND buttons[] = {btnRefresh_,btnEnable_,btnGamma_,btnInlineSave_};
+        const HWND buttons[] = {btnRefresh_,btnEnable_,btnGamma_};
         for (HWND b : buttons) if (b) InvalidateRect(b, nullptr,FALSE);
         for (const auto& row:hardwareRows_) { InvalidateRect(row.brightness,nullptr,FALSE); InvalidateRect(row.contrast,nullptr,FALSE); }
     }
@@ -683,7 +682,6 @@ private:
         SetWindowTextW(editName_,model_.monitors()[index].displayName().c_str());
         layout();
         SetWindowPos(editName_,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-        SetWindowPos(btnInlineSave_,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
         RedrawWindow(editName_,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOERASE);
         SetFocus(editName_);
         SendMessageW(editName_,EM_SETSEL,0,-1);
@@ -694,7 +692,6 @@ private:
         const auto device=editingDevice_;editingName_=false;editingDevice_.clear();
         wchar_t value[70]{};GetWindowTextW(editName_,value,70);
         ShowWindow(editName_,SW_HIDE);
-        ShowWindow(btnInlineSave_,SW_HIDE);
         if(save)for(size_t i=0;i<model_.monitors().size();++i)if(model_.monitors()[i].device==device) {
             const std::wstring alias=value==model_.monitors()[i].windowsName?L"":value;
             model_.renameMonitor(i,alias);
@@ -776,11 +773,8 @@ private:
             if (tabX>tabStart && tabX+tabW>tabsRight) { tabX=tabStart; tabY+=px(38); ++rows; }
             place(tabs_[i],tabX,tabY,tabW,tabH,TRUE);
             if(editingName_ && m.device==editingDevice_) {
-                const int checkW=px(25);
-                // The editable field retains the exact bounds of the tab.
-                // Keep the save button overlaid inside, never beside, the tab.
+                // Edit directly in the tab; Enter saves and Escape cancels.
                 place(editName_,tabX,tabY,tabW,tabH,TRUE);
-                place(btnInlineSave_,tabX+tabW-checkW-px(3),tabY+px(4),checkW,tabH-px(8),TRUE);
             }
             tabX+=tabW+tabGap;
         }
@@ -841,7 +835,7 @@ private:
         const UINT flags=SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW;
         auto visibility=[&](HWND control) -> UINT {
             if (control==btnGamma_) return gammaUnlocked_?SWP_HIDEWINDOW:SWP_SHOWWINDOW;
-            if(control==editName_ || control==btnInlineSave_)return editingName_?SWP_SHOWWINDOW:SWP_HIDEWINDOW;
+            if(control==editName_)return editingName_?SWP_SHOWWINDOW:SWP_HIDEWINDOW;
             if (hardwareRow(control)) return hardwareProgress>0?SWP_SHOWWINDOW:SWP_HIDEWINDOW;
             return 0;
         };
@@ -867,7 +861,7 @@ private:
             const int lineH=metrics.tmHeight>0?metrics.tmHeight:px(17);
             const int lineTop=std::max(0,(static_cast<int>(bounds.bottom)-lineH)/2);
             const RECT textRect{px(8),lineTop,
-                std::max(px(9),static_cast<int>(bounds.right)-px(34)),
+                std::max(px(9),static_cast<int>(bounds.right)-px(8)),
                 std::min(static_cast<int>(bounds.bottom),lineTop+lineH)};
             SendMessageW(editName_,EM_SETRECT,0,reinterpret_cast<LPARAM>(&textRect));
         }
@@ -1231,7 +1225,7 @@ private:
                 foreground=p.selectedText;
             }
         }
-        if(id==ID_REFRESH || id==ID_INLINE_SAVE){label.clear();background=p.accent;border=p.accent;foreground=RGB(255,255,255);}
+        if(id==ID_REFRESH){label.clear();background=p.accent;border=p.accent;foreground=RGB(255,255,255);}
         auto& interaction=interactions_[item.hwndItem];
         const auto now=uiTime();
         const double hover=interaction.hover.value(now);
@@ -1267,13 +1261,6 @@ private:
                 {ex-4.5f*tx-2.8f*nx,ey-4.5f*ty-2.8f*ny}};
             Gdiplus::SolidBrush tip(drawingColor(foreground));
             g.FillPolygon(&tip,arrow,3);
-        }
-        if(id==ID_INLINE_SAVE) {
-            Gdiplus::Graphics g(dc);g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::Pen pen(drawingColor(RGB(255,255,255)),2.0f*dpi_/96);
-            pen.SetStartCap(Gdiplus::LineCapRound);pen.SetEndCap(Gdiplus::LineCapRound);
-            const float x=static_cast<float>((rc.left+rc.right)/2),y=static_cast<float>((rc.top+rc.bottom)/2);
-            g.DrawLine(&pen,x-px(5),y,x-px(1),y+px(4));g.DrawLine(&pen,x-px(1),y+px(4),x+px(6),y-px(4));
         }
         if (monitorButton && !(editingName_ && model_.monitors()[id-ID_MONITOR_BASE].device==editingDevice_)) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
@@ -1513,8 +1500,7 @@ private:
     }
     void handleCommand(int id,int code) {
         if (code==BN_CLICKED) {
-            if (id==ID_INLINE_SAVE)finishInlineRename(true);
-            else if (id==ID_REFRESH) { refreshTurn_.to(refreshTurn_.value(uiTime())+360.0,uiTime(),460,animations_ && IsWindowVisible(window_)); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
+            if (id==ID_REFRESH) { refreshTurn_.to(refreshTurn_.value(uiTime())+360.0,uiTime(),460,animations_ && IsWindowVisible(window_)); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
             else if (id==ID_GAMMA) unlockGamma();
             else if (id==ID_ENABLE && hasMonitor()) {
                 model_.updateEnabled(selected_,!selectedMonitor()->enabled);
