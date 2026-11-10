@@ -210,7 +210,8 @@ public:
         const std::wstring launch = nightlight::resolveStartup(
             model_.preferences().startup, argument_, trayReady_);
         if (trayReady_ && (launch == L"tray" || launch == L"minimized")) {
-            ShowWindow(window_, SW_HIDE);
+            // Start hidden without transferring focus to Explorer.
+            SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         } else {
             ShowWindow(window_, show == SW_SHOWDEFAULT ? SW_SHOWNORMAL : show);
         }
@@ -1682,13 +1683,21 @@ private:
         SetForegroundWindow(window_);
     }
     void hideWindowToTray() {
-        // Hide rather than minimize: this keeps the window out of the taskbar
-        // without destroying it or interrupting per-monitor adjustments.
+        // Minimize, Close (X) and tray-click dismissal share this path.
+        // ShowWindow(SW_HIDE) asks Windows to activate another window; with
+        // our hidden tool-window owner that can activate Explorer / Start
+        // and spuriously display the Start-button tooltip.
+        // SetWindowPos(SWP_HIDEWINDOW | SWP_NOACTIVATE) instead keeps the
+        // focus transfer out of NightLight's control without requesting
+        // another activation or changing its saved window geometry.
         if (trayReady_ && !shuttingDown_) {
-            // Do not block the UI waiting for config.json to be written.
-            // The existing save timer persists geometry after the click.
+            // If closed during the 150ms entrance, restore the normal
+            // geometry and layered state before capturing its position.
+            finishEntrance();
+            // Dismiss only our own tooltip, not Explorer's taskbar tooltips.
+            if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
             noteWindowPosition();
-            ShowWindow(window_,SW_HIDE);
+            SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         }
     }
     void toggleTrayWindow() {
