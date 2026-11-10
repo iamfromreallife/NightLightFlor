@@ -1440,7 +1440,15 @@ private:
             const auto& mon=model_.monitors()[index];
             active=index==selected_;
             label=screenButton && editingName_ && mon.device==editingDevice_?L"":mon.displayName();
-            if (active) { background=p.selected; foreground=p.selectedText; border=p.border; }
+            if (active) {
+                // Make only the selected tab in Screens slightly darker.
+                // Preserve the existing DDC chip treatment and Windows
+                // high-contrast palette for accessibility.
+                background=(screenButton && !highContrast_)
+                    ? mix(p.selected,RGB(0,0,0),0.07) : p.selected;
+                foreground=p.selectedText;
+                border=p.border;
+            }
         } else {
             wchar_t buf[256]{};
             GetWindowTextW(item.hwndItem,buf,256);
