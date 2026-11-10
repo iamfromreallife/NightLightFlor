@@ -1430,9 +1430,10 @@ private:
             Gdiplus::FontFamily mdl2(L"Segoe MDL2 Assets");
             const Gdiplus::FontFamily* family=fluent.IsAvailable()?&fluent:&mdl2;
             Gdiplus::GraphicsPath glyph;
-            Gdiplus::StringFormat typography(Gdiplus::StringFormat::GenericTypographic());
+            const Gdiplus::StringFormat* typography=
+                Gdiplus::StringFormat::GenericTypographic();
             glyph.AddString(L"\uE777",1,family,Gdiplus::FontStyleRegular,19.0f,
-                Gdiplus::PointF(0.0f,0.0f),&typography);
+                Gdiplus::PointF(0.0f,0.0f),typography);
             Gdiplus::RectF ink{};
             if (glyph.GetBounds(&ink)==Gdiplus::Ok &&
                 ink.Width>0.0f && ink.Height>0.0f) {
