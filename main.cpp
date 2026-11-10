@@ -47,6 +47,7 @@ constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_SHOW_EXISTING = WM_APP + 38;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
+constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 42;
 constexpr UINT TIMER_DISPLAYS = 10;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
 constexpr int ICON_RESOURCE = 101;
@@ -1411,10 +1412,15 @@ private:
         }
         SetForegroundWindow(window_);
     }
+    void hideWindowToTray() {
+        // Hide rather than minimize: this keeps the window out of the taskbar
+        // without destroying it or interrupting per-monitor adjustments.
+        if (trayReady_ && !shuttingDown_) ShowWindow(window_,SW_HIDE);
+    }
     void toggleTrayWindow() {
         // Minimized windows are not displayed, so a click should restore them.
         if (IsWindowVisible(window_) && !IsIconic(window_)) {
-            ShowWindow(window_,SW_HIDE);
+            hideWindowToTray();
         } else {
             openWindow();
         }
@@ -1560,15 +1566,33 @@ private:
         switch (msg) {
         case WM_CREATE:
             initControls(); return 0;
+        case WM_SYSCOMMAND:
+            if ((wParam & 0xFFF0)==SC_MINIMIZE && trayReady_ && !shuttingDown_) {
+                // Handle the title-bar button, Alt+Space+N and Win+Down
+                // BEFORE Windows enters its minimized state. Calling
+                // ShowWindow(SW_HIDE) reentrantly from WM_SIZE can recurse
+                // into WM_SHOWWINDOW/layout while the client is minimized.
+                hideWindowToTray();
+                return 0;
+            }
+            break;
         case WM_SIZE:
             if (wParam==SIZE_MINIMIZED) {
-                if (trayReady_) {
-                    ShowWindow(hwnd,SW_HIDE);
-                }
+                // Fallback for ShowWindow(SW_MINIMIZE), Win+M and external
+                // minimize requests that bypass WM_SYSCOMMAND. Never hide
+                // synchronously inside WM_SIZE.
+                if (trayReady_ && !shuttingDown_)
+                    PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,0,0);
             } else layout();
             return 0;
+        case WM_MINIMIZE_TO_TRAY:
+            // The user might already have restored the window; only hide
+            // if it is still minimized when this deferred message arrives.
+            if (trayReady_ && !shuttingDown_ && IsIconic(hwnd))
+                hideWindowToTray();
+            return 0;
         case WM_CLOSE:
-                if (trayReady_ && !shuttingDown_) ShowWindow(hwnd,SW_HIDE);
+            if (trayReady_ && !shuttingDown_) hideWindowToTray();
             else DestroyWindow(hwnd);
             return 0;
         case WM_GETMINMAXINFO: {
@@ -1601,7 +1625,10 @@ private:
             sizeAnchorValid_=false; layout(); return 0;
         case WM_SHOWWINDOW:
             if (!wParam) {
-                finishEntrance();finishReordering(); hardwareReveal_.finish(); layout();
+                finishEntrance();finishReordering(); hardwareReveal_.finish();
+                // Minimized windows have zero/invalid client geometry.
+                // Reflow after restore, not while Windows is minimizing.
+                if (!IsIconic(hwnd)) layout();
                 stopAnimationTimer();
                 endHardwareDrag();finishScreenDrag();
                 temperatureHover_=false; temperatureEngagement_.snap(0);
