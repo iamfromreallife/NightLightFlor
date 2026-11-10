@@ -265,8 +265,11 @@ int main() {
         // with no standalone Enabled button or truncated-label width cap.
         // Opening fade and upward translation use exactly the same
         // 150ms motion, ending at the saved resting window coordinates.
-        check(kScreenOffInputGuardMs==4000,
-            "Screen-off protection lasts exactly four seconds after sleep dispatch");
+        check(kScreenOffInputGuardMs==3000,
+            "Screen-off protection lasts exactly three seconds after sleep dispatch");
+        check(kScreenOffButtonSizeDip==28 &&
+              kScreenOffButtonSizeDip<32,
+            "Screen-off button is a smaller 28-DIP square centred beside 32-DIP monitor tabs");
         check(kScreenOffPreparationGraceMs>=1000 &&
               kScreenOffPreparationGraceMs<=4000,
             "Guard startup has a bounded grace period for the display command");
@@ -338,10 +341,13 @@ int main() {
             96,450,{160,160},1,false,true);
         const auto wrappedButton=calculateWindowContentMinimum(
             96,418,{160,160},1,false,true);
+        const auto compactFits=calculateWindowContentMinimum(
+            96,424,{160,160},1,false,true);
         check(noButtonWrap.screenRows==1 &&
+              compactFits.screenRows==1 &&
               wrappedButton.screenRows==2 &&
               wrappedButton.clientHeight-noButtonWrap.clientHeight==38,
-            "Screen-off button stays beside two tabs if possible, otherwise wraps cleanly");
+            "Compact 28-DIP button fits narrower rows without overlapping monitor tabs");
         const auto wide=calculateWindowContentMinimum(96,980,tabs,2,false,true);
         const auto narrow=calculateWindowContentMinimum(96,420,tabs,2,false,true);
         check(wide.screenRows==1 && narrow.screenRows>=2,
