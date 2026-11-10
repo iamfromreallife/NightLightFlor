@@ -9,6 +9,24 @@
 #include <vector>
 
 namespace nightlight {
+void applyDdcObservation(DdcValue& current,const DdcValue& observed,
+                         bool protectUserValue) {
+    // Read and write events share the single I/O worker, but a read queued
+    // before a slider drag may finish after the user has chosen a new target.
+    // Never let that stale read move the live thumb backwards.
+    current.supported=observed.supported;
+    current.readable=observed.readable;
+    current.backend=observed.backend;
+    if (!protectUserValue && observed.readable && observed.hasValue) {
+        current.percent=std::clamp(observed.percent,0,100);
+        current.hasValue=true;
+        current.managed=true; // persist the actual hardware value as fallback
+        current.failed=false;
+    }
+    // If hardware cannot be read, retain the last user value or persisted
+    // fallback. pending, generation and write-grace belong to local writes
+    // and must not be modified by this observation.
+}
 DWORD ddcRawValue(DWORD lo,DWORD hi,int percent) {
     if (hi<=lo) return lo;
     return lo+static_cast<DWORD>((std::uint64_t(hi-lo)*std::clamp(percent,0,100)+50)/100);
@@ -162,6 +180,19 @@ void DdcController::refresh(const std::wstring& device) {
     if (stopping_) return;
     states_[device].loading=true; jobs_[{device,-1}]={}; wake_.notify_one();
 }
+void DdcController::poll(const std::wstring& device) {
+    if (device.empty()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found=states_.find(device);
+    if (stopping_ || found==states_.end()) return;
+    const DdcState& state=found->second;
+    // Never disable sliders or pile up read jobs. A drag should not wait
+    // behind an unnecessary full-hardware poll, nor be reset by one.
+    if (state.loading || state.brightness.pending || state.contrast.pending ||
+        jobs_.find({device,-1})!=jobs_.end()) return;
+    jobs_[{device,-1}]={};
+    wake_.notify_one();
+}
 bool DdcController::set(const std::wstring& device,DdcFeature feature,int percent) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto found=states_.find(device);
@@ -202,21 +233,13 @@ void DdcController::run() {
             const DdcValue brightness=observe(api,monitor,wmi,key.first,0), contrast=observe(api,monitor,wmi,key.first,1);
             std::lock_guard<std::mutex> lock(mutex_);
             auto& state=states_[key.first]; state.loading=false;
-            auto publish=[](DdcValue& value,const DdcValue& observed) {
-                if (!value.pending) {
-                    const auto generation=value.generation;
-                    const int lastPosition=value.percent;
-                    const bool managed=value.managed;
-                    value=observed; value.generation=generation;
-                    if (managed || !value.hasValue) value.percent=lastPosition;
-                    value.managed=managed || value.hasValue;
-                    value.hasValue=true;
-                } else {
-                    value.supported=observed.supported; value.backend=observed.backend;
-                    value.readable=observed.readable;
-                }
+            const auto now=GetTickCount64();
+            auto publish=[now](DdcValue& value,const DdcValue& observed) {
+                const bool protect=value.pending || now<value.protectUntilTickMs;
+                applyDdcObservation(value,observed,protect);
             };
-            publish(state.brightness,brightness); publish(state.contrast,contrast);
+            publish(state.brightness,brightness);
+            publish(state.contrast,contrast);
             if (window_ && !stopping_) PostMessageW(window_,WM_DDC_COMPLETE,0,0);
         } else {
             {
@@ -241,9 +264,10 @@ void DdcController::run() {
             if (value.generation==job.generation) {
                 value.pending=false; value.failed=!ok;
                 if (usedWmi) value.backend=DdcBackend::WindowsWmi;
-                // Keep the user's latest percentage. Slow or stale readbacks
-                // must not move a live slider backwards; refresh reads again
-                // only when the controls are opened or displays change.
+                // The next poll must not read a monitor's old value while
+                // its firmware is still applying our last local write.
+                value.protectUntilTickMs=ok?
+                    GetTickCount64()+kDdcPostWriteGraceMs:0;
                 value.hasValue=true;
                 value.percent=job.percent;
             }
