@@ -293,11 +293,11 @@ int main() {
                 "Window continues rising while alpha increases");
         }
         const std::vector<int> tabs{260,250,270};
-        check(kCardOuterMarginDip==8 &&
+        check(kCardOuterMarginDip==12 &&
               kCardsTopMarginDip==kCardOuterMarginDip &&
-              kCardsGapDip==kCardOuterMarginDip &&
+              kCardsGapDip==8 &&
               kCardInnerInsetDip==16,
-            "Top, side, bottom and inter-section margins share exactly 8 DIP");
+            "Outer top, side and bottom margins are all 12 DIP; card gaps stay 8 DIP");
         check(kCardCornerRadiusDip==8 &&
               kCardCornerRadiusDip*2==16,
             "All section cards use an explicit 8 DIP radius (16 DIP arc diameter)");
@@ -306,14 +306,16 @@ int main() {
         const auto singleHidden=calculateWindowContentMinimum(96,980,
             {200},1,true,false);
         check(singleVisible.screenRows==1 && singleVisible.clientHeight==
-            8+(46+38)+8+kTemperatureUnlockedHeightDip+8+
-            (kDdcSectionBaseDip+kDdcRowStepDip)+8,
-            "Visible three-card minimum height respects top, both gaps and bottom margin");
+            kCardsTopMarginDip+(46+38)+kCardsGapDip+
+            kTemperatureUnlockedHeightDip+kCardsGapDip+
+            (kDdcSectionBaseDip+kDdcRowStepDip)+kCardOuterMarginDip,
+            "Visible three-card height has 12 DIP top/bottom and 8 DIP between sections");
         check(singleHidden.clientHeight==
-            8+(46+38)+8+kTemperatureUnlockedHeightDip+8 &&
+            kCardsTopMarginDip+(46+38)+kCardsGapDip+
+            kTemperatureUnlockedHeightDip+kCardOuterMarginDip &&
             singleVisible.clientHeight-singleHidden.clientHeight==
-                8+kDdcSectionBaseDip+kDdcRowStepDip,
-            "Hidden DDC eliminates only its card and one 8-DIP inter-card gap");
+                kCardsGapDip+kDdcSectionBaseDip+kDdcRowStepDip,
+            "Hidden DDC removes only its card and the intervening 8-DIP gap");
         const auto wide=calculateWindowContentMinimum(96,980,tabs,2,false,true);
         const auto narrow=calculateWindowContentMinimum(96,420,tabs,2,false,true);
         check(wide.screenRows==1 && narrow.screenRows>=2,
@@ -406,17 +408,17 @@ int main() {
             "Narrow clients wrap monitor tabs but do not force a wider window");
         check(tiny.clientHeight>narrow.clientHeight,
             "Compact temperature layout receives additional vertical clearance");
-        check(temperatureSliderWidth(96,200)==144 &&
-              temperatureSliderWidth(96,800)==744,
-            "Temperature slider follows reduced 8 DIP outer margins");
+        check(temperatureSliderWidth(96,200)==136 &&
+              temperatureSliderWidth(96,800)==736,
+            "Temperature slider tracks the symmetric 12 DIP outside margins");
         // Reserve the width of the longest percentage once. This avoids
         // changing the trackbar's geometry when 99 % becomes 100 %.
-        check(ddcSliderWidth(96,200,30)==94 &&
-              ddcSliderWidth(96,800,30)==694,
-            "DDC trackbars extend toward right-aligned percentage fields");
-        check(temperatureSliderWidth(144,300)==216 &&
-              ddcSliderWidth(144,300,45)==141,
-            "DDC endpoint alignment and measured text width scale with DPI");
+        check(ddcSliderWidth(96,200,30)==86 &&
+              ddcSliderWidth(96,800,30)==686,
+            "DDC trackbars retain right-aligned percentages inside the new margins");
+        check(temperatureSliderWidth(144,300)==204 &&
+              ddcSliderWidth(144,300,45)==129,
+            "DDC alignment and 12 DIP symmetric outside margins scale with DPI");
         for (int dpi:{96,120,144,192}) {
             const auto dip=[dpi](int v) { return MulDiv(v,dpi,96); };
             for (int widthDip:{200,350,560,1024}) {
