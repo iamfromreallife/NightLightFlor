@@ -62,11 +62,11 @@ inline constexpr int kDdcRowStepDip = 100;
 inline constexpr int kDdcSectionBaseDip = 34; // +2 DIP to preserve bottom padding
 
 // Spacing around the three cards (DIPs, scaled with Windows DPI).
-// All outside edges (top/left/right/bottom) and inter-card gaps use
-// the same 8 DIP, while internal card content padding remains 16 DIP.
-inline constexpr int kCardOuterMarginDip = 8;
+// The outer edges (top/left/right/bottom) are 12 DIP; gaps between cards
+// remain 8 DIP. Internal content padding stays 16 DIP.
+inline constexpr int kCardOuterMarginDip = 12;
 inline constexpr int kCardsTopMarginDip = kCardOuterMarginDip;
-inline constexpr int kCardsGapDip = kCardOuterMarginDip;
+inline constexpr int kCardsGapDip = 8;
 inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
