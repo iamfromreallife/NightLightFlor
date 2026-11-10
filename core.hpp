@@ -61,6 +61,14 @@ inline constexpr int kDdcFirstRowTopDip = 34;
 inline constexpr int kDdcRowStepDip = 100;
 inline constexpr int kDdcSectionBaseDip = 32;
 
+// Spacing around the three cards (DIPs, scaled with Windows DPI).
+// Outer horizontal/bottom insets are 16 instead of 20; the first card
+// starts 8 instead of 12 from the top, and inter-card gaps are 8, not 12.
+inline constexpr int kCardOuterMarginDip = 16;
+inline constexpr int kCardsTopMarginDip = 8;
+inline constexpr int kCardsGapDip = 8;
+inline constexpr int kCardInnerInsetDip = 16;
+
 // Compact temperature card: title and Kelvin value share the first row,
 // gradient sits immediately below, and its scale labels use the last row.
 // The gamma-unlock button, when present, fits below the scale labels.
