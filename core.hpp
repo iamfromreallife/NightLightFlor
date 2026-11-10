@@ -54,6 +54,18 @@ bool sameRamp(const Ramp& a, const Ramp& b);
 int sliderPositionFromX(int x,int left,int right,int minimum,int maximum);
 RECT sliderHitRect(RECT visualTrack, int horizontalPadding, int verticalPadding);
 
+// Minimum dimensions are derived from the live monitor-tab wrapping and the
+// visible sections. The computation is independent of the window manager so
+// it can be verified by native regression tests.
+struct WindowContentMinimum {
+    int clientWidth = 0;
+    int clientHeight = 0;
+    int screenRows = 1;
+};
+WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
+    int enableButtonWidth, const std::vector<int>& tabDesiredWidths,
+    size_t ddcMonitorRows, bool gammaUnlocked, bool ddcVisible);
+
 // Upstream NightLight's RGB factors; shared desktop matrix avoids GDI limits.
 struct ColorGains { double red, green, blue; };
 ColorGains kelvinGains(int kelvin);
