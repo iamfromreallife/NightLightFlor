@@ -198,7 +198,7 @@ public:
             WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, nullptr);
         if (!taskbarOwner_) return 4;
         window_ = CreateWindowExW(0, CLASS_NAME, L"NightLight",
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x, y, windowWidth, windowHeight,
             taskbarOwner_, nullptr, instance_, this);
         if (!window_) return 4;
@@ -210,8 +210,10 @@ public:
         } else {
             ShowWindow(window_, show == SW_SHOWDEFAULT ? SW_SHOWNORMAL : show);
         }
-        UpdateWindow(window_);
+        // Enforce the fully expanded contents before the first visible frame.
         initializingWindow_=false;
+        ensureWindowFitsContents();
+        UpdateWindow(window_);
         noteWindowPosition();
         MSG msg{};
         BOOL messageResult=0;
@@ -277,7 +279,7 @@ private:
     UINT dpi_ = 96;
     int width_ = 870, height_ = 440;
     RECT slider_ = {};
-    int scrollOffset_=0, contentHeight_=0;
+    int contentHeight_=0;
     bool layingOut_=false;
     bool initializingWindow_=true;
     unsigned layoutDepth_=0;
@@ -780,7 +782,7 @@ private:
                 x=static_cast<int>(std::round(motion.x.value(layoutTime_)));
                 y=static_cast<int>(std::round(motion.y.value(layoutTime_)));
             }
-            placements.push_back({control,x,y-scrollOffset_,std::max(1,w),std::max(1,h)});
+            placements.push_back({control,x,y,std::max(1,w),std::max(1,h)});
         };
         const double hardwareProgress=hardwareReveal_.value(layoutTime_);
         composedTransition_=IsWindowVisible(window_) && (hardwareReveal_.active(layoutTime_) || reorderInProgress_);
@@ -830,18 +832,11 @@ private:
         hardwareVisibleHeight_=static_cast<int>(std::round(hardwareHeight_*hardwareProgress));
         contentHeight_=secondPanelTop_+temperatureHeight_+margin+
             static_cast<int>(std::round((hardwareHeight_+px(12))*hardwareProgress));
-        // Never resize the outer window to fit content. The stored/user-chosen
-        // height is authoritative; vertical scrolling exposes overflow.
-        const int correctedScroll=std::clamp(scrollOffset_,0,std::max(0,contentHeight_-height_));
-        const bool scrollChanged=correctedScroll!=scrollOffset_;
-        scrollOffset_=correctedScroll;
-        SCROLLINFO info{sizeof(info)};
-        info.fMask=SIF_RANGE|SIF_PAGE|SIF_POS;
-        info.nMin=0; info.nMax=contentHeight_-1;
-        info.nPage=static_cast<UINT>(height_); info.nPos=scrollOffset_;
-        SetScrollInfo(window_,SB_VERT,&info,TRUE);
-        RECT updated{}; GetClientRect(window_,&updated);
-        if (scrollChanged || updated.right!=width_) { layingOut_=false; layout(); return; }
+        // Never scroll the window: grow only when a content change increases
+        // its required minimum size. Do not automatically shrink it again.
+        if (!initializingWindow_ && ensureWindowFitsContents()) {
+            layingOut_=false; layout(); return;
+        }
         // Do not let MoveWindow copy old pixels while its siblings still occupy
         // their previous coordinates. All children move before any can repaint.
         const UINT flags=SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW;
@@ -882,7 +877,7 @@ private:
         for (const auto& placement:placements) {
             RECT clip{}; bool clipped=false;
             if (hardwareRow(placement.control) || hardwareNameButton(placement.control)) {
-                clip={0,hardwareTop_-scrollOffset_,width_,hardwareTop_+hardwareVisibleHeight_-scrollOffset_}; clipped=hardwareProgress<1;
+                clip={0,hardwareTop_,width_,hardwareTop_+hardwareVisibleHeight_}; clipped=hardwareProgress<1;
             }
             if (placement.control==editName_ && editingName_) {
                 HRGN roundedEdit=CreateRoundRectRgn(0,0,placement.w+1,placement.h+1,px(16),px(16));
@@ -996,8 +991,8 @@ private:
             SetViewportOrgEx(dc,rect.left,rect.top,nullptr);
             IntersectClipRect(dc,0,0,rect.right-rect.left,rect.bottom-rect.top);
             if (hardwareRow(child)) {
-                IntersectClipRect(dc,0,hardwareTop_-scrollOffset_-rect.top,rect.right-rect.left,
-                    hardwareTop_+hardwareVisibleHeight_-scrollOffset_-rect.top);
+                IntersectClipRect(dc,0,hardwareTop_-rect.top,rect.right-rect.left,
+                    hardwareTop_+hardwareVisibleHeight_-rect.top);
                 NMCUSTOMDRAW draw{}; draw.hdr.hwndFrom=child; draw.dwDrawStage=CDDS_PREPAINT; draw.hdc=dc;
                 drawHardwareSlider(draw);
             } else if (child==editName_) {
@@ -1021,7 +1016,7 @@ private:
         if (!mem) return;
         const Palette p=palette();
         fill(mem,client,p.page);
-        SetViewportOrgEx(mem,0,-scrollOffset_,nullptr);
+        SetViewportOrgEx(mem,0,0,nullptr);
         const RECT card1{px(20),panelTop_,client.right-px(20),panelTop_+panelHeight_};
         rounded(mem,card1,px(16),p.card,p.border);
         const RECT card2{px(20),secondPanelTop_,client.right-px(20),secondPanelTop_+temperatureHeight_};
@@ -1405,15 +1400,15 @@ private:
             model_.save();
         }
     }
-    void openWindow(bool immediate=false) {
-        // Tray interaction is synchronous: no fade-in and no blocking
-        // registry/system-preference checks on the click hot path.
-        if (!immediate) {
+    void openWindow(bool fromTray=false) {
+        // Keep the fast tray-click path free of slow registry checks while
+        // restoring the same animated entrance for all show requests.
+        if (!fromTray) {
             syncGammaButton();
             updateMotionPreference();
         }
         const bool reveal=!IsWindowVisible(window_) || IsIconic(window_);
-        if (reveal && animations_ && !immediate) {
+        if (reveal && animations_) {
             const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
             entranceAddedLayer_=(style&WS_EX_LAYERED)==0;
             SetWindowLongPtrW(window_,GWL_EXSTYLE,style|WS_EX_LAYERED);
@@ -1423,7 +1418,7 @@ private:
                 ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
                 GetWindowRect(window_,&entranceBounds_);
                 entranceMove_=!IsZoomed(window_);
-                opening_=true; entrance_.snap(0); animate(entrance_,1,180);
+                opening_=true; entrance_.snap(0); animate(entrance_,1,200);
                 startAnimationTimer();
             } else {
                 if (entranceAddedLayer_) SetWindowLongPtrW(window_,GWL_EXSTYLE,style);
@@ -1742,7 +1737,7 @@ private:
             // though the visible gradient track is only 12 pixels high.
             // Slight extra horizontal padding makes the endpoints reachable.
             RECT touch=nightlight::sliderHitRect(slider_,px(12),px(30));
-            OffsetRect(&touch,0,-scrollOffset_);
+
             if (PtInRect(&touch,p) && hasMonitor() && selectedMonitor()->enabled) {
                 dragging_=true;
                 SetCapture(hwnd);
@@ -1751,35 +1746,11 @@ private:
             }
             return 0;
         }
-        case WM_VSCROLL: {
-            SCROLLINFO info{sizeof(info)}; info.fMask=SIF_ALL;
-            GetScrollInfo(hwnd,SB_VERT,&info);
-            int position=scrollOffset_;
-            switch (LOWORD(wParam)) {
-            case SB_LINEUP: position-=px(28); break;
-            case SB_LINEDOWN: position+=px(28); break;
-            case SB_PAGEUP: position-=height_; break;
-            case SB_PAGEDOWN: position+=height_; break;
-            case SB_THUMBPOSITION:
-            case SB_THUMBTRACK: position=info.nTrackPos; break;
-            case SB_TOP: position=0; break;
-            case SB_BOTTOM: position=contentHeight_; break;
-            }
-            scrollOffset_=std::clamp(position,0,std::max(0,contentHeight_-height_));
-            layout(); return 0;
-        }
-        case WM_MOUSEWHEEL:
-            if (contentHeight_>height_) {
-                scrollOffset_=std::clamp(scrollOffset_-GET_WHEEL_DELTA_WPARAM(wParam)*px(48)/WHEEL_DELTA,
-                    0,std::max(0,contentHeight_-height_));
-                layout(); return 0;
-            }
-            break;
         case WM_MOUSEMOVE: {
             if(screenDragArmed_){moveScreenDrag({GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)});return 0;}
             TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,hwnd,0}; TrackMouseEvent(&tracking);
             RECT target=nightlight::sliderHitRect(slider_,px(12),px(18));
-            OffsetRect(&target,0,-scrollOffset_);
+
             POINT cursor{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
             const bool hover=PtInRect(&target,cursor)!=FALSE;
             if (hover!=temperatureHover_) { temperatureHover_=hover; repaint(); }
