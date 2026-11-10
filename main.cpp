@@ -922,8 +922,8 @@ private:
         }
         SetWindowTextW(btnRefresh_,tr(L"Refresh displays",L"Atualizar ecrãs").c_str());
         screenOffHelp_=tr(
-            L"Turn off screens (mouse and keyboard ignored for 4 seconds)",
-            L"Desligar ecrãs (rato e teclado ignorados durante 4 segundos)");
+            L"Turn off screens (mouse and keyboard ignored for 3 seconds)",
+            L"Desligar ecrãs (rato e teclado ignorados durante 3 segundos)");
         SetWindowTextW(btnScreenOff_,screenOffHelp_.c_str());
         TOOLINFOW screenTool{sizeof(screenTool)};
         screenTool.hwnd=window_;
@@ -1124,13 +1124,15 @@ private:
         // Screen-off button belongs to the same row as the monitor tabs,
         // immediately after the last one. On narrow windows it wraps with
         // the tabs instead of overlapping a name or its on/off toggle.
-        const int offWidth=px(32);
-        if (tabX>tabStart && tabX+offWidth>tabsRight) {
+        const int offSize=px(nightlight::kScreenOffButtonSizeDip);
+        if (tabX>tabStart && tabX+offSize>tabsRight) {
             tabX=tabStart;
             tabY+=px(38);
             ++rows;
         }
-        place(btnScreenOff_,tabX,tabY,offWidth,tabH,TRUE);
+        // Keep the smaller square button vertically centred on the tabs.
+        place(btnScreenOff_,tabX,tabY+(tabH-offSize)/2,
+            offSize,offSize,TRUE);
         EnableWindow(btnScreenOff_,!tabs_.empty());
         panelHeight_=px(46+rows*38);
         secondPanelTop_=panelTop_+panelHeight_+px(nightlight::kCardsGapDip);
@@ -1740,7 +1742,7 @@ private:
             // U+F1B1 is Fluent PowerButtonUpdate2, centred by actual glyph
             // ink bounds (the same technique as DDC brightness icons).
             const POINT center{(rc.left+rc.right)/2,(rc.top+rc.bottom)/2};
-            drawCenteredDdcGlyph(dc,L"\uF1B1",center,19,foreground);
+            drawCenteredDdcGlyph(dc,L"\uF1B1",center,17,foreground);
         }
         if (monitorButton) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
