@@ -1634,7 +1634,12 @@ private:
             }
         }
         if(id==ID_REFRESH){label.clear();background=p.card;border=p.card;foreground=p.accent;}
-        if(id==ID_SCREEN_OFF){label.clear();background=p.chip;border=p.border;foreground=p.text;}
+        if(id==ID_SCREEN_OFF) {
+            label.clear();
+            background=p.chip;
+            border=highContrast_?p.border:mix(p.border,p.accent,0.5);
+            foreground=p.accent; // Same orange accent as other app actions.
+        }
         auto& interaction=interactions_[item.hwndItem];
         const auto now=uiTime();
         const double hover=interaction.hover.value(now);
