@@ -276,7 +276,7 @@ private:
     HANDLE gammaHelper_ = nullptr;
 
     HFONT font_ = nullptr, boldFont_ = nullptr, headlineFont_ = nullptr, smallFont_ = nullptr;
-    HFONT fluentIconFont_ = nullptr;
+    HFONT fluentIconFont_ = nullptr, fluentContrastFont_ = nullptr;
     std::vector<HFONT> fonts_;
     size_t selected_ = 0;
     UINT dpi_ = 96;
@@ -634,6 +634,10 @@ private:
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe Fluent Icons");
         if (fluentIconFont_) fonts_.push_back(fluentIconFont_);
+        fluentContrastFont_=CreateFontW(-px(15),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
+            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe Fluent Icons");
+        if (fluentContrastFont_) fonts_.push_back(fluentContrastFont_);
         tabDesiredWidths_.clear();
         const HWND controls[] = {btnRefresh_,btnGamma_,editName_};
         for (HWND control : controls) {
@@ -917,24 +921,21 @@ private:
         const int sliderLeft=(width_-sliderW)/2;
         slider_={sliderLeft,secondPanelTop_+px(62),sliderLeft+sliderW,secondPanelTop_+px(66)};
         hardwareTop_=secondPanelTop_+temperatureHeight_+px(12);
-        hardwareHeight_=px(hardwareRows_.empty()?72:172);
-        const int columnCount=static_cast<int>(hardwareRows_.size());
-        const int columnGap=px(14);
-        const int columnWidth=columnCount?
-            (innerRight-innerLeft-columnGap*(columnCount-1))/columnCount:0;
+        hardwareHeight_=px(hardwareRows_.empty()?72:
+            44+128*static_cast<int>(hardwareRows_.size()));
         for (size_t i=0;i<hardwareRows_.size();++i) {
             auto& row=hardwareRows_[i];
-            row.topMotion.to(hardwareTop_+px(36),layoutTime_,180,
+            row.topMotion.to(hardwareTop_+px(36+128*static_cast<int>(i)),
+                layoutTime_,180,
                 reorderInProgress_ && animations_ && IsWindowVisible(window_));
             row.top=static_cast<int>(std::round(row.topMotion.value(layoutTime_)));
-            const int columnLeft=innerLeft+static_cast<int>(i)*(columnWidth+columnGap);
             const auto& name=model_.monitors()[i].displayName();
             const int nameWidth=std::max(px(44),std::min({
-                textWidth(name,boldFont_)+px(50),px(279),columnWidth}));
-            place(row.nameButton,columnLeft,row.top,nameWidth,tabH,TRUE);
-            // Icon / slider / percent occupy their own monitor column.
-            const int sliderLeft=columnLeft+px(36);
-            const int sliderWidth=std::max(px(1),columnWidth-px(94));
+                textWidth(name,boldFont_)+px(50),px(279),innerRight-innerLeft}));
+            place(row.nameButton,innerLeft,row.top,nameWidth,tabH,TRUE);
+            // One full-width pair of sliders per monitor, beneath its name.
+            const int sliderLeft=innerLeft+px(38);
+            const int sliderWidth=std::max(px(1),innerRight-sliderLeft-px(60));
             place(row.brightness,sliderLeft,row.top+px(38),sliderWidth,px(32),TRUE);
             place(row.contrast,sliderLeft,row.top+px(70),sliderWidth,px(32),TRUE);
         }
@@ -1254,22 +1255,20 @@ private:
             RECT empty{px(36),hardwareTop_+px(40),width_-px(36),hardwareTop_+px(62)};
             drawTextAt(dc,tr(L"No connected displays",L"Nenhum ecrã ligado"),empty,font_,p.muted);
         }
-        const int count=static_cast<int>(hardwareRows_.size());
-        const int columnGap=px(14);
-        const int innerLeft=px(36),innerRight=width_-px(36);
-        const int columnWidth=count?(innerRight-innerLeft-columnGap*(count-1))/count:0;
+        const int left=px(36),right=width_-px(36);
         for (size_t i=0;i<hardwareRows_.size();++i) {
             const auto& row=hardwareRows_[i];
             const auto state=ddc_.state(row.device);
-            const int left=innerLeft+static_cast<int>(i)*(columnWidth+columnGap);
-            const int right=left+columnWidth;
-            // Fluent icons inherit theme/high-contrast foreground colours.
-            // Keep the TRACKBAR's accessible name as Brightness/Contrast.
+            // Fluent icons adapt to the palette in both light and dark mode.
+            // The smaller contrast font is deliberate; screen reader names
+            // remain on the native brightness/contrast trackbar controls.
             auto drawChannel=[&](HWND slider,int y,bool contrast) {
                 RECT symbol{left+px(2),y,left+px(30),y+px(32)};
+                const HFONT symbolFont=contrast?
+                    (fluentContrastFont_?fluentContrastFont_:font_):
+                    (fluentIconFont_?fluentIconFont_:font_);
                 drawTextAt(dc,contrast?L"\uE7A1":L"\uE706",symbol,
-                    fluentIconFont_?fluentIconFont_:font_,p.subtle,
-                    DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+                    symbolFont,p.subtle,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
                 RECT number{right-px(54),y,right-px(4),y+px(32)};
                 const int percent=GetCapture()==slider?
                     (static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100:
@@ -1286,9 +1285,8 @@ private:
             RECT status{left,row.top+px(106),right-px(4),row.top+px(122)};
             drawTextAt(dc,message,status,smallFont_,p.muted);
             if (i+1<hardwareRows_.size()) {
-                const int dividerX=right+columnGap/2;
-                RECT divider{dividerX,hardwareTop_+px(40),
-                    dividerX+px(1),hardwareTop_+hardwareHeight_-px(16)};
+                RECT divider{left,row.top+px(127),
+                    right,row.top+px(128)};
                 fill(dc,divider,p.border);
             }
         }
