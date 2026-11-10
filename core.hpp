@@ -57,9 +57,9 @@ RECT sliderHitRect(RECT visualTrack, int horizontalPadding, int verticalPadding)
 // DIP-based DDC/CI spacing shared by layout and minimum-size calculations.
 // Each row fits a 32-DIP monitor button and two 28-DIP sliders; errors
 // appear beside the name instead of reserving a blank footer.
-inline constexpr int kDdcFirstRowTopDip = 34;
+inline constexpr int kDdcFirstRowTopDip = 36; // +2 DIP under section heading
 inline constexpr int kDdcRowStepDip = 100;
-inline constexpr int kDdcSectionBaseDip = 32;
+inline constexpr int kDdcSectionBaseDip = 34; // +2 DIP to preserve bottom padding
 
 // Spacing around the three cards (DIPs, scaled with Windows DPI).
 // All outside edges (top/left/right/bottom) and inter-card gaps use
@@ -70,6 +70,13 @@ inline constexpr int kCardsGapDip = kCardOuterMarginDip;
 inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
+
+// The entrance uses one shared 150-ms motion for both opacity and the
+// upward slide. A small initial alpha makes the first frame perceptible.
+inline constexpr unsigned kWindowOpeningDurationMs = 150;
+inline constexpr int kWindowOpeningSlideDip = 12;
+inline constexpr unsigned char kWindowOpeningInitialAlpha = 24;
+int windowOpeningSlideOffset(int dpi,double progress);
 
 // DDC/CI row geometry: the native trackbar keeps its own thumb inset.
 // Percentages use the measured "100 %" width and share 6500 K's right edge.
