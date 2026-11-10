@@ -257,6 +257,21 @@ int main() {
         const auto unlocked=calculateWindowContentMinimum(96,420,tabs,2,true,true);
         check(unlocked.clientHeight<narrow.clientHeight,
             "Gamma-unlocked layout uses shorter temperature section");
+        const auto unlockedWide=calculateWindowContentMinimum(96,980,tabs,2,true,true);
+        check(wide.clientHeight-unlockedWide.clientHeight==
+                kTemperatureLockedHeightDip-kTemperatureUnlockedHeightDip,
+            "Unlocked gamma state removes only the space for the unlock button");
+        check(kTemperatureLockedHeightDip==126 &&
+              kTemperatureUnlockedHeightDip==94 &&
+              kTemperatureGammaTopDip+29<=kTemperatureLockedHeightDip-8,
+            "Compact temperature section retains a bottom inset beneath the gamma button");
+        check(kTemperatureSliderTopDip+4+10<kTemperatureScaleTopDip &&
+              kTemperatureScaleTopDip+22<=kTemperatureGammaTopDip,
+            "Gradient thumb, scale labels and gamma button have no vertical overlap");
+        const auto narrowOneLine=calculateWindowContentMinimum(96,349,tabs,2,false,false);
+        const auto wideOneLine=calculateWindowContentMinimum(96,350,tabs,2,false,false);
+        check(narrowOneLine.clientHeight>wideOneLine.clientHeight,
+            "Narrow temperatures retain an extra row for the Kelvin value");
         const auto scaled=calculateWindowContentMinimum(144,630,
             {270,262,278},2,false,true);
         check(scaled.clientWidth>=630 && scaled.clientHeight>narrow.clientHeight,
