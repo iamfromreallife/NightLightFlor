@@ -331,7 +331,7 @@ int main() {
         const auto noButtonWrap=calculateWindowContentMinimum(
             96,450,{160,160},1,false,true);
         const auto wrappedButton=calculateWindowContentMinimum(
-            96,380,{160,160},1,false,true);
+            96,418,{160,160},1,false,true);
         check(noButtonWrap.screenRows==1 &&
               wrappedButton.screenRows==2 &&
               wrappedButton.clientHeight-noButtonWrap.clientHeight==38,
