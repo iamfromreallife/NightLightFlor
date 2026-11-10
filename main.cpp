@@ -1624,6 +1624,7 @@ private:
             }
         }
         if(id==ID_REFRESH){label.clear();background=p.card;border=p.card;foreground=p.accent;}
+        if(id==ID_SCREEN_OFF){label.clear();background=p.chip;border=p.border;foreground=p.text;}
         auto& interaction=interactions_[item.hwndItem];
         const auto now=uiTime();
         const double hover=interaction.hover.value(now);
@@ -1671,6 +1672,12 @@ private:
                 Gdiplus::SolidBrush brush(drawingColor(foreground));
                 g.FillPath(&brush,&glyph);
             }
+        }
+        if (id==ID_SCREEN_OFF) {
+            // U+F1B1 is Fluent PowerButtonUpdate2, centred by actual glyph
+            // ink bounds (the same technique as DDC brightness icons).
+            const POINT center{(rc.left+rc.right)/2,(rc.top+rc.bottom)/2};
+            drawCenteredDdcGlyph(dc,L"\uF1B1",center,19,foreground);
         }
         if (monitorButton) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
@@ -1798,6 +1805,29 @@ private:
             KillTimer(window_,TIMER_SAVE_WINDOW);
             model_.save();
         }
+    }
+    void turnOffScreens() {
+        // Do not use DDC/CI VCP D6: that would power the physical monitors
+        // off. SC_MONITORPOWER with lParam=2 requests display sleep, from
+        // which normal input resumes the desktop.
+        //
+        // Install BOTH guards before requesting sleep so the click's last
+        // events and accidental mouse/keyboard activity cannot wake screens
+        // immediately. If either hook cannot be installed, do not darken the
+        // screens under a false promise of four-second input protection.
+        if (!screenOffGuard_.start()) {
+            MessageBoxW(window_,tr(
+                L"Could not activate the four-second mouse and keyboard guard. Screens were not turned off.",
+                L"Não foi possível ativar a proteção do rato e teclado durante quatro segundos. Os ecrãs não foram desligados.").c_str(),
+                L"NightLight",MB_OK|MB_ICONWARNING);
+            return;
+        }
+        if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
+        DWORD_PTR ignored=0;
+        // Broadcast with timeout so a hung window cannot freeze the UI;
+        // only the display signal is changed, never monitor power/VCP.
+        SendMessageTimeoutW(HWND_BROADCAST,WM_SYSCOMMAND,
+            SC_MONITORPOWER,2,SMTO_ABORTIFHUNG,700,&ignored);
     }
     void openWindow(bool fromTray=false) {
         // Keep the fast tray-click path free of slow registry checks while
@@ -1991,6 +2021,7 @@ private:
     void handleCommand(int id,int code) {
         if (code==BN_CLICKED) {
             if (id==ID_REFRESH) { refreshTurn_.to(refreshTurn_.value(uiTime())+360.0,uiTime(),460,animations_ && IsWindowVisible(window_)); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
+            else if (id==ID_SCREEN_OFF) turnOffScreens();
             else if (id==ID_GAMMA) unlockGamma();
             else if (id>=ID_MONITOR_BASE &&
                      id<ID_MONITOR_BASE+static_cast<int>(tabs_.size())) {
@@ -2341,6 +2372,7 @@ private:
             }
             return 0;
         case WM_DESTROY:
+            screenOffGuard_.stop();
             noteWindowPosition(true);
             shuttingDown_=true;
             endHardwareDrag();finishScreenDrag();
