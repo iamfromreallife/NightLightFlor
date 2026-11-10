@@ -176,9 +176,9 @@ public:
             MONITORINFO screen{sizeof(screen)};
             if (GetMonitorInfoW(MonitorFromRect(&savedRect,MONITOR_DEFAULTTONEAREST),&screen)) {
                 const auto& area=screen.rcWork;
-                x=std::clamp(saved->x,static_cast<int>(area.left),
+                x=std::clamp(static_cast<int>(saved->x),static_cast<int>(area.left),
                     std::max(static_cast<int>(area.left),static_cast<int>(area.right)-560));
-                y=std::clamp(saved->y,static_cast<int>(area.top),
+                y=std::clamp(static_cast<int>(saved->y),static_cast<int>(area.top),
                     std::max(static_cast<int>(area.top),static_cast<int>(area.bottom)-initialHeight));
             }
         }
