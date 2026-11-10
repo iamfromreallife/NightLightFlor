@@ -95,8 +95,10 @@ public:
                 HHOOK keyboard=SetWindowsHookExW(WH_KEYBOARD_LL,screenOffKeyboardHook,module,0);
                 const bool both=mouse && keyboard &&
                     WaitForSingleObject(stopEvent_,0)!=WAIT_OBJECT_0;
+                // Reserve the maximum time of the sleep request; the true
+                // four-second deadline is set immediately after it returns.
                 const ULONGLONG deadline=GetTickCount64()+
-                    nightlight::kScreenOffInputGuardMs;
+                    nightlight::kScreenOffInputGuardMs+1000;
                 if (both) {
                     gScreenOffBlockedUntil.store(deadline,std::memory_order_relaxed);
                     active_.store(true);
@@ -134,6 +136,14 @@ public:
             return false;
         }
         return ready.get();
+    }
+    void screenOffDispatched() {
+        // Start the requested four seconds AFTER sending the sleep signal,
+        // not when the hooks were first installed.
+        if (active_.load())
+            gScreenOffBlockedUntil.store(
+                GetTickCount64()+nightlight::kScreenOffInputGuardMs,
+                std::memory_order_relaxed);
     }
     void stop() {
         if (stopEvent_) SetEvent(stopEvent_);
@@ -1828,6 +1838,7 @@ private:
         // only the display signal is changed, never monitor power/VCP.
         SendMessageTimeoutW(HWND_BROADCAST,WM_SYSCOMMAND,
             SC_MONITORPOWER,2,SMTO_ABORTIFHUNG,700,&ignored);
+        screenOffGuard_.screenOffDispatched();
     }
     void openWindow(bool fromTray=false) {
         // Keep the fast tray-click path free of slow registry checks while
