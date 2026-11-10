@@ -222,6 +222,34 @@ int main() {
         check(hit.left==88 && hit.right==512 &&
               hit.top==170 && hit.bottom==242,
               "Slider needs a tall, DPI-scalable click region");
+        // Content-driven minimum sizing must grow when controls and wrapping
+        // need more space, without ever requiring window scrollbars.
+        const std::vector<int> tabs{180,175,185};
+        const auto wide=calculateWindowContentMinimum(96,980,110,tabs,2,false,true);
+        const auto narrow=calculateWindowContentMinimum(96,420,110,tabs,2,false,true);
+        check(wide.screenRows==1 && narrow.screenRows>=2,
+            "Narrow windows wrap monitor tabs into additional rows");
+        check(narrow.clientHeight>wide.clientHeight,
+            "Wrapping tabs increases the minimum content height");
+        check(narrow.clientWidth>=420 && narrow.clientHeight>0,
+            "Minimum window dimensions remain nonzero");
+        const auto noDdc=calculateWindowContentMinimum(96,420,110,tabs,2,false,false);
+        check(noDdc.clientHeight<narrow.clientHeight,
+            "Expanded DDC rows require a taller window");
+        const auto moreDdc=calculateWindowContentMinimum(96,420,110,tabs,3,false,true);
+        check(moreDdc.clientHeight>narrow.clientHeight,
+            "Additional displays increase the DDC minimum height");
+        const auto unlocked=calculateWindowContentMinimum(96,420,110,tabs,2,true,true);
+        check(unlocked.clientHeight<narrow.clientHeight,
+            "Gamma-unlocked layout uses shorter temperature section");
+        const auto scaled=calculateWindowContentMinimum(144,630,165,
+            {270,262,278},2,false,true);
+        check(scaled.clientWidth>=630 && scaled.clientHeight>narrow.clientHeight,
+            "Minimum dimensions scale with display DPI");
+        const auto oversized=calculateWindowContentMinimum(96,420,110,
+            {1500},0,false,false);
+        check(oversized.clientWidth>=72+279+110+8,
+            "A long monitor name reserves a whole capped-width tab and Enable button");
         check(resolveStartup(L"normal",L"",true)==L"normal","Normal startup");
         check(resolveStartup(L"minimized",L"",true)==L"minimized","Minimized startup");
         check(resolveStartup(L"tray",L"",true)==L"tray","Tray startup");
