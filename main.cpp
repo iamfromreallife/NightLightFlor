@@ -1311,9 +1311,18 @@ private:
             if (state.brightness.failed || state.contrast.failed)
                 message=tr(L"The monitor did not accept the adjustment. Try again.",
                     L"O monitor não aceitou o ajuste. Tente novamente.");
-            RECT status{left,row.top+px(96),right-px(4),row.top+px(110)};
-            drawTextAt(dc,message,status,smallFont_,p.muted);
-            // No divider between monitors: the name buttons distinguish rows.
+            // Report DDC errors alongside the monitor name rather than
+            // reserving a permanently empty footer below the sliders.
+            if (!message.empty()) {
+                const int nameWidth=std::max(px(44),std::min({
+                    textWidth(model_.monitors()[i].displayName(),boldFont_)+px(42),
+                    px(279),right-left}));
+                const int statusLeft=std::min(right-px(1),left+nameWidth+px(6));
+                RECT status{statusLeft,row.top,right-px(4),row.top+px(32)};
+                drawTextAt(dc,message,status,smallFont_,p.muted,
+                    DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+            }
+            // Monitor name buttons distinguish rows without separator lines.
         }
     }
     LRESULT drawHardwareSlider(NMCUSTOMDRAW& draw) {
