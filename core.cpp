@@ -252,6 +252,37 @@ bool updateGammaRamp(const Ramp& target,GammaRefresh refresh,GammaRampState& sta
     return ok;
 }
 
+WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
+    int enableButtonWidth, const std::vector<int>& tabDesiredWidths,
+    size_t ddcMonitorRows, bool gammaUnlocked, bool ddcVisible) {
+    const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
+    const int gap=px(8), tabGap=px(6);
+    const int tabStart=px(36);
+    int widestTab=px(44);
+    for (int desired:tabDesiredWidths)
+        widestTab=std::max(widestTab,std::clamp(desired,px(44),px(279)));
+    // An individual tab, the Enabled button, and both card insets must fit.
+    const int minimumWidth=std::max(px(420),px(72)+widestTab+enableButtonWidth+gap);
+    const int width=std::max(clientWidth,minimumWidth);
+    const int tabsRight=width-px(36)-enableButtonWidth-gap;
+    const int space=std::max(px(44),tabsRight-tabStart);
+    int x=tabStart, rows=1;
+    for (int desired:tabDesiredWidths) {
+        const int tabWidth=std::clamp(desired,px(44),std::min(px(279),space));
+        if (x>tabStart && x+tabWidth>tabsRight) { x=tabStart; ++rows; }
+        x+=tabWidth+tabGap;
+    }
+    const int panelTop=px(12);
+    const int panelHeight=px(46+rows*38);
+    const int secondPanelTop=panelTop+panelHeight+px(12);
+    const int temperatureHeight=px(gammaUnlocked?112:162);
+    const int hardwareHeight=px(ddcMonitorRows==0?72:
+        44+128*static_cast<int>(std::min<size_t>(ddcMonitorRows,100)));
+    const int height=secondPanelTop+temperatureHeight+px(20)+
+        (ddcVisible?hardwareHeight+px(12):0);
+    return {minimumWidth,height,rows};
+}
+
 Model::Model() : Model(executableDirectory()) {}
 Model::Model(fs::path directory) :
     directory_(std::move(directory)), configPath_(directory_ / L"config.json") {
