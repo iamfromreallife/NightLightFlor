@@ -47,7 +47,7 @@ constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_SHOW_EXISTING = WM_APP + 38;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
-constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 42;
+constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
 constexpr UINT TIMER_DISPLAYS = 10;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
 constexpr int ICON_RESOURCE = 101;
