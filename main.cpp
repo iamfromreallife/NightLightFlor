@@ -357,6 +357,19 @@ private:
         for(const auto& row:hardwareRows_)if(row.topMotion.active(now))return true;
         return false;
     }
+    RECT screenTabSwitchRect(HWND tab) const {
+        RECT bounds{}; GetClientRect(tab,&bounds);
+        // A generous 48px click target includes the visible 32px toggle.
+        return RECT{bounds.right-px(48),bounds.top,bounds.right,bounds.bottom};
+    }
+    void toggleMonitor(size_t index) {
+        if (index>=model_.monitors().size()) return;
+        if (model_.updateEnabled(index,!model_.monitors()[index].enabled)) {
+            updateTrayTooltip();
+            if (index<tabs_.size()) InvalidateRect(tabs_[index],nullptr,FALSE);
+            repaint(); // Kelvin display/disabled slider may have changed.
+        }
+    }
     void beginScreenDrag(size_t index,POINT point) {
         if(index>=tabs_.size())return;
         commitDrag();endHardwareDrag();
@@ -442,14 +455,41 @@ private:
         auto& state=app->interactions_[control];
         const auto tab=std::find(app->tabs_.begin(),app->tabs_.end(),control);
         if(tab!=app->tabs_.end()) {
+            const size_t index=static_cast<size_t>(tab-app->tabs_.begin());
             if(msg==WM_SETCURSOR){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}
-            if(msg==WM_LBUTTONDBLCLK) {
+            if ((msg==WM_CAPTURECHANGED || msg==WM_CANCELMODE ||
+                 msg==WM_NCDESTROY) && app->armedTabSwitch_==control)
+                app->armedTabSwitch_=nullptr;
+            if ((msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK) &&
+                PtInRect(&app->screenTabSwitchRect(control),
+                    POINT{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)})) {
+                // The switch is interactive without selecting or dragging
+                // its monitor and without triggering double-click rename.
                 app->finishScreenDrag();
-                app->startInlineRename(static_cast<size_t>(tab-app->tabs_.begin()));return 0;
+                app->armedTabSwitch_=control;
+                SetFocus(control);
+                SetCapture(control);
+                app->animate(state.press,1,90);
+                return 0;
+            }
+            if (msg==WM_LBUTTONUP && app->armedTabSwitch_==control) {
+                const POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+                RECT target=app->screenTabSwitchRect(control);
+                const bool inside=PtInRect(&target,cursor)!=FALSE;
+                app->armedTabSwitch_=nullptr;
+                if (GetCapture()==control) ReleaseCapture();
+                app->animate(state.press,0,160);
+                if (inside) app->toggleMonitor(index);
+                return 0;
+            }
+            if (msg==WM_LBUTTONDBLCLK) {
+                app->finishScreenDrag();
+                app->startInlineRename(index);return 0;
             }
             if(msg==WM_LBUTTONDOWN) {
-                POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};MapWindowPoints(control,app->window_,&point,1);
-                app->beginScreenDrag(static_cast<size_t>(tab-app->tabs_.begin()),point);return 0;
+                POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+                MapWindowPoints(control,app->window_,&point,1);
+                app->beginScreenDrag(index,point);return 0;
             }
         }
         if (app->hardwareRow(control)) {
@@ -1304,10 +1344,6 @@ private:
             active=index==selected_;
             label=screenButton && editingName_ && mon.device==editingDevice_?L"":mon.displayName();
             if (active) { background=p.selected; foreground=p.selectedText; border=p.border; }
-        } else if (id==ID_ENABLE) {
-            active=hasMonitor() && selectedMonitor()->enabled;
-            label=tr(L"Enabled",L"Ativo");
-            background=p.card; border=p.card;
         } else {
             wchar_t buf[256]{};
             GetWindowTextW(item.hwndItem,buf,256);
@@ -1330,7 +1366,7 @@ private:
         const int inset=static_cast<int>(std::round(px(1)*push));
         RECT surface=rc; InflateRect(&surface,-inset,-inset);
         // The refresh action is glyph-only, with no coloured button surface.
-        if (id!=ID_ENABLE && id!=ID_REFRESH) rounded(dc,surface,px(8),background,border);
+        if (id!=ID_REFRESH) rounded(dc,surface,px(8),background,border);
         if(id==ID_REFRESH) {
             Gdiplus::Graphics g(dc);g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
@@ -1354,26 +1390,30 @@ private:
             Gdiplus::SolidBrush tip(drawingColor(foreground));
             g.FillPolygon(&tip,arrow,3);
         }
-        if (monitorButton && !(screenButton && editingName_ && model_.monitors()[id-ID_MONITOR_BASE].device==editingDevice_)) {
+        if (monitorButton) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
-            text.left+=px(32);text.right-=px(8);
+            text.left+=px(32);
+            text.right-=screenButton?px(52):px(8);
         }
-        if (id==ID_ENABLE) {
-            animate(interaction.position,active?1:0,170);
+        if (screenButton) {
+            // One independent animated switch lives inside every monitor tab.
+            const auto& monitor=model_.monitors()[static_cast<size_t>(id-ID_MONITOR_BASE)];
+            animate(interaction.position,monitor.enabled?1:0,170);
             const double progress=interaction.position.value(now);
             const int switchW=px(32),switchH=px(18);
-            RECT r{rc.left+px(2),rc.top+(rc.bottom-switchH)/2,
-                rc.left+px(2)+switchW,rc.top+(rc.bottom+switchH)/2};
+            const int switchLeft=rc.right-px(44);
+            RECT r{switchLeft,(rc.top+rc.bottom-switchH)/2,
+                switchLeft+switchW,(rc.top+rc.bottom+switchH)/2};
             const COLORREF track=mix(mix(p.card,p.accent,progress),p.text,hover*0.025+push*0.025);
             const COLORREF switchBorder=mix(p.muted,p.accent,progress);
             rounded(dc,r,px(18),track,switchBorder);
             const float dotX=static_cast<float>(r.left+px(9)+px(14)*progress);
             const float centerY=static_cast<float>((r.top+r.bottom)/2);
-            smoothCircle(dc,dotX,centerY,static_cast<float>(px(6)),mix(p.subtle,RGB(255,255,255),progress));
-            text.left+=px(42);
+            smoothCircle(dc,dotX,centerY,static_cast<float>(px(6)),
+                mix(p.subtle,RGB(255,255,255),progress));
         }
         drawTextAt(dc,label,text,monitorButton?boldFont_:font_,foreground,
-            (id==ID_ENABLE || monitorButton ? DT_LEFT : DT_CENTER)|DT_VCENTER|DT_SINGLELINE);
+            (monitorButton ? DT_LEFT : DT_CENTER)|DT_VCENTER|DT_SINGLELINE);
         RestoreDC(dc,savedDC);
         if (paint) EndBufferedPaint(paint,TRUE);
     }
@@ -1631,22 +1671,13 @@ private:
         } else if (cmd>=ID_TRAY_DISABLE_BASE &&
                    cmd<ID_TRAY_DISABLE_BASE+model_.monitors().size()) {
             const size_t index=cmd-ID_TRAY_DISABLE_BASE;
-            model_.updateEnabled(index,!model_.monitors()[index].enabled);
-            updateTrayTooltip();
-            InvalidateRect(btnEnable_,nullptr,FALSE);
-            repaint();
+            toggleMonitor(index);
         }
     }
     void handleCommand(int id,int code) {
         if (code==BN_CLICKED) {
             if (id==ID_REFRESH) { refreshTurn_.to(refreshTurn_.value(uiTime())+360.0,uiTime(),460,animations_ && IsWindowVisible(window_)); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
             else if (id==ID_GAMMA) unlockGamma();
-            else if (id==ID_ENABLE && hasMonitor()) {
-                model_.updateEnabled(selected_,!selectedMonitor()->enabled);
-                updateTrayTooltip();
-                repaint();
-                InvalidateRect(btnEnable_,nullptr,FALSE);
-            }
             else if (id>=ID_MONITOR_BASE &&
                      id<ID_MONITOR_BASE+static_cast<int>(tabs_.size())) {
                 select(static_cast<size_t>(id-ID_MONITOR_BASE));
