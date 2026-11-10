@@ -282,6 +282,15 @@ int temperatureSliderWidth(int dpi,int clientWidth) {
     // 40-DIP card inset on each side, including the outer card margin.
     return std::max(px(16),clientWidth-px(80));
 }
+TemperatureScaleLabelRects temperatureScaleLabelRects(
+    const RECT& sliderTrack,int top,int height) {
+    const int midpoint=sliderTrack.left+(sliderTrack.right-sliderTrack.left)/2;
+    return {
+        RECT{sliderTrack.left,top,midpoint,top+height},
+        RECT{midpoint,top,sliderTrack.right,top+height}
+    };
+}
+
 POINT ddcSliderIconCenter(int iconColumnCenterX,int sliderTop,int sliderHeight) {
     return POINT{iconColumnCenterX,sliderTop+sliderHeight/2};
 }
