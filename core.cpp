@@ -293,7 +293,8 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
             static_cast<int>(std::min<size_t>(ddcMonitorRows,100)));
     const int height=secondPanelTop+temperatureHeight+px(20)+
         (ddcVisible?hardwareHeight+px(12):0);
-    return {minimumWidth,height,rows};
+    // Width remains user-controlled; only height is content-constrained.
+    return {width,height,rows};
 }
 
 Model::Model() : Model(executableDirectory()) {}
