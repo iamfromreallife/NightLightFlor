@@ -261,8 +261,14 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     int widestTab=px(44);
     for (int desired:tabDesiredWidths)
         widestTab=std::max(widestTab,std::clamp(desired,px(44),px(279)));
-    // An individual tab, the Enabled button, and both card insets must fit.
-    const int minimumWidth=std::max(px(420),px(72)+widestTab+enableButtonWidth+gap);
+    // An individual tab and the Enabled button must fit. With DDC/CI
+    // visible, every attached monitor has its own horizontal column.
+    // Never wrap DDC/CI control groups into vertical rows.
+    const int tabMinimum=px(72)+widestTab+enableButtonWidth+gap;
+    const int columnCount=ddcVisible?static_cast<int>(std::min<size_t>(ddcMonitorRows,100)):0;
+    const int columnMinimum=columnCount>0?
+        px(72)+columnCount*px(320)+(columnCount-1)*px(14):0;
+    const int minimumWidth=std::max({px(420),tabMinimum,columnMinimum});
     const int width=std::max(clientWidth,minimumWidth);
     const int tabsRight=width-px(36)-enableButtonWidth-gap;
     const int space=std::max(px(44),tabsRight-tabStart);
@@ -276,8 +282,8 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const int panelHeight=px(46+rows*38);
     const int secondPanelTop=panelTop+panelHeight+px(12);
     const int temperatureHeight=px(gammaUnlocked?112:162);
-    const int hardwareHeight=px(ddcMonitorRows==0?72:
-        44+128*static_cast<int>(std::min<size_t>(ddcMonitorRows,100)));
+    // All monitor columns share one vertical row.
+    const int hardwareHeight=px(ddcMonitorRows==0?72:172);
     const int height=secondPanelTop+temperatureHeight+px(20)+
         (ddcVisible?hardwareHeight+px(12):0);
     return {minimumWidth,height,rows};
