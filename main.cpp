@@ -1874,11 +1874,11 @@ private:
         // off. SC_MONITORPOWER with lParam=2 requests display sleep, from
         // which normal input resumes the desktop.
         //
-        // Install BOTH guards before requesting sleep so the click's last
-        // events and accidental mouse/keyboard activity cannot wake screens
-        // immediately. If either hook cannot be installed, do not darken the
-        // screens under a false promise of four-second input protection.
-        if (!screenOffGuard_.start()) {
+        // Install input suppression before requesting display sleep.
+        // Use BlockInput when permitted, falling back to both low-level
+        // hooks and fast re-sleep if the display wakes before app input is
+        // dispatched. Do not proceed without either protective mechanism.
+        if (!screenOffGuard_.start(window_)) {
             MessageBoxW(window_,tr(
                 L"Could not activate the four-second mouse and keyboard guard. Screens were not turned off.",
                 L"Não foi possível ativar a proteção do rato e teclado durante quatro segundos. Os ecrãs não foram desligados.").c_str(),
@@ -1887,10 +1887,21 @@ private:
         }
         if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
         DWORD_PTR ignored=0;
-        // Broadcast with timeout so a hung window cannot freeze the UI;
-        // only the display signal is changed, never monitor power/VCP.
-        SendMessageTimeoutW(HWND_BROADCAST,WM_SYSCOMMAND,
+        // Handle the system monitor-power command in our own top-level
+        // window. A HWND_BROADCAST can process many unrelated windows
+        // sequentially, delaying sleep and consuming the entire guard.
+        // DefWindowProcW handles SC_MONITORPOWER for this window; no
+        // monitor hardware/VCP power-off commands are issued.
+        const LRESULT sent=SendMessageTimeoutW(window_,WM_SYSCOMMAND,
             SC_MONITORPOWER,2,SMTO_ABORTIFHUNG,700,&ignored);
+        if (!sent) {
+            screenOffGuard_.stop();
+            MessageBoxW(window_,tr(
+                L"Windows did not accept the screen-off request.",
+                L"O Windows não aceitou o pedido para desligar os ecrãs.").c_str(),
+                L"NightLight",MB_OK|MB_ICONWARNING);
+            return;
+        }
         screenOffGuard_.screenOffDispatched();
     }
     void openWindow(bool fromTray=false) {
@@ -2278,6 +2289,15 @@ private:
             return 0;
         }
         case WM_SHOW_EXISTING: openWindow(); return 0;
+        case WM_SCREEN_GUARD_WAKE:
+            // Hooks/power notifications post at most one request until the
+            // timer is serviced; never perform display power calls inside a
+            // low-level input hook (Windows can silently remove slow hooks).
+            if (screenOffGuard_.guarding())
+                SetTimer(hwnd,TIMER_SCREEN_GUARD_WAKE,
+                    nightlight::kScreenOffResleepDelayMs,nullptr);
+            else gScreenOffWakeQueued.store(false,std::memory_order_relaxed);
+            return 0;
         case nightlight::WM_DDC_COMPLETE:
             syncHardware(); repaint(); return 0;
         case WM_HSCROLL: {
@@ -2375,7 +2395,13 @@ private:
                 if (IsEqualGUID(setting->PowerSetting,displayStateGuid) && setting->DataLength==sizeof(DWORD)) {
                     DWORD state=0; CopyMemory(&state,setting->Data,sizeof(state));
                     displayAwake_=state!=0;
-                    if (displayAwake_) scheduleDisplayRecovery();
+                    if (displayAwake_ && screenOffGuard_.guarding()) {
+                        // Display power management can react before the
+                        // low-level hook sees input. Reassert sleep promptly,
+                        // and postpone hardware refresh until the guard ends.
+                        requestScreenOffReassert();
+                        KillTimer(hwnd,TIMER_DISPLAYS);
+                    } else if (displayAwake_) scheduleDisplayRecovery();
                     else KillTimer(hwnd,TIMER_DISPLAYS);
                 }
             } else if (wParam==PBT_APMRESUMEAUTOMATIC || wParam==PBT_APMRESUMESUSPEND) {
@@ -2385,6 +2411,16 @@ private:
             }
             return TRUE;
         case WM_TIMER:
+            if (wParam==TIMER_SCREEN_GUARD_WAKE) {
+                KillTimer(hwnd,TIMER_SCREEN_GUARD_WAKE);
+                gScreenOffWakeQueued.store(false,std::memory_order_relaxed);
+                if (screenOffGuard_.guarding()) {
+                    DWORD_PTR ignored=0;
+                    SendMessageTimeoutW(hwnd,WM_SYSCOMMAND,
+                        SC_MONITORPOWER,2,SMTO_ABORTIFHUNG,350,&ignored);
+                }
+                return 0;
+            }
             if (wParam==TIMER_ANIMATION) { if (animationTimerRunning_) tickAnimations(); return 0; }
             if (wParam==TIMER_VERIFY_COLOR) {
                 if (displayAwake_ && !dragging_) model_.applyAll(nightlight::GammaRefresh::Verify);
@@ -2436,6 +2472,7 @@ private:
             }
             return 0;
         case WM_DESTROY:
+            KillTimer(hwnd,TIMER_SCREEN_GUARD_WAKE);
             screenOffGuard_.stop();
             noteWindowPosition(true);
             shuttingDown_=true;
