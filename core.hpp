@@ -68,10 +68,10 @@ inline constexpr int kDdcSectionBaseDip = 34; // Retain bottom padding of 4 DIP
 
 // Spacing around the three cards (DIPs, scaled with Windows DPI).
 // The outer edges (top/left/right/bottom) remain 16 DIP; gaps between
-// cards are now also 16 DIP (+8). Internal content padding stays 16 DIP.
+// cards are now 12 DIP. Internal content padding stays 16 DIP.
 inline constexpr int kCardOuterMarginDip = 16;
 inline constexpr int kCardsTopMarginDip = kCardOuterMarginDip;
-inline constexpr int kCardsGapDip = 16;
+inline constexpr int kCardsGapDip = 12;
 inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
@@ -85,6 +85,8 @@ inline constexpr UINT kHideToTrayFlags =
 
 // The entrance uses one shared 150-ms motion for both opacity and the
 // upward slide. A small initial alpha makes the first frame perceptible.
+// Four-second guard to prevent wake-up from the click or keyboard input.
+inline constexpr unsigned kScreenOffInputGuardMs = 4000;
 inline constexpr unsigned kWindowOpeningDurationMs = 150;
 inline constexpr int kWindowOpeningSlideDip = 12;
 inline constexpr unsigned char kWindowOpeningInitialAlpha = 24;
