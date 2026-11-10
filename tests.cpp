@@ -266,7 +266,13 @@ int main() {
         // Opening fade and upward translation use exactly the same
         // 150ms motion, ending at the saved resting window coordinates.
         check(kScreenOffInputGuardMs==4000,
-            "Screen-off protection has a strict four-second input deadline");
+            "Screen-off protection lasts exactly four seconds after sleep dispatch");
+        check(kScreenOffPreparationGraceMs>=1000 &&
+              kScreenOffPreparationGraceMs<=4000,
+            "Guard startup has a bounded grace period for the display command");
+        check(kScreenOffResleepDelayMs>0 &&
+              kScreenOffResleepDelayMs<=100,
+            "A wake-up intercepted during the guard triggers fast re-sleep");
         check(kWindowOpeningDurationMs==150 &&
               kWindowOpeningSlideDip==12 &&
               kWindowOpeningInitialAlpha>0 &&
