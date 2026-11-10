@@ -20,6 +20,34 @@ int main() {
         check(sliderPositionFromX(1000,10,210,0,10000)==10000,"Captured dragging clamps beyond the right edge");
         check(sliderPositionFromX(110,10,210,0,10000)==5000,"Captured dragging maps the pointer continuously");
         check(sliderPositionFromX(110,10,10,0,10000)==0,"Degenerate slider geometry stays safe");
+        check(kelvinFromTemperatureSliderX(0,20,620)==1000 &&
+              kelvinFromTemperatureSliderX(1000,20,620)==6500,
+            "Temperature slider clamps to the original 1000-6500 K endpoints");
+        check(kelvinFromTemperatureSliderX(20,20,620)==1000 &&
+              kelvinFromTemperatureSliderX(620,20,620)==6500,
+            "Temperature range remains unchanged at its visible endpoints");
+        check(kelvinFromTemperatureSliderX(320,20,620)<3750 &&
+              kelvinFromTemperatureSliderX(320,20,620)>3100,
+            "Middle of the slider now produces mildly warmer Kelvin than linear");
+        check(temperatureSliderXFromKelvin(1000,20,620)==20 &&
+              temperatureSliderXFromKelvin(6500,20,620)==620,
+            "Warm-biased slider thumb keeps both exact endpoint positions");
+        int priorKelvin=1000;
+        for(int x=20;x<=620;x+=10) {
+            const int temperature=kelvinFromTemperatureSliderX(x,20,620);
+            check(temperature>=priorKelvin && temperature%10==0,
+                "Warmer slider response remains monotonic and moves in 10K steps");
+            priorKelvin=temperature;
+        }
+        for(int k=1000;k<=6500;k+=250) {
+            const int x=temperatureSliderXFromKelvin(k,20,620);
+            const int restored=kelvinFromTemperatureSliderX(x,20,620);
+            check(std::abs(restored-k)<=20,
+                "Kelvin-to-slider inverse holds across the entire range");
+        }
+        check(kelvinFromTemperatureSliderX(110,110,110)==1000 &&
+              temperatureSliderXFromKelvin(4000,110,110)==110,
+            "Warm slider mapping handles zero-width geometry safely");
         {
             using Key=std::pair<std::wstring,int>;
             std::map<Key,int> pending{{{L"A",0},1},{{L"A",1},2},{{L"B",0},3},{{L"B",1},4}};
