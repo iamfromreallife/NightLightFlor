@@ -927,10 +927,12 @@ private:
         slider_={sliderLeft,secondPanelTop_+px(62),sliderLeft+sliderW,secondPanelTop_+px(66)};
         hardwareTop_=secondPanelTop_+temperatureHeight_+px(12);
         hardwareHeight_=px(hardwareRows_.empty()?72:
-            44+128*static_cast<int>(hardwareRows_.size()));
+            nightlight::kDdcSectionBaseDip+
+                nightlight::kDdcRowStepDip*static_cast<int>(hardwareRows_.size()));
         for (size_t i=0;i<hardwareRows_.size();++i) {
             auto& row=hardwareRows_[i];
-            row.topMotion.to(hardwareTop_+px(36+128*static_cast<int>(i)),
+            row.topMotion.to(hardwareTop_+px(nightlight::kDdcFirstRowTopDip+
+                nightlight::kDdcRowStepDip*static_cast<int>(i)),
                 layoutTime_,180,
                 reorderInProgress_ && animations_ && IsWindowVisible(window_));
             row.top=static_cast<int>(std::round(row.topMotion.value(layoutTime_)));
@@ -944,8 +946,8 @@ private:
             // One full-width pair of sliders per monitor, beneath its name.
             const int sliderLeft=innerLeft+px(38);
             const int sliderWidth=std::max(px(1),innerRight-sliderLeft-px(60));
-            place(row.brightness,sliderLeft,row.top+px(38),sliderWidth,px(32),TRUE);
-            place(row.contrast,sliderLeft,row.top+px(70),sliderWidth,px(32),TRUE);
+            place(row.brightness,sliderLeft,row.top+px(36),sliderWidth,px(28),TRUE);
+            place(row.contrast,sliderLeft,row.top+px(66),sliderWidth,px(28),TRUE);
         }
         hardwareVisibleHeight_=static_cast<int>(std::round(hardwareHeight_*hardwareProgress));
         contentHeight_=secondPanelTop_+temperatureHeight_+margin+
@@ -1284,19 +1286,15 @@ private:
                 drawTextAt(dc,formatNumber(percent)+L" %",number,
                     smallFont_,p.subtle,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
             };
-            drawChannel(row.brightness,row.top+px(38),false);
-            drawChannel(row.contrast,row.top+px(70),true);
+            drawChannel(row.brightness,row.top+px(36),false);
+            drawChannel(row.contrast,row.top+px(66),true);
             std::wstring message;
             if (state.brightness.failed || state.contrast.failed)
                 message=tr(L"The monitor did not accept the adjustment. Try again.",
                     L"O monitor não aceitou o ajuste. Tente novamente.");
-            RECT status{left,row.top+px(106),right-px(4),row.top+px(122)};
+            RECT status{left,row.top+px(96),right-px(4),row.top+px(110)};
             drawTextAt(dc,message,status,smallFont_,p.muted);
-            if (i+1<hardwareRows_.size()) {
-                RECT divider{left,row.top+px(127),
-                    right,row.top+px(128)};
-                fill(dc,divider,p.border);
-            }
+            // No divider between monitors: the name buttons distinguish rows.
         }
     }
     LRESULT drawHardwareSlider(NMCUSTOMDRAW& draw) {
