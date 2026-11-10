@@ -10,11 +10,15 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <cwchar>
 #include <memory>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 #include "core.hpp"
 #include "ddc.hpp"
@@ -31,7 +35,7 @@ using nightlight::Preferences;
 namespace {
 constexpr int ID_DDC = 1011, ID_DDC_SLIDER_BASE = 5000, ID_DDC_MONITOR_BASE = 6000;
 constexpr int ID_RENAME_EDIT = 1006;
-constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012;
+constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012, ID_SCREEN_OFF = 1013;
 constexpr UINT TIMER_GAMMA = 11;
 constexpr UINT TIMER_STATE = 12;
 constexpr UINT TIMER_SAVE_DDC = 13;
@@ -53,6 +57,95 @@ constexpr UINT TIMER_DISPLAYS = 10;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
 constexpr int ICON_RESOURCE = 101;
 constexpr UINT TRAY_ID = 100;
+
+// Dedicated low-level hooks avoid blocking the UI thread, which needs to
+// remain responsive for startup and painting. The input-suppression deadline
+// is checked inside each callback, so suppression expires after four seconds
+// even if a timer message is delayed. Secure-attention keys are OS-managed.
+std::atomic<ULONGLONG> gScreenOffBlockedUntil{0};
+LRESULT CALLBACK screenOffMouseHook(int code,WPARAM wp,LPARAM lp) {
+    if (code==HC_ACTION && GetTickCount64()<
+            gScreenOffBlockedUntil.load(std::memory_order_relaxed))
+        return 1;
+    return CallNextHookEx(nullptr,code,wp,lp);
+}
+LRESULT CALLBACK screenOffKeyboardHook(int code,WPARAM wp,LPARAM lp) {
+    if (code==HC_ACTION && GetTickCount64()<
+            gScreenOffBlockedUntil.load(std::memory_order_relaxed))
+        return 1;
+    return CallNextHookEx(nullptr,code,wp,lp);
+}
+class ScreenOffInputGuard {
+public:
+    ScreenOffInputGuard() : stopEvent_(CreateEventW(nullptr,TRUE,FALSE,nullptr)) {}
+    ~ScreenOffInputGuard() {
+        stop();
+        if (stopEvent_) CloseHandle(stopEvent_);
+    }
+    bool start() {
+        if (!stopEvent_ || active_.load()) return false;
+        if (worker_.joinable()) worker_.join();
+        ResetEvent(stopEvent_);
+        auto started=std::make_shared<std::promise<bool>>();
+        auto ready=started->get_future();
+        try {
+            worker_=std::thread([this,started] {
+                const HINSTANCE module=GetModuleHandleW(nullptr);
+                HHOOK mouse=SetWindowsHookExW(WH_MOUSE_LL,screenOffMouseHook,module,0);
+                HHOOK keyboard=SetWindowsHookExW(WH_KEYBOARD_LL,screenOffKeyboardHook,module,0);
+                const bool both=mouse && keyboard &&
+                    WaitForSingleObject(stopEvent_,0)!=WAIT_OBJECT_0;
+                const ULONGLONG deadline=GetTickCount64()+
+                    nightlight::kScreenOffInputGuardMs;
+                if (both) {
+                    gScreenOffBlockedUntil.store(deadline,std::memory_order_relaxed);
+                    active_.store(true);
+                }
+                started->set_value(both);
+                if (both) {
+                    MSG message{};
+                    while (WaitForSingleObject(stopEvent_,0)!=WAIT_OBJECT_0) {
+                        const ULONGLONG now=GetTickCount64();
+                        if (now>=deadline) break;
+                        const DWORD remaining=static_cast<DWORD>(deadline-now);
+                        // Input hooks are dispatched to this thread's queue.
+                        // Pump it while waiting, with no expensive work here.
+                        const DWORD wait=MsgWaitForMultipleObjectsEx(
+                            1,&stopEvent_,remaining,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
+                        if (wait==WAIT_OBJECT_0) break;
+                        while (PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
+                            if (message.message==WM_QUIT) break;
+                            TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                }
+                gScreenOffBlockedUntil.store(0,std::memory_order_relaxed);
+                if (keyboard) UnhookWindowsHookEx(keyboard);
+                if (mouse) UnhookWindowsHookEx(mouse);
+                active_.store(false);
+            });
+        } catch (...) {
+            return false;
+        }
+        if (ready.wait_for(std::chrono::milliseconds(1500))!=
+                std::future_status::ready) {
+            stop();
+            return false;
+        }
+        return ready.get();
+    }
+    void stop() {
+        if (stopEvent_) SetEvent(stopEvent_);
+        gScreenOffBlockedUntil.store(0,std::memory_order_relaxed);
+        if (worker_.joinable()) worker_.join();
+        active_.store(false);
+    }
+private:
+    HANDLE stopEvent_=nullptr;
+    std::thread worker_;
+    std::atomic<bool> active_{false};
+};
 
 struct Palette {
     COLORREF page, header, card, border, text, subtle, muted;
