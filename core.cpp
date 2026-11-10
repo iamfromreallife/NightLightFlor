@@ -252,6 +252,18 @@ bool updateGammaRamp(const Ramp& target,GammaRefresh refresh,GammaRampState& sta
     return ok;
 }
 
+int temperatureSliderWidth(int dpi,int clientWidth) {
+    const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
+    // 40-DIP card inset on each side, including the outer card margin.
+    return std::max(px(16),clientWidth-px(80));
+}
+int ddcSliderWidth(int dpi,int clientWidth) {
+    const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
+    // 74 DIP from the window left to the slider, reserving 46 DIP at
+    // the right for the percentage and the trackbar thumb.
+    return std::max(px(16),clientWidth-px(156));
+}
+
 WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const std::vector<int>& tabDesiredWidths, size_t ddcMonitorRows,
     bool gammaUnlocked, bool ddcVisible) {
@@ -274,7 +286,8 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const int panelTop=px(12);
     const int panelHeight=px(46+rows*38);
     const int secondPanelTop=panelTop+panelHeight+px(12);
-    const int temperatureHeight=px(gammaUnlocked?112:162);
+    const int temperatureHeight=px((gammaUnlocked?112:162)+
+        (width<px(350)?24:0));
     const int hardwareHeight=px(ddcMonitorRows==0?72:
         kDdcSectionBaseDip+kDdcRowStepDip*
             static_cast<int>(std::min<size_t>(ddcMonitorRows,100)));
