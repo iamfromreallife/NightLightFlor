@@ -241,10 +241,11 @@ int main() {
             "Additional DDC monitor rows do not force a wider window");
         check(moreDdc.clientHeight-narrow.clientHeight==kDdcRowStepDip,
             "Each additional monitor receives a compact 112-DIP DDC row");
-        check(kDdcSectionBaseDip==40 &&
-              kDdcFirstRowTopDip+96+14<
-                  kDdcFirstRowTopDip+kDdcRowStepDip,
-            "Compact DDC status labels stay clear of the following monitor");
+        check(kDdcSectionBaseDip==32 && kDdcRowStepDip==100 &&
+              kDdcFirstRowTopDip+66+28<=kDdcSectionBaseDip+kDdcRowStepDip,
+            "DDC compact row fits both sliders without a blank footer");
+        check(kDdcFirstRowTopDip+66+28<kDdcFirstRowTopDip+kDdcRowStepDip,
+            "Vertically stacked DDC monitor rows never overlap");
         const auto twoMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,2,false,true);
         const auto threeMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,3,false,true);
         check(threeMonitorsWide.clientHeight>twoMonitorsWide.clientHeight,
@@ -262,8 +263,22 @@ int main() {
             "Minimum dimensions scale with display DPI");
         const auto oversized=calculateWindowContentMinimum(96,420,
             {1500},0,false,false);
-        check(oversized.clientWidth>=72+1500 && oversized.screenRows==1,
-            "Very long monitor names and their switches keep full tab width");
+        check(oversized.clientWidth==420 && oversized.screenRows==1,
+            "Long monitor names ellipsize instead of enforcing a wider window");
+        const auto tiny=calculateWindowContentMinimum(96,180,tabs,2,false,true);
+        check(tiny.clientWidth==180 && tiny.screenRows==3,
+            "Narrow clients wrap monitor tabs but do not force a wider window");
+        check(tiny.clientHeight>narrow.clientHeight,
+            "Compact temperature layout receives additional vertical clearance");
+        check(temperatureSliderWidth(96,200)==120 &&
+              temperatureSliderWidth(96,800)==720,
+            "Temperature slider expands and contracts with window width without a cap");
+        check(ddcSliderWidth(96,200)==44 &&
+              ddcSliderWidth(96,800)==644,
+            "Brightness and contrast sliders track window width near percentages");
+        check(temperatureSliderWidth(144,300)==180 &&
+              ddcSliderWidth(144,300)==66,
+            "Responsive slider widths are DPI aware");
         check(resolveStartup(L"normal",L"",true)==L"normal","Normal startup");
         check(resolveStartup(L"minimized",L"",true)==L"minimized","Minimized startup");
         check(resolveStartup(L"tray",L"",true)==L"tray","Tray startup");
@@ -296,8 +311,12 @@ int main() {
             check(model.rememberWindowPosition(-1900,235),"Remember position on monitor left of primary");
             check(model.rememberWindowSize(870,610),"Remember user's outer window width and height");
             check(!model.rememberWindowSize(870,610),"Identical window size should not trigger a config update");
-            check(!model.rememberWindowSize(200,610) && !model.rememberWindowSize(870,200),
-                "Reject undersized window dimensions");
+            check(model.rememberWindowSize(200,610),
+                "Accept the new 200-pixel minimum width");
+            check(model.rememberWindowSize(870,610),
+                "Restore the normal geometry after checking the minimum");
+            check(!model.rememberWindowSize(199,610) && !model.rememberWindowSize(870,200),
+                "Reject sizes narrower than 200 pixels or shorter than 260");
             check(!model.rememberWindowSize(20000,610) && !model.rememberWindowSize(870,20000),
                 "Reject unreasonable saved window dimensions");
             check(!model.rememberWindowPosition(-1900,235),"Unchanged window location requires no new write");
@@ -326,6 +345,8 @@ int main() {
             const auto restoredSize=model.windowSize();
             check(restoredSize && restoredSize->cx==870 && restoredSize->cy==610,
                 "Restore saved window dimensions across application starts");
+            check(model.rememberWindowSize(200,610) && model.save(),
+                "Save 200-pixel window geometry for the next launch");
             check(model.hardwarePercent(L"test-display-1",false)==23 &&
                   model.hardwarePercent(L"test-display-1",true)==67 &&
                   model.hardwarePercent(L"test-display-2",false)==81 &&
@@ -341,7 +362,7 @@ int main() {
             auto saved=Json::parse(content);
             check(saved.get("general").get("window_position").get("x").integer()==-1900 &&
                 saved.get("general").get("window_position").get("y").integer()==235 &&
-                saved.get("general").get("window_position").get("width").integer()==870 &&
+                saved.get("general").get("window_position").get("width").integer()==200 &&
                 saved.get("general").get("window_position").get("height").integer()==610,
                 "Portable config stores signed window coordinates and exact dimensions");
             check(std::holds_alternative<std::nullptr_t>(saved.get("screen").get("brightness").value),
