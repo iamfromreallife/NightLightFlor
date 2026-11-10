@@ -6,6 +6,7 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <climits>
 #include <stdexcept>
 #include <utility>
 
@@ -265,7 +266,7 @@ Model::~Model() { save(); restoreOriginals(); }
 
 bool Model::load() {
     lastError_.clear();
-    loaded_=false; savedStampValid_=false;
+    loaded_=false; savedStampValid_=false; windowPosition_.reset();
     std::error_code ec;
     const bool exists=fs::exists(configPath_,ec);
     if (ec) { lastError_=L"Cannot access config.json; your file has not been modified."; return false; }
@@ -302,6 +303,14 @@ bool Model::load() {
     const std::string startup = general.get("startup_mode").str("normal");
     preferences_.startup = (startup == "minimized" || startup == "tray")
         ? fromUtf8(startup) : L"normal";
+    const auto& position=general.get("window_position");
+    if (position.isObject()) {
+        const int x=position.get("x").integer(INT_MIN);
+        const int y=position.get("y").integer(INT_MIN);
+        if (x!=INT_MIN && y!=INT_MIN &&
+            x>=-1000000 && x<=1000000 && y>=-1000000 && y<=1000000)
+            windowPosition_=POINT{x,y};
+    }
     loaded_ = true;
     // Read legacy profiles once, then retain only settings this app implements.
     if (!root_.get("screen").get("monitor_profiles").isObject())
@@ -327,6 +336,13 @@ bool Model::rememberHardwarePercent(const std::wstring& device,bool contrast,int
     profile[key]=percent;
     return true;
 }
+bool Model::rememberWindowPosition(int x,int y) {
+    if (!loaded_ || x < -1000000 || x > 1000000 ||
+        y < -1000000 || y > 1000000) return false;
+    if (windowPosition_ && windowPosition_->x==x && windowPosition_->y==y) return false;
+    windowPosition_=POINT{x,y};
+    return true;
+}
 bool Model::save() {
     if (!loaded_) return false;
     root_["general"]["language"] = toUtf8(preferences_.locale);
@@ -345,6 +361,10 @@ bool Model::save() {
     clean["general"]=portable::Json::object();
     for(const char* key:{"language","appearance","startup_mode"})
         clean["general"][key]=root_.get("general").get(key);
+    if (windowPosition_) {
+        clean["general"]["window_position"]["x"]=windowPosition_->x;
+        clean["general"]["window_position"]["y"]=windowPosition_->y;
+    }
     auto profiles=portable::Json::object();
     if(auto values=std::get_if<portable::Json::Object>(&root_.get("screen").get("monitor_profiles").value))
         for(const auto& item:*values) {
