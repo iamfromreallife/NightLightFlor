@@ -263,6 +263,35 @@ int main() {
               "Slider needs a tall, DPI-scalable click region");
         // Each monitor tab fits its complete name and its independent switch,
         // with no standalone Enabled button or truncated-label width cap.
+        // Opening fade and upward translation use exactly the same
+        // 150ms motion, ending at the saved resting window coordinates.
+        check(kWindowOpeningDurationMs==150 &&
+              kWindowOpeningSlideDip==12 &&
+              kWindowOpeningInitialAlpha>0 &&
+              kWindowOpeningInitialAlpha<64,
+            "Fast 150ms opening slide/fade and perceptible first frame");
+        for(int dpi:{96,120,144,192}) {
+            const int fullOffset=MulDiv(kWindowOpeningSlideDip,dpi,96);
+            const double initialProgress=kWindowOpeningInitialAlpha/255.0;
+            check(windowOpeningSlideOffset(dpi,0)==fullOffset &&
+                  windowOpeningSlideOffset(dpi,1)==0,
+                "Slide begins lower and finishes exactly at resting position");
+            check(windowOpeningSlideOffset(dpi,initialProgress)>0,
+                "Window opens below target before first visible fade frame");
+            check(windowOpeningSlideOffset(dpi,0.5)>0 &&
+                  windowOpeningSlideOffset(dpi,0.5)<fullOffset &&
+                  windowOpeningSlideOffset(dpi,-1)==fullOffset &&
+                  windowOpeningSlideOffset(dpi,2)==0,
+                "Slide offset decreases smoothly and clamps at both ends");
+            Motion opening;
+            opening.snap(initialProgress);
+            opening.to(1,1000,kWindowOpeningDurationMs,true);
+            check(opening.active(1000) && opening.active(1075) &&
+                  !opening.active(1150) && opening.value(1150)==1,
+                "Both fade and slide share a single 150ms animation clock");
+            check(windowOpeningSlideOffset(dpi,opening.value(1075))>0,
+                "Window continues rising while alpha increases");
+        }
         const std::vector<int> tabs{260,250,270};
         check(kCardOuterMarginDip==8 &&
               kCardsTopMarginDip==kCardOuterMarginDip &&
@@ -301,9 +330,12 @@ int main() {
             "Additional DDC monitor rows do not force a wider window");
         check(moreDdc.clientHeight-narrow.clientHeight==kDdcRowStepDip,
             "Each additional monitor receives a compact 112-DIP DDC row");
-        check(kDdcSectionBaseDip==32 && kDdcRowStepDip==100 &&
+        check(kDdcFirstRowTopDip==36 &&
+              kDdcFirstRowTopDip-32==4,
+            "DDC title-to-monitor gap increases by exactly 2 DIP (2 to 4)");
+        check(kDdcSectionBaseDip==34 && kDdcRowStepDip==100 &&
               kDdcFirstRowTopDip+66+28<=kDdcSectionBaseDip+kDdcRowStepDip,
-            "DDC compact row fits both sliders without a blank footer");
+            "DDC card height grows by 2 DIP and still fits both sliders");
         check(kDdcFirstRowTopDip+66+28<kDdcFirstRowTopDip+kDdcRowStepDip,
             "Vertically stacked DDC monitor rows never overlap");
         const auto twoMonitorsWide=calculateWindowContentMinimum(96,1600,tabs,2,false,true);
