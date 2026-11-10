@@ -355,7 +355,8 @@ private:
     unsigned recoveryAttempt_=0;
     int hardwareTop_ = 0;
     int hardwareHeight_ = 186;
-    HWND btnRefresh_=nullptr, editName_=nullptr;
+    HWND btnRefresh_=nullptr, btnScreenOff_=nullptr, editName_=nullptr;
+    ScreenOffInputGuard screenOffGuard_;
     HWND armedTabSwitch_=nullptr;
     bool editingName_=false;
     std::wstring editingDevice_;
@@ -366,7 +367,7 @@ private:
     bool trayMenuOpen_=false;
     int temperatureHeight_ = 180;
     HWND gammaTooltip_ = nullptr;
-    std::wstring gammaHelp_;
+    std::wstring gammaHelp_, screenOffHelp_;
     HANDLE gammaHelper_ = nullptr;
 
     HFONT font_ = nullptr, boldFont_ = nullptr, headlineFont_ = nullptr, smallFont_ = nullptr;
@@ -761,7 +762,7 @@ private:
         sectionTitleFont_ = boldFont_;
         headlineFont_ = create(20, FW_NORMAL);
         tabDesiredWidths_.clear();
-        const HWND controls[] = {btnRefresh_,btnGamma_,editName_};
+        const HWND controls[] = {btnRefresh_,btnScreenOff_,btnGamma_,editName_};
         for (HWND control : controls) {
             if (control) SendMessageW(control, WM_SETFONT,
                 reinterpret_cast<WPARAM>(font_), TRUE);
@@ -786,6 +787,7 @@ private:
         updateMotionPreference();
         ddc_.setWindow(window_);
         btnRefresh_=createButton(ID_REFRESH,L"");
+        btnScreenOff_=createButton(ID_SCREEN_OFF,L"");
         btnGamma_ = createButton(ID_GAMMA, L"");
         ShowWindow(btnGamma_, gammaUnlocked_ ? SW_HIDE : SW_SHOW);
         gammaTooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
@@ -796,6 +798,12 @@ private:
         gammaTool.hwnd=window_; gammaTool.uId=reinterpret_cast<UINT_PTR>(btnGamma_);
         gammaTool.lpszText=const_cast<wchar_t*>(L"Extended gamma range");
         SendMessageW(gammaTooltip_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&gammaTool));
+        TOOLINFOW screenTool{sizeof(screenTool)};
+        screenTool.uFlags=TTF_IDISHWND|TTF_SUBCLASS;
+        screenTool.hwnd=window_;
+        screenTool.uId=reinterpret_cast<UINT_PTR>(btnScreenOff_);
+        screenTool.lpszText=const_cast<wchar_t*>(L"Turn off screens");
+        SendMessageW(gammaTooltip_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&screenTool));
         SendMessageW(gammaTooltip_,TTM_SETMAXTIPWIDTH,0,px(430));
         editName_ = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL,
@@ -843,7 +851,7 @@ private:
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME);
         repaint();
         for (HWND h : tabs_) InvalidateRect(h, nullptr,FALSE);
-        const HWND buttons[] = {btnRefresh_,btnGamma_};
+        const HWND buttons[] = {btnRefresh_,btnScreenOff_,btnGamma_};
         for (HWND b : buttons) if (b) InvalidateRect(b, nullptr,FALSE);
         for (const auto& row:hardwareRows_) { InvalidateRect(row.nameButton,nullptr,FALSE); InvalidateRect(row.brightness,nullptr,FALSE); InvalidateRect(row.contrast,nullptr,FALSE); }
     }
@@ -855,6 +863,16 @@ private:
             SetWindowTextW(row.contrast,(tr(L"Contrast",L"Contraste")+suffix).c_str());
         }
         SetWindowTextW(btnRefresh_,tr(L"Refresh displays",L"Atualizar ecrãs").c_str());
+        screenOffHelp_=tr(
+            L"Turn off screens (mouse and keyboard ignored for 4 seconds)",
+            L"Desligar ecrãs (rato e teclado ignorados durante 4 segundos)");
+        SetWindowTextW(btnScreenOff_,screenOffHelp_.c_str());
+        TOOLINFOW screenTool{sizeof(screenTool)};
+        screenTool.hwnd=window_;
+        screenTool.uId=reinterpret_cast<UINT_PTR>(btnScreenOff_);
+        screenTool.lpszText=screenOffHelp_.data();
+        SendMessageW(gammaTooltip_,TTM_UPDATETIPTEXTW,0,
+            reinterpret_cast<LPARAM>(&screenTool));
         gammaHelp_ = tr(
             L"Requests administrator permission to set HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ICM: GdiICMGammaRange = 256. Applies system-wide; restart Windows afterwards. Enables stronger independent monitor warmth without overlays.",
             L"Pede autorização de administrador para definir HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ICM: GdiICMGammaRange = 256. Aplica-se ao sistema; reinicie o Windows. Permite cores mais quentes por ecrã sem sobreposições.");
@@ -1045,6 +1063,17 @@ private:
             }
             tabX+=tabW+tabGap;
         }
+        // Screen-off button belongs to the same row as the monitor tabs,
+        // immediately after the last one. On narrow windows it wraps with
+        // the tabs instead of overlapping a name or its on/off toggle.
+        const int offWidth=px(32);
+        if (tabX>tabStart && tabX+offWidth>tabsRight) {
+            tabX=tabStart;
+            tabY+=px(38);
+            ++rows;
+        }
+        place(btnScreenOff_,tabX,tabY,offWidth,tabH,TRUE);
+        EnableWindow(btnScreenOff_,!tabs_.empty());
         panelHeight_=px(46+rows*38);
         secondPanelTop_=panelTop_+panelHeight_+px(nightlight::kCardsGapDip);
         const bool narrowTemperature=width_<px(350);
