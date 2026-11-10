@@ -265,6 +265,8 @@ int main() {
         // with no standalone Enabled button or truncated-label width cap.
         // Opening fade and upward translation use exactly the same
         // 150ms motion, ending at the saved resting window coordinates.
+        check(kScreenOffInputGuardMs==4000,
+            "Screen-off protection has a strict four-second input deadline");
         check(kWindowOpeningDurationMs==150 &&
               kWindowOpeningSlideDip==12 &&
               kWindowOpeningInitialAlpha>0 &&
@@ -305,9 +307,9 @@ int main() {
         const std::vector<int> tabs{260,250,270};
         check(kCardOuterMarginDip==16 &&
               kCardsTopMarginDip==kCardOuterMarginDip &&
-              kCardsGapDip==16 &&
+              kCardsGapDip==12 &&
               kCardInnerInsetDip==16,
-            "Outside top, side, bottom and inter-card spacing are each 16 DIP");
+            "Outside margins remain 16 DIP; all inter-section gaps are 12 DIP");
         check(kCardCornerRadiusDip==8 &&
               kCardCornerRadiusDip*2==16,
             "All section cards use an explicit 8 DIP radius (16 DIP arc diameter)");
@@ -319,13 +321,21 @@ int main() {
             kCardsTopMarginDip+(46+38)+kCardsGapDip+
             kTemperatureUnlockedHeightDip+kCardsGapDip+
             (kDdcSectionBaseDip+kDdcRowStepDip)+kCardOuterMarginDip,
-            "Visible three-card height has 16 DIP top/bottom and between sections");
+            "Visible height respects 16 DIP outside margins and 12 DIP section gaps");
         check(singleHidden.clientHeight==
             kCardsTopMarginDip+(46+38)+kCardsGapDip+
             kTemperatureUnlockedHeightDip+kCardOuterMarginDip &&
             singleVisible.clientHeight-singleHidden.clientHeight==
                 kCardsGapDip+kDdcSectionBaseDip+kDdcRowStepDip,
-            "Hidden DDC removes only its card and the intervening 16-DIP gap");
+            "Hidden DDC removes only its card and the intervening 12-DIP gap");
+        const auto noButtonWrap=calculateWindowContentMinimum(
+            96,450,{160,160},1,false,true);
+        const auto wrappedButton=calculateWindowContentMinimum(
+            96,380,{160,160},1,false,true);
+        check(noButtonWrap.screenRows==1 &&
+              wrappedButton.screenRows==2 &&
+              wrappedButton.clientHeight-noButtonWrap.clientHeight==38,
+            "Screen-off button stays beside two tabs if possible, otherwise wraps cleanly");
         const auto wide=calculateWindowContentMinimum(96,980,tabs,2,false,true);
         const auto narrow=calculateWindowContentMinimum(96,420,tabs,2,false,true);
         check(wide.screenRows==1 && narrow.screenRows>=2,
@@ -417,8 +427,8 @@ int main() {
         check(oversized.clientWidth==420 && oversized.screenRows==1,
             "Long monitor names ellipsize instead of enforcing a wider window");
         const auto tiny=calculateWindowContentMinimum(96,180,tabs,2,false,true);
-        check(tiny.clientWidth==180 && tiny.screenRows==3,
-            "Narrow clients wrap monitor tabs but do not force a wider window");
+        check(tiny.clientWidth==180 && tiny.screenRows==4,
+            "At minimum width the screen-off button wraps after three monitor rows");
         check(tiny.clientHeight>narrow.clientHeight,
             "Compact temperature layout receives additional vertical clearance");
         check(temperatureSliderWidth(96,200)==128 &&
