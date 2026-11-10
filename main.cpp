@@ -306,7 +306,8 @@ private:
     nightlight::Motion temperaturePosition_,temperatureEngagement_{0},entrance_{0};
     nightlight::Motion hardwareReveal_{1},refreshTurn_{0};
     int hardwareVisibleHeight_=0;
-    bool animations_=true,highContrast_=false,opening_=false,temperatureHover_=false;
+    bool animations_=true,highContrast_=false,systemDark_=false,
+        opening_=false,temperatureHover_=false;
     bool entranceAddedLayer_=false,entranceMove_=true,parentAnimating_=false,reflowAnimating_=false,composedTransition_=false;
     RECT entranceBounds_{};
 
@@ -315,7 +316,8 @@ private:
         return pt() ? portuguese : english;
     }
     Palette palette() const {
-        auto p=colors(model_.preferences().theme==L"dark");
+        auto p=colors(nightlight::effectiveDarkTheme(
+            model_.preferences().theme,systemDark_));
         if (highContrast_) {
             p.page=p.header=p.card=GetSysColor(COLOR_WINDOW);
             p.text=p.subtle=p.muted=p.selectedText=GetSysColor(COLOR_WINDOWTEXT);
@@ -703,7 +705,11 @@ private:
         // Native window controls render immediately; no WebView runtime.
     }
     void updateTheme() {
-        const BOOL dark = model_.preferences().theme == L"dark";
+        // Refresh only on startup, explicit menu changes or Windows theme
+        // notifications, not on each slider/painting frame.
+        systemDark_=nightlight::systemAppsUseDarkTheme();
+        const BOOL dark=nightlight::effectiveDarkTheme(
+            model_.preferences().theme,systemDark_)?TRUE:FALSE;
         const Palette p = palette();
         DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark)); // immersive dark titlebar
         COLORREF caption = p.header;
@@ -714,6 +720,9 @@ private:
         DwmSetWindowAttribute(window_,33,&corners,sizeof(corners));
         const COLORREF frameBorder=highContrast_?p.text:(dark?RGB(112,112,112):RGB(160,160,160));
         DwmSetWindowAttribute(window_,34,&frameBorder,sizeof(frameBorder));
+        // Repaint the native non-client caption as well as app contents;
+        // the standard title bar must retain the matching text colour.
+        RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME);
         repaint();
         for (HWND h : tabs_) InvalidateRect(h, nullptr,FALSE);
         const HWND buttons[] = {btnRefresh_,btnGamma_};
@@ -1067,7 +1076,8 @@ private:
     }
     void drawSliderThumb(HDC dc,float cx,float cy,double hover,double pressed,bool enabled) {
         const auto p=palette();
-        const bool dark=model_.preferences().theme==L"dark";
+        const bool dark=nightlight::effectiveDarkTheme(
+            model_.preferences().theme,systemDark_);
         const float radius=static_cast<float>(px(10));
         Gdiplus::Graphics g(dc); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
@@ -1610,11 +1620,10 @@ private:
         updateLanguage();
         updateTheme();
     }
-    void setTheme(bool dark) {
+    void setTheme(const std::wstring& mode) {
         Preferences pref=model_.preferences();
-        pref.theme=dark?L"dark":L"light";
+        pref.theme=mode;
         model_.updatePreferences(pref);
-        updateLanguage();
         updateTheme();
     }
     void noteWindowPosition(bool flush=false) {
@@ -1761,9 +1770,16 @@ private:
         append(languages,MF_STRING|(pt()?MF_CHECKED:0),ID_TRAY_LANGUAGE_BASE+1,tr(L"Portuguese (Portugal)",L"Português (Portugal)").c_str(),nightlight::MenuIcon::Language);
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(languages),tr(L"Language",L"Idioma").c_str(),nightlight::MenuIcon::Language);
         HMENU themes=createMenu();
-        append(themes,MF_STRING|(model_.preferences().theme!=L"dark"?MF_CHECKED:0),ID_TRAY_THEME_BASE,tr(L"Light",L"Claro").c_str(),nightlight::MenuIcon::Light);
-        append(themes,MF_STRING|(model_.preferences().theme==L"dark"?MF_CHECKED:0),ID_TRAY_THEME_BASE+1,tr(L"Dark",L"Escuro").c_str(),nightlight::MenuIcon::Dark);
-        append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(themes),tr(L"Theme",L"Tema").c_str(),nightlight::MenuIcon::Theme);
+        const auto& themeMode=model_.preferences().theme;
+        append(themes,MF_STRING|(themeMode==L"system"?MF_CHECKED:0),
+            ID_TRAY_THEME_BASE+2,tr(L"Follow system",L"Seguir sistema").c_str(),
+            nightlight::MenuIcon::Theme);
+        append(themes,MF_STRING|(themeMode==L"light"?MF_CHECKED:0),
+            ID_TRAY_THEME_BASE,tr(L"Light",L"Claro").c_str(),nightlight::MenuIcon::Light);
+        append(themes,MF_STRING|(themeMode==L"dark"?MF_CHECKED:0),
+            ID_TRAY_THEME_BASE+1,tr(L"Dark",L"Escuro").c_str(),nightlight::MenuIcon::Dark);
+        append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(themes),
+            tr(L"Theme",L"Tema").c_str(),nightlight::MenuIcon::Theme);
         HMENU startup=createMenu();
         const auto& mode=model_.preferences().startup;
         append(startup,MF_STRING|(mode!=L"tray" && mode!=L"minimized"?MF_CHECKED:0),ID_TRAY_STARTUP_BASE,L"Normal",nightlight::MenuIcon::Window);
@@ -1807,8 +1823,9 @@ private:
             toggleHardware();
         } else if (cmd==ID_TRAY_LANGUAGE_BASE || cmd==ID_TRAY_LANGUAGE_BASE+1) {
             populateLanguage(cmd==ID_TRAY_LANGUAGE_BASE?1:0);
-        } else if (cmd==ID_TRAY_THEME_BASE || cmd==ID_TRAY_THEME_BASE+1) {
-            setTheme(cmd==ID_TRAY_THEME_BASE+1);
+        } else if (cmd>=ID_TRAY_THEME_BASE && cmd<=ID_TRAY_THEME_BASE+2) {
+            setTheme(cmd==ID_TRAY_THEME_BASE?L"light":
+                cmd==ID_TRAY_THEME_BASE+1?L"dark":L"system");
         } else if (cmd>=ID_TRAY_STARTUP_BASE && cmd<=ID_TRAY_STARTUP_BASE+2) {
             populateStartup(static_cast<int>(cmd-ID_TRAY_STARTUP_BASE));
         } else if (cmd>=ID_TRAY_DISABLE_BASE &&
