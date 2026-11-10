@@ -787,7 +787,7 @@ private:
     }
     SIZE requiredWindowSizeForWidth(int outerWidth) const {
         const SIZE frame=frameThickness();
-        const auto needed=minimumContentForWidth(std::max(1,outerWidth-frame.cx));
+        const auto needed=minimumContentForWidth(std::max(1,outerWidth-static_cast<int>(frame.cx)));
         return SIZE{needed.clientWidth+frame.cx,needed.clientHeight+frame.cy};
     }
     bool ensureWindowFitsContents() {
