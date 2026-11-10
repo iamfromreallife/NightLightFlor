@@ -634,7 +634,7 @@ private:
         // Segoe UI Semibold, 14pt-equivalent logical size, same DPI and weight
         // across Screens, Color temperature and DDC/CI Controls.
         sectionTitleFont_ = boldFont_;
-        headlineFont_ = create(30, FW_NORMAL);
+        headlineFont_ = create(20, FW_NORMAL);
         fluentIconFont_=CreateFontW(-px(18),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe Fluent Icons");
@@ -923,17 +923,23 @@ private:
         panelHeight_=px(46+rows*38);
         secondPanelTop_=panelTop_+panelHeight_+px(12);
         const bool narrowTemperature=width_<px(350);
-        const int temperatureShift=narrowTemperature?px(24):0;
-        temperatureHeight_=px(gammaUnlocked_?112:162)+temperatureShift;
+        const int temperatureShift=narrowTemperature?
+            px(nightlight::kTemperatureNarrowExtraDip):0;
+        temperatureHeight_=px(gammaUnlocked_?
+            nightlight::kTemperatureUnlockedHeightDip:
+            nightlight::kTemperatureLockedHeightDip)+temperatureShift;
         const int gammaWidth=std::min(px(220),std::max(px(1),innerRight-innerLeft));
-        place(btnGamma_,innerRight-gammaWidth,secondPanelTop_+px(119)+temperatureShift,
+        place(btnGamma_,innerRight-gammaWidth,
+            secondPanelTop_+px(nightlight::kTemperatureGammaTopDip)+temperatureShift,
             gammaWidth,px(29),TRUE);
         // No fixed maximum: the temperature gradient extends or contracts
         // with the window, keeping the same 40-DIP side inset.
         const int sliderW=nightlight::temperatureSliderWidth(static_cast<int>(dpi_),width_);
         const int sliderLeft=(width_-sliderW)/2;
-        slider_={sliderLeft,secondPanelTop_+px(62)+temperatureShift,
-            sliderLeft+sliderW,secondPanelTop_+px(66)+temperatureShift};
+        slider_={sliderLeft,
+            secondPanelTop_+px(nightlight::kTemperatureSliderTopDip)+temperatureShift,
+            sliderLeft+sliderW,
+            secondPanelTop_+px(nightlight::kTemperatureSliderTopDip+4)+temperatureShift};
         hardwareTop_=secondPanelTop_+temperatureHeight_+px(12);
         hardwareHeight_=px(hardwareRows_.empty()?72:
             nightlight::kDdcSectionBaseDip+
@@ -1157,17 +1163,29 @@ private:
         drawTextAt(mem,tr(L"Screens",L"Ecrãs"),screensTitle,sectionTitleFont_,p.text);
         drawSectionIcon(mem,1,px(36),secondPanelTop_+px(11),p.subtle);
         const bool narrowTemperature=width_<px(350);
-        RECT label{px(60),secondPanelTop_+px(8),
-            narrowTemperature?client.right-px(36):client.right-px(176),
-            secondPanelTop_+px(30)};
-        drawTextAt(mem,tr(L"Color temperature",L"Temperatura de cor"),label,sectionTitleFont_,p.text);
+        const int temperatureShift=narrowTemperature?
+            px(nightlight::kTemperatureNarrowExtraDip):0;
         const int current=hasMonitor()?selectedMonitor()->kelvin:5000;
-        RECT valueRect{narrowTemperature?px(36):client.right-px(176),
-            secondPanelTop_+(narrowTemperature?px(30):px(9)),
-            client.right-px(36),secondPanelTop_+(narrowTemperature?px(62):px(59))};
-        drawTextAt(mem,formatNumber(current)+L" K",valueRect,headlineFont_,p.accent,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+        const std::wstring temperatureText=formatNumber(current)+L" K";
+        // Both headings occupy the same 24-DIP baseline on normal widths.
+        // On narrow windows the Kelvin value uses the next line to avoid
+        // colliding with the section title.
+        const int valueReserve=std::max(px(88),textWidth(temperatureText,headlineFont_)+px(8));
+        RECT label{px(60),secondPanelTop_+px(8),
+            narrowTemperature?client.right-px(36):client.right-px(36)-valueReserve,
+            secondPanelTop_+px(32)};
+        drawTextAt(mem,tr(L"Color temperature",L"Temperatura de cor"),
+            label,sectionTitleFont_,p.text);
+        RECT valueRect{
+            narrowTemperature?px(36):client.right-px(36)-valueReserve,
+            secondPanelTop_+(narrowTemperature?px(32):px(8)),
+            client.right-px(36),
+            secondPanelTop_+(narrowTemperature?px(56):px(32))};
+        drawTextAt(mem,temperatureText,valueRect,headlineFont_,p.accent,
+            DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
         drawSlider(mem);
-        const int footerY=secondPanelTop_+px(84)+(narrowTemperature?px(24):0);
+        const int footerY=secondPanelTop_+
+            px(nightlight::kTemperatureScaleTopDip)+temperatureShift;
         const int midpoint=client.right/2;
         RECT low{px(36),footerY,midpoint-px(4),footerY+px(22)};
         RECT high{midpoint+px(4),footerY,client.right-px(36),footerY+px(22)};
