@@ -250,7 +250,14 @@ int main() {
             check(model.preferences().theme==L"light","Light theme");
             check(model.preferences().startup==L"tray","Tray mode");
             check(!model.windowPosition().has_value(),"Legacy config without a window position keeps default placement");
+            check(!model.windowSize().has_value(),"Legacy config without dimensions keeps automatic first-run sizing");
             check(model.rememberWindowPosition(-1900,235),"Remember position on monitor left of primary");
+            check(model.rememberWindowSize(870,610),"Remember user's outer window width and height");
+            check(!model.rememberWindowSize(870,610),"Identical window size should not trigger a config update");
+            check(!model.rememberWindowSize(200,610) && !model.rememberWindowSize(870,200),
+                "Reject undersized window dimensions");
+            check(!model.rememberWindowSize(20000,610) && !model.rememberWindowSize(870,20000),
+                "Reject unreasonable saved window dimensions");
             check(!model.rememberWindowPosition(-1900,235),"Unchanged window location requires no new write");
             Preferences updated=model.preferences();
             updated.locale=L"en-US";
@@ -274,6 +281,9 @@ int main() {
             const auto restoredWindow=model.windowPosition();
             check(restoredWindow && restoredWindow->x==-1900 && restoredWindow->y==235,
                 "Persist and restore screen position across application starts");
+            const auto restoredSize=model.windowSize();
+            check(restoredSize && restoredSize->cx==870 && restoredSize->cy==610,
+                "Restore saved window dimensions across application starts");
             check(model.hardwarePercent(L"test-display-1",false)==23 &&
                   model.hardwarePercent(L"test-display-1",true)==67 &&
                   model.hardwarePercent(L"test-display-2",false)==81 &&
@@ -288,8 +298,10 @@ int main() {
             CloseHandle(handle);
             auto saved=Json::parse(content);
             check(saved.get("general").get("window_position").get("x").integer()==-1900 &&
-                saved.get("general").get("window_position").get("y").integer()==235,
-                "Portable config stores signed window position in general settings");
+                saved.get("general").get("window_position").get("y").integer()==235 &&
+                saved.get("general").get("window_position").get("width").integer()==870 &&
+                saved.get("general").get("window_position").get("height").integer()==610,
+                "Portable config stores signed window coordinates and exact dimensions");
             check(std::holds_alternative<std::nullptr_t>(saved.get("screen").get("brightness").value),
                   "Unused software brightness discarded");
             check(!saved.get("old_module").isObject(),
