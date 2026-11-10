@@ -86,6 +86,11 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
 // Neither slider has a fixed maximum width.
 int temperatureSliderWidth(int dpi, int clientWidth);
 int ddcSliderWidth(int dpi, int clientWidth);
+// A mildly warm-biased slider curve makes the pointer produce a larger
+// Kelvin reduction near the cool end without changing the actual gamma
+// ramp or the displayed Kelvin value. These two functions are inverses.
+int kelvinFromTemperatureSliderX(int x, int left, int right);
+int temperatureSliderXFromKelvin(int kelvin, int left, int right);
 
 // Upstream NightLight's RGB factors; shared desktop matrix avoids GDI limits.
 struct ColorGains { double red, green, blue; };
