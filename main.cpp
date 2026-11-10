@@ -1154,10 +1154,13 @@ private:
         rounded(mem,card1,px(16),p.card,p.border);
         const RECT card2{cardMargin,secondPanelTop_,client.right-cardMargin,secondPanelTop_+temperatureHeight_};
         rounded(mem,card2,px(16),p.card,p.border);
-        drawSectionIcon(mem,0,px(36),panelTop_+px(11),p.subtle);
-        RECT screensTitle{px(60),panelTop_+px(8),client.right-px(84),panelTop_+px(30)};
+        const int innerLeft=cardMargin+px(nightlight::kCardInnerInsetDip);
+        const int innerRight=client.right-innerLeft;
+        drawSectionIcon(mem,0,innerLeft,panelTop_+px(11),p.subtle);
+        RECT screensTitle{innerLeft+px(24),panelTop_+px(8),
+            innerRight-px(48),panelTop_+px(30)};
         drawTextAt(mem,tr(L"Screens",L"Ecrãs"),screensTitle,sectionTitleFont_,p.text);
-        drawSectionIcon(mem,1,px(36),secondPanelTop_+px(11),p.subtle);
+        drawSectionIcon(mem,1,innerLeft,secondPanelTop_+px(11),p.subtle);
         const bool narrowTemperature=width_<px(350);
         const int temperatureShift=narrowTemperature?
             px(nightlight::kTemperatureNarrowExtraDip):0;
@@ -1167,15 +1170,15 @@ private:
         // On narrow windows the Kelvin value uses the next line to avoid
         // colliding with the section title.
         const int valueReserve=std::max(px(88),textWidth(temperatureText,headlineFont_)+px(8));
-        RECT label{px(60),secondPanelTop_+px(8),
-            narrowTemperature?client.right-px(36):client.right-px(36)-valueReserve,
+        RECT label{innerLeft+px(24),secondPanelTop_+px(8),
+            narrowTemperature?innerRight:innerRight-valueReserve,
             secondPanelTop_+px(32)};
         drawTextAt(mem,tr(L"Color temperature",L"Temperatura de cor"),
             label,sectionTitleFont_,p.text);
         RECT valueRect{
-            narrowTemperature?px(36):client.right-px(36)-valueReserve,
+            narrowTemperature?innerLeft:innerRight-valueReserve,
             secondPanelTop_+(narrowTemperature?px(32):px(8)),
-            client.right-px(36),
+            innerRight,
             secondPanelTop_+(narrowTemperature?px(56):px(32))};
         drawTextAt(mem,temperatureText,valueRect,headlineFont_,p.accent,
             DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
@@ -1324,14 +1327,15 @@ private:
         const int cardMargin=px(nightlight::kCardOuterMarginDip);
         RECT card{cardMargin,hardwareTop_,width_-cardMargin,hardwareTop_+hardwareHeight_};
         rounded(dc,card,px(16),p.card,p.border);
-        drawSectionIcon(dc,2,px(36),hardwareTop_+px(13),p.subtle);
-        RECT heading{px(60),hardwareTop_+px(10),width_-px(36),hardwareTop_+px(32)};
+        const int left=cardMargin+px(nightlight::kCardInnerInsetDip);
+        const int right=width_-left;
+        drawSectionIcon(dc,2,left,hardwareTop_+px(13),p.subtle);
+        RECT heading{left+px(24),hardwareTop_+px(10),right,hardwareTop_+px(32)};
         drawTextAt(dc,tr(L"DDC/CI Controls",L"Controlos DDC/CI"),heading,sectionTitleFont_,p.text);
         if (hardwareRows_.empty()) {
-            RECT empty{px(36),hardwareTop_+px(40),width_-px(36),hardwareTop_+px(62)};
+            RECT empty{left,hardwareTop_+px(40),right,hardwareTop_+px(62)};
             drawTextAt(dc,tr(L"No connected displays",L"Nenhum ecrã ligado"),empty,font_,p.muted);
         }
-        const int left=px(36),right=width_-px(36);
         for (size_t i=0;i<hardwareRows_.size();++i) {
             const auto& row=hardwareRows_[i];
             const auto state=ddc_.state(row.device);
