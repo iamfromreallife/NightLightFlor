@@ -364,11 +364,10 @@ private:
     }
     void toggleMonitor(size_t index) {
         if (index>=model_.monitors().size()) return;
-        if (model_.updateEnabled(index,!model_.monitors()[index].enabled)) {
-            updateTrayTooltip();
-            if (index<tabs_.size()) InvalidateRect(tabs_[index],nullptr,FALSE);
-            repaint(); // Kelvin display/disabled slider may have changed.
-        }
+        model_.updateEnabled(index,!model_.monitors()[index].enabled);
+        updateTrayTooltip();
+        if (index<tabs_.size()) InvalidateRect(tabs_[index],nullptr,FALSE);
+        repaint(); // Kelvin display/disabled slider may have changed.
     }
     void beginScreenDrag(size_t index,POINT point) {
         if(index>=tabs_.size())return;
@@ -460,9 +459,10 @@ private:
             if ((msg==WM_CAPTURECHANGED || msg==WM_CANCELMODE ||
                  msg==WM_NCDESTROY) && app->armedTabSwitch_==control)
                 app->armedTabSwitch_=nullptr;
+            const RECT switchArea=app->screenTabSwitchRect(control);
+            const POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
             if ((msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK) &&
-                PtInRect(&app->screenTabSwitchRect(control),
-                    POINT{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)})) {
+                PtInRect(&switchArea,cursor)) {
                 // The switch is interactive without selecting or dragging
                 // its monitor and without triggering double-click rename.
                 app->finishScreenDrag();
@@ -739,6 +739,8 @@ private:
         finishInlineRename(true);finishScreenDrag();
         for (HWND tab : tabs_) DestroyWindow(tab);
         tabs_.clear();
+        armedTabSwitch_=nullptr;
+        tabDesiredWidths_.clear(); // Refresh measured text if Windows renames a display.
         if (selected_ >= model_.monitors().size()) selected_ = 0;
         for (size_t index = 0; index < model_.monitors().size(); ++index) {
             HWND tab = createButton(ID_MONITOR_BASE + static_cast<int>(index), L"");
