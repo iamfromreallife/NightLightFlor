@@ -275,6 +275,7 @@ private:
     HANDLE gammaHelper_ = nullptr;
 
     HFONT font_ = nullptr, boldFont_ = nullptr, headlineFont_ = nullptr, smallFont_ = nullptr;
+    HFONT fluentIconFont_ = nullptr;
     std::vector<HFONT> fonts_;
     size_t selected_ = 0;
     UINT dpi_ = 96;
@@ -588,6 +589,10 @@ private:
         smallFont_ = create(12, FW_NORMAL);
         boldFont_ = create(14, FW_SEMIBOLD);
         headlineFont_ = create(30, FW_NORMAL);
+        fluentIconFont_=CreateFontW(-px(18),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
+            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe Fluent Icons");
+        if (fluentIconFont_) fonts_.push_back(fluentIconFont_);
         tabDesiredWidths_.clear();
         const HWND controls[] = {btnRefresh_,btnEnable_,btnGamma_,editName_};
         for (HWND control : controls) {
@@ -846,7 +851,8 @@ private:
         const int enableW=textWidth(tr(L"Enabled",L"Ativo"))+px(42);
         const int tabsRight=innerRight-enableW-gap;
         // The refresh glyph belongs in the header's top-right corner.
-        place(btnRefresh_,innerRight-px(32),panelTop_+px(4),px(32),tabH,TRUE);
+        // 8px inset from both the top and right edges of the Screens card.
+        place(btnRefresh_,width_-margin-px(8)-px(32),panelTop_+px(8),px(32),tabH,TRUE);
         const int tabStart=innerLeft;
         int tabX=tabStart,tabY=panelTop_+px(40),rows=1;
         for (size_t i=0;i<tabs_.size();++i) {
@@ -871,16 +877,26 @@ private:
         const int sliderLeft=(width_-sliderW)/2;
         slider_={sliderLeft,secondPanelTop_+px(62),sliderLeft+sliderW,secondPanelTop_+px(66)};
         hardwareTop_=secondPanelTop_+temperatureHeight_+px(12);
-        hardwareHeight_=px(hardwareRows_.empty()?72:44+128*static_cast<int>(hardwareRows_.size()));
+        hardwareHeight_=px(hardwareRows_.empty()?72:172);
+        const int columnCount=static_cast<int>(hardwareRows_.size());
+        const int columnGap=px(14);
+        const int columnWidth=columnCount?
+            (innerRight-innerLeft-columnGap*(columnCount-1))/columnCount:0;
         for (size_t i=0;i<hardwareRows_.size();++i) {
             auto& row=hardwareRows_[i];
-            row.topMotion.to(hardwareTop_+px(36+128*static_cast<int>(i)),layoutTime_,180,reorderInProgress_ && animations_ && IsWindowVisible(window_));
+            row.topMotion.to(hardwareTop_+px(36),layoutTime_,180,
+                reorderInProgress_ && animations_ && IsWindowVisible(window_));
             row.top=static_cast<int>(std::round(row.topMotion.value(layoutTime_)));
+            const int columnLeft=innerLeft+static_cast<int>(i)*(columnWidth+columnGap);
             const auto& name=model_.monitors()[i].displayName();
-            const int nameWidth=std::max(px(44),std::min({textWidth(name,boldFont_)+px(50),px(279),innerRight-innerLeft}));
-            place(row.nameButton,innerLeft,row.top,nameWidth,tabH,TRUE);
-            place(row.brightness,innerLeft+px(92),row.top+px(38),innerRight-innerLeft-px(144),px(32),TRUE);
-            place(row.contrast,innerLeft+px(92),row.top+px(70),innerRight-innerLeft-px(144),px(32),TRUE);
+            const int nameWidth=std::max(px(44),std::min({
+                textWidth(name,boldFont_)+px(50),px(279),columnWidth}));
+            place(row.nameButton,columnLeft,row.top,nameWidth,tabH,TRUE);
+            // Icon / slider / percent occupy their own monitor column.
+            const int sliderLeft=columnLeft+px(36);
+            const int sliderWidth=std::max(px(1),columnWidth-px(94));
+            place(row.brightness,sliderLeft,row.top+px(38),sliderWidth,px(32),TRUE);
+            place(row.contrast,sliderLeft,row.top+px(70),sliderWidth,px(32),TRUE);
         }
         hardwareVisibleHeight_=static_cast<int>(std::round(hardwareHeight_*hardwareProgress));
         contentHeight_=secondPanelTop_+temperatureHeight_+margin+
@@ -1199,27 +1215,41 @@ private:
             RECT empty{px(36),hardwareTop_+px(40),width_-px(36),hardwareTop_+px(62)};
             drawTextAt(dc,tr(L"No connected displays",L"Nenhum ecrã ligado"),empty,font_,p.muted);
         }
+        const int count=static_cast<int>(hardwareRows_.size());
+        const int columnGap=px(14);
+        const int innerLeft=px(36),innerRight=width_-px(36);
+        const int columnWidth=count?(innerRight-innerLeft-columnGap*(count-1))/count:0;
         for (size_t i=0;i<hardwareRows_.size();++i) {
             const auto& row=hardwareRows_[i];
             const auto state=ddc_.state(row.device);
-            // The name/icon chip is now a child button using the Screens tab painter.
-            auto label=[&](const std::wstring& text,HWND slider,int y,bool contrast) {
-                RECT caption{px(36),y,px(120),y+px(32)};
-                drawTextAt(dc,text,caption,font_,p.text);
-                RECT number{width_-px(84),y,width_-px(36),y+px(32)};
-                const int percent=GetCapture()==slider?(static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100:
+            const int left=innerLeft+static_cast<int>(i)*(columnWidth+columnGap);
+            const int right=left+columnWidth;
+            // Fluent icons inherit theme/high-contrast foreground colours.
+            // Keep the TRACKBAR's accessible name as Brightness/Contrast.
+            auto drawChannel=[&](HWND slider,int y,bool contrast) {
+                RECT symbol{left+px(2),y,left+px(30),y+px(32)};
+                drawTextAt(dc,contrast?L"\uE7A1":L"\uE706",symbol,
+                    fluentIconFont_?fluentIconFont_:font_,p.subtle,
+                    DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+                RECT number{right-px(54),y,right-px(4),y+px(32)};
+                const int percent=GetCapture()==slider?
+                    (static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100:
                     model_.hardwarePercent(row.device,contrast);
-                drawTextAt(dc,formatNumber(percent)+L" %",number,smallFont_,p.subtle,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+                drawTextAt(dc,formatNumber(percent)+L" %",number,
+                    smallFont_,p.subtle,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
             };
-            label(tr(L"Brightness",L"Brilho"),row.brightness,row.top+px(38),false);
-            label(tr(L"Contrast",L"Contraste"),row.contrast,row.top+px(70),true);
+            drawChannel(row.brightness,row.top+px(38),false);
+            drawChannel(row.contrast,row.top+px(70),true);
             std::wstring message;
             if (state.brightness.failed || state.contrast.failed)
-                message=tr(L"The monitor did not accept the adjustment. Try again.",L"O monitor não aceitou o ajuste. Tente novamente.");
-            RECT status{px(36),row.top+px(106),width_-px(36),row.top+px(122)};
+                message=tr(L"The monitor did not accept the adjustment. Try again.",
+                    L"O monitor não aceitou o ajuste. Tente novamente.");
+            RECT status{left,row.top+px(106),right-px(4),row.top+px(122)};
             drawTextAt(dc,message,status,smallFont_,p.muted);
             if (i+1<hardwareRows_.size()) {
-                RECT divider{px(36),row.top+px(127),width_-px(36),row.top+px(128)};
+                const int dividerX=right+columnGap/2;
+                RECT divider{dividerX,hardwareTop_+px(40),
+                    dividerX+px(1),hardwareTop_+hardwareHeight_-px(16)};
                 fill(dc,divider,p.border);
             }
         }
