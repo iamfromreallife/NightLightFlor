@@ -72,6 +72,10 @@ struct WindowContentMinimum {
 WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const std::vector<int>& tabDesiredWidths, size_t ddcMonitorRows,
     bool gammaUnlocked, bool ddcVisible);
+// Shared DPI-aware widths used by the live temperature and DDC sliders.
+// Neither slider has a fixed maximum width.
+int temperatureSliderWidth(int dpi, int clientWidth);
+int ddcSliderWidth(int dpi, int clientWidth);
 
 // Upstream NightLight's RGB factors; shared desktop matrix avoids GDI limits.
 struct ColorGains { double red, green, blue; };
