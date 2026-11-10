@@ -203,6 +203,10 @@ public:
             taskbarOwner_, nullptr, instance_, this);
         if (!window_) return 4;
 
+        // Enforce the fully expanded contents before any visible paint.
+        // Otherwise a restored narrow window briefly flashes scrollable.
+        initializingWindow_=false;
+        ensureWindowFitsContents();
         const std::wstring launch = nightlight::resolveStartup(
             model_.preferences().startup, argument_, trayReady_);
         if (trayReady_ && (launch == L"tray" || launch == L"minimized")) {
@@ -210,9 +214,6 @@ public:
         } else {
             ShowWindow(window_, show == SW_SHOWDEFAULT ? SW_SHOWNORMAL : show);
         }
-        // Enforce the fully expanded contents before the first visible frame.
-        initializingWindow_=false;
-        ensureWindowFitsContents();
         UpdateWindow(window_);
         noteWindowPosition();
         MSG msg{};
