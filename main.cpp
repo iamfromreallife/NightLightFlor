@@ -884,8 +884,9 @@ private:
         };
         const double hardwareProgress=hardwareReveal_.value(layoutTime_);
         composedTransition_=IsWindowVisible(window_) && (hardwareReveal_.active(layoutTime_) || reorderInProgress_);
-        const int margin=px(20),gap=px(8),inset=px(16);
-        panelTop_=px(12);
+        const int margin=px(nightlight::kCardOuterMarginDip);
+        const int inset=px(nightlight::kCardInnerInsetDip);
+        panelTop_=px(nightlight::kCardsTopMarginDip);
         const int innerLeft=margin+inset,innerRight=width_-margin-inset;
         const int tabH=px(32),tabGap=px(6);
         const int tabsRight=innerRight;
@@ -912,7 +913,7 @@ private:
             tabX+=tabW+tabGap;
         }
         panelHeight_=px(46+rows*38);
-        secondPanelTop_=panelTop_+panelHeight_+px(12);
+        secondPanelTop_=panelTop_+panelHeight_+px(nightlight::kCardsGapDip);
         const bool narrowTemperature=width_<px(350);
         const int temperatureShift=narrowTemperature?
             px(nightlight::kTemperatureNarrowExtraDip):0;
@@ -931,7 +932,7 @@ private:
             secondPanelTop_+px(nightlight::kTemperatureSliderTopDip)+temperatureShift,
             sliderLeft+sliderW,
             secondPanelTop_+px(nightlight::kTemperatureSliderTopDip+4)+temperatureShift};
-        hardwareTop_=secondPanelTop_+temperatureHeight_+px(12);
+        hardwareTop_=secondPanelTop_+temperatureHeight_+px(nightlight::kCardsGapDip);
         hardwareHeight_=px(hardwareRows_.empty()?72:
             nightlight::kDdcSectionBaseDip+
                 nightlight::kDdcRowStepDip*static_cast<int>(hardwareRows_.size()));
@@ -960,7 +961,8 @@ private:
         }
         hardwareVisibleHeight_=static_cast<int>(std::round(hardwareHeight_*hardwareProgress));
         contentHeight_=secondPanelTop_+temperatureHeight_+margin+
-            static_cast<int>(std::round((hardwareHeight_+px(12))*hardwareProgress));
+            static_cast<int>(std::round(
+                (hardwareHeight_+px(nightlight::kCardsGapDip))*hardwareProgress));
         // Never scroll the window: grow only when a content change increases
         // its required minimum size. Do not automatically shrink it again.
         if (!initializingWindow_ && ensureWindowFitsContents()) {
@@ -1147,9 +1149,10 @@ private:
         const Palette p=palette();
         fill(mem,client,p.page);
         SetViewportOrgEx(mem,0,0,nullptr);
-        const RECT card1{px(20),panelTop_,client.right-px(20),panelTop_+panelHeight_};
+        const int cardMargin=px(nightlight::kCardOuterMarginDip);
+        const RECT card1{cardMargin,panelTop_,client.right-cardMargin,panelTop_+panelHeight_};
         rounded(mem,card1,px(16),p.card,p.border);
-        const RECT card2{px(20),secondPanelTop_,client.right-px(20),secondPanelTop_+temperatureHeight_};
+        const RECT card2{cardMargin,secondPanelTop_,client.right-cardMargin,secondPanelTop_+temperatureHeight_};
         rounded(mem,card2,px(16),p.card,p.border);
         drawSectionIcon(mem,0,px(36),panelTop_+px(11),p.subtle);
         RECT screensTitle{px(60),panelTop_+px(8),client.right-px(84),panelTop_+px(30)};
@@ -1318,7 +1321,8 @@ private:
     }
     void drawHardware(HDC dc) {
         const Palette p=palette();
-        RECT card{px(20),hardwareTop_,width_-px(20),hardwareTop_+hardwareHeight_};
+        const int cardMargin=px(nightlight::kCardOuterMarginDip);
+        RECT card{cardMargin,hardwareTop_,width_-cardMargin,hardwareTop_+hardwareHeight_};
         rounded(dc,card,px(16),p.card,p.border);
         drawSectionIcon(dc,2,px(36),hardwareTop_+px(13),p.subtle);
         RECT heading{px(60),hardwareTop_+px(10),width_-px(36),hardwareTop_+px(32)};
