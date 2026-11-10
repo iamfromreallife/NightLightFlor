@@ -86,6 +86,9 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
 // Neither slider has a fixed maximum width.
 int temperatureSliderWidth(int dpi, int clientWidth);
 int ddcSliderWidth(int dpi, int clientWidth);
+// Returns the exact centre of a DDC slider's horizontal track in parent
+// coordinates. Use this for glyphs, not the font's typographic line box.
+POINT ddcSliderIconCenter(int iconColumnCenterX, int sliderTop, int sliderHeight);
 // A mildly warm-biased slider curve makes the pointer produce a larger
 // Kelvin reduction near the cool end without changing the actual gamma
 // ramp or the displayed Kelvin value. These two functions are inverses.
