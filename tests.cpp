@@ -20,6 +20,17 @@ int main() {
         check(sliderPositionFromX(1000,10,210,0,10000)==10000,"Captured dragging clamps beyond the right edge");
         check(sliderPositionFromX(110,10,210,0,10000)==5000,"Captured dragging maps the pointer continuously");
         check(sliderPositionFromX(110,10,10,0,10000)==0,"Degenerate slider geometry stays safe");
+        // The visual brightness and contrast icons must share the exact
+        // middle Y of their native trackbars, at any screen position/DPI.
+        const POINT brightIcon=ddcSliderIconCenter(52,134,28);
+        const POINT contrastIcon=ddcSliderIconCenter(52,164,28);
+        check(brightIcon.x==52 && brightIcon.y==148,
+            "Brightness Fluent glyph is centred on its 28px trackbar");
+        check(contrastIcon.x==52 && contrastIcon.y==178,
+            "Contrast Fluent glyph is centred on its 28px trackbar");
+        const POINT scaledIcon=ddcSliderIconCenter(78,200,42);
+        check(scaledIcon.x==78 && scaledIcon.y==221,
+            "Fluent glyph alignment uses slider centre at 150 percent DPI");
         check(kelvinFromTemperatureSliderX(0,20,620)==1000 &&
               kelvinFromTemperatureSliderX(1000,20,620)==6500,
             "Temperature slider clamps to the original 1000-6500 K endpoints");
