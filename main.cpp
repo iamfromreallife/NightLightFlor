@@ -276,6 +276,8 @@ private:
     HANDLE gammaHelper_ = nullptr;
 
     HFONT font_ = nullptr, boldFont_ = nullptr, headlineFont_ = nullptr, smallFont_ = nullptr;
+    // All three section headings share exactly the same HFONT handle.
+    HFONT sectionTitleFont_ = nullptr;
     HFONT fluentIconFont_ = nullptr, fluentContrastFont_ = nullptr;
     std::vector<HFONT> fonts_;
     size_t selected_ = 0;
@@ -629,6 +631,9 @@ private:
         font_ = create(14, FW_NORMAL);
         smallFont_ = create(12, FW_NORMAL);
         boldFont_ = create(14, FW_SEMIBOLD);
+        // Segoe UI Semibold, 14pt-equivalent logical size, same DPI and weight
+        // across Screens, Color temperature and DDC/CI Controls.
+        sectionTitleFont_ = boldFont_;
         headlineFont_ = create(30, FW_NORMAL);
         fluentIconFont_=CreateFontW(-px(18),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
@@ -931,7 +936,10 @@ private:
             row.top=static_cast<int>(std::round(row.topMotion.value(layoutTime_)));
             const auto& name=model_.monitors()[i].displayName();
             const int nameWidth=std::max(px(44),std::min({
-                textWidth(name,boldFont_)+px(50),px(279),innerRight-innerLeft}));
+                // Icon begins 10px from the left; leave the same 10px
+                // after the measured name on the right (32px icon/text
+                // offset + 10px trailing margin = 42px total).
+                textWidth(name,boldFont_)+px(42),px(279),innerRight-innerLeft}));
             place(row.nameButton,innerLeft,row.top,nameWidth,tabH,TRUE);
             // One full-width pair of sliders per monitor, beneath its name.
             const int sliderLeft=innerLeft+px(38);
@@ -1132,10 +1140,10 @@ private:
         rounded(mem,card2,px(16),p.card,p.border);
         drawSectionIcon(mem,0,px(36),panelTop_+px(11),p.subtle);
         RECT screensTitle{px(60),panelTop_+px(8),client.right-px(84),panelTop_+px(30)};
-        drawTextAt(mem,tr(L"Screens",L"Ecrãs"),screensTitle,boldFont_,p.text);
+        drawTextAt(mem,tr(L"Screens",L"Ecrãs"),screensTitle,sectionTitleFont_,p.text);
         drawSectionIcon(mem,1,px(36),secondPanelTop_+px(11),p.subtle);
         RECT label{px(60),secondPanelTop_+px(8),client.right-px(176),secondPanelTop_+px(30)};
-        drawTextAt(mem,tr(L"Color temperature",L"Temperatura de cor"),label,boldFont_,p.text);
+        drawTextAt(mem,tr(L"Color temperature",L"Temperatura de cor"),label,sectionTitleFont_,p.text);
         const int current=hasMonitor()?selectedMonitor()->kelvin:5000;
         RECT valueRect{client.right-px(176),secondPanelTop_+px(9),client.right-px(36),secondPanelTop_+px(59)};
         drawTextAt(mem,formatNumber(current)+L" K",valueRect,headlineFont_,p.accent,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
@@ -1250,7 +1258,7 @@ private:
         rounded(dc,card,px(16),p.card,p.border);
         drawSectionIcon(dc,2,px(36),hardwareTop_+px(13),p.subtle);
         RECT heading{px(60),hardwareTop_+px(10),width_-px(36),hardwareTop_+px(32)};
-        drawTextAt(dc,tr(L"DDC/CI Controls",L"Controlos DDC/CI"),heading,boldFont_,p.text);
+        drawTextAt(dc,tr(L"DDC/CI Controls",L"Controlos DDC/CI"),heading,sectionTitleFont_,p.text);
         if (hardwareRows_.empty()) {
             RECT empty{px(36),hardwareTop_+px(40),width_-px(36),hardwareTop_+px(62)};
             drawTextAt(dc,tr(L"No connected displays",L"Nenhum ecrã ligado"),empty,font_,p.muted);
