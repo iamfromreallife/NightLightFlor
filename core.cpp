@@ -277,6 +277,14 @@ int temperatureSliderXFromKelvin(int kelvin,int left,int right) {
     return left+static_cast<int>(std::lround(position*span));
 }
 
+int windowOpeningSlideOffset(int dpi,double progress) {
+    // Both position and alpha sample the same progress curve. A zero
+    // offset at progress=1 returns the exact saved/resting window position.
+    const int distance=MulDiv(kWindowOpeningSlideDip,std::max(96,dpi),96);
+    return static_cast<int>(std::lround(distance*
+        (1.0-std::clamp(progress,0.0,1.0))));
+}
+
 int temperatureSliderWidth(int dpi,int clientWidth) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
     // Keep the visual track 20 DIP inside each card. The card itself now
