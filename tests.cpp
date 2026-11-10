@@ -264,6 +264,22 @@ int main() {
         // Each monitor tab fits its complete name and its independent switch,
         // with no standalone Enabled button or truncated-label width cap.
         const std::vector<int> tabs{260,250,270};
+        check(kCardOuterMarginDip==16 && kCardsTopMarginDip==8 &&
+              kCardsGapDip==8 && kCardInnerInsetDip==16,
+            "Outer/top/card gaps are four DIP tighter; internal padding is unchanged");
+        const auto singleVisible=calculateWindowContentMinimum(96,980,
+            {200},1,true,true);
+        const auto singleHidden=calculateWindowContentMinimum(96,980,
+            {200},1,true,false);
+        check(singleVisible.screenRows==1 && singleVisible.clientHeight==
+            8+(46+38)+8+kTemperatureUnlockedHeightDip+8+
+            (kDdcSectionBaseDip+kDdcRowStepDip)+16,
+            "Visible three-card minimum height respects top, both gaps and bottom margin");
+        check(singleHidden.clientHeight==
+            8+(46+38)+8+kTemperatureUnlockedHeightDip+16 &&
+            singleVisible.clientHeight-singleHidden.clientHeight==
+                8+kDdcSectionBaseDip+kDdcRowStepDip,
+            "Hidden DDC eliminates only its card and one 8-DIP inter-card gap");
         const auto wide=calculateWindowContentMinimum(96,980,tabs,2,false,true);
         const auto narrow=calculateWindowContentMinimum(96,420,tabs,2,false,true);
         check(wide.screenRows==1 && narrow.screenRows>=2,
@@ -348,15 +364,15 @@ int main() {
             "Narrow clients wrap monitor tabs but do not force a wider window");
         check(tiny.clientHeight>narrow.clientHeight,
             "Compact temperature layout receives additional vertical clearance");
-        check(temperatureSliderWidth(96,200)==120 &&
-              temperatureSliderWidth(96,800)==720,
-            "Temperature slider expands and contracts with window width without a cap");
-        check(ddcSliderWidth(96,200)==44 &&
-              ddcSliderWidth(96,800)==644,
-            "Brightness and contrast sliders track window width near percentages");
-        check(temperatureSliderWidth(144,300)==180 &&
-              ddcSliderWidth(144,300)==66,
-            "Responsive slider widths are DPI aware");
+        check(temperatureSliderWidth(96,200)==128 &&
+              temperatureSliderWidth(96,800)==728,
+            "Temperature slider expands with the new 36px side insets");
+        check(ddcSliderWidth(96,200)==52 &&
+              ddcSliderWidth(96,800)==652,
+            "DDC sliders reclaim four pixels at each outside edge");
+        check(temperatureSliderWidth(144,300)==192 &&
+              ddcSliderWidth(144,300)==78,
+            "Reduced side insets scale correctly with DPI");
         check(resolveStartup(L"normal",L"",true)==L"normal","Normal startup");
         check(resolveStartup(L"minimized",L"",true)==L"minimized","Minimized startup");
         check(resolveStartup(L"tray",L"",true)==L"tray","Tray startup");
