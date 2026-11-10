@@ -61,6 +61,16 @@ inline constexpr int kDdcFirstRowTopDip = 34;
 inline constexpr int kDdcRowStepDip = 100;
 inline constexpr int kDdcSectionBaseDip = 32;
 
+// Compact temperature card: title and Kelvin value share the first row,
+// gradient sits immediately below, and its scale labels use the last row.
+// The gamma-unlock button, when present, fits below the scale labels.
+inline constexpr int kTemperatureUnlockedHeightDip = 94;
+inline constexpr int kTemperatureLockedHeightDip = 126;
+inline constexpr int kTemperatureNarrowExtraDip = 24;
+inline constexpr int kTemperatureSliderTopDip = 44;
+inline constexpr int kTemperatureScaleTopDip = 64;
+inline constexpr int kTemperatureGammaTopDip = 86;
+
 // Minimum dimensions are derived from the live monitor-tab wrapping and the
 // visible sections. The computation is independent of the window manager so
 // it can be verified by native regression tests.
