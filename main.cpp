@@ -41,7 +41,7 @@ constexpr UINT TIMER_STATE = 12;
 constexpr UINT TIMER_SAVE_DDC = 13;
 constexpr UINT TIMER_ANIMATION = 16;
 constexpr UINT TIMER_SAVE_WINDOW = 17;
-constexpr UINT TIMER_VERIFY_COLOR = 14, TIMER_RESTORE_DDC = 15;
+constexpr UINT TIMER_VERIFY_COLOR = 14, TIMER_READ_DDC = 15;
 // The interactive-session notification also covers display sleep without a
 // topology change (WM_DISPLAYCHANGE alone does not).
 constexpr GUID displayStateGuid{0x2b84c20e,0xad23,0x4ddf,{0x93,0xdb,0x05,0xff,0xbd,0x7e,0xfc,0xa5}};
@@ -875,11 +875,12 @@ private:
         updateLanguage();
         updateTheme();
         layout();
+        // Initial DDC/CI readback is authoritative; saved values are used
+        // only as UI fallback if the monitor cannot report its settings.
         refreshHardware();
-        restoreHardware();
         displayPowerNotification_=RegisterPowerSettingNotification(window_,&displayStateGuid,DEVICE_NOTIFY_WINDOW_HANDLE);
         SetTimer(window_,TIMER_VERIFY_COLOR,3000,nullptr);
-        SetTimer(window_,TIMER_RESTORE_DDC,30000,nullptr);
+        SetTimer(window_,TIMER_READ_DDC,nightlight::kDdcReadbackIntervalMs,nullptr);
         taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
         trayReady_ = addTray();
         SetTimer(window_, TIMER_STATE, 250, nullptr);
@@ -1484,14 +1485,15 @@ private:
         for (const auto& row:hardwareRows_) ddc_.refresh(row.device);
         syncHardware();
     }
-    void restoreHardware() {
-        if (!displayAwake_) return;
-        // This runs independently of panel visibility. Saved targets, never
-        // reset monitor readbacks or placeholder percentages, are authoritative.
-        for (const auto& monitor:model_.monitors()) {
-            const bool brightness=model_.hasHardwarePercent(monitor.device,false),contrast=model_.hasHardwarePercent(monitor.device,true);
-            if (!brightness && !contrast) ddc_.refresh(monitor.device);
-            else ddc_.restore(monitor.device,model_.hardwarePercent(monitor.device,false),model_.hardwarePercent(monitor.device,true),brightness,contrast);
+    void pollHardware() {
+        // Real DDC/CI and WMI readings, not saved profile values, set the
+        // displayed brightness/contrast. Keep all slow monitor I/O off the
+        // UI thread, and do not query sleeping or hidden displays.
+        if (!ddcVisible_ || !displayAwake_ || screenOffGuard_.guarding() ||
+            !IsWindowVisible(window_) || IsIconic(window_)) return;
+        for (const auto& row:hardwareRows_) {
+            if (GetCapture()==row.brightness || GetCapture()==row.contrast) continue;
+            ddc_.poll(row.device);
         }
     }
     void scheduleDisplayRecovery() {
@@ -1789,7 +1791,6 @@ private:
             finishInlineRename(true);
         }
         refreshTabs();refreshHardware();
-        if(changed)restoreHardware();
         updateTrayTooltip();
     }
     void unlockGamma() {
@@ -1951,6 +1952,7 @@ private:
             ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
         }
         SetForegroundWindow(window_);
+        if (reveal) pollHardware(); // Refresh external OSD changes on reopening.
     }
     void hideWindowToTray() {
         // Minimize, Close (X) and tray-click dismissal share this path.
@@ -2428,10 +2430,8 @@ private:
                 if (displayAwake_ && !dragging_) model_.applyAll(nightlight::GammaRefresh::Verify);
                 return 0;
             }
-            if (wParam==TIMER_RESTORE_DDC) {
-                bool adjusting=dragging_;
-                for (const auto& row:hardwareRows_) if (GetCapture()==row.brightness || GetCapture()==row.contrast) adjusting=true;
-                if (!adjusting) restoreHardware();
+            if (wParam==TIMER_READ_DDC) {
+                pollHardware();
                 return 0;
             }
             if (wParam==TIMER_SAVE_DDC) { KillTimer(hwnd,TIMER_SAVE_DDC); model_.save(); return 0; }
@@ -2455,7 +2455,7 @@ private:
                 if (!displayAwake_) return 0;
                 if (model_.refreshMonitors()) refreshTabs();
                 model_.applyAll(nightlight::GammaRefresh::Restore);
-                refreshHardware(); restoreHardware();
+                refreshHardware(); // Read physical settings after reconnect/wake; never overwrite them.
                 // Display drivers and DDC transports can become ready several
                 // seconds apart. Retry beyond the first successful enumeration.
                 const UINT delays[]{1000,2500,5000,10000};
@@ -2481,7 +2481,7 @@ private:
             endHardwareDrag();finishScreenDrag();
             finishEntrance(); stopAnimationTimer();
             KillTimer(hwnd,TIMER_STATE);
-            KillTimer(hwnd,TIMER_VERIFY_COLOR); KillTimer(hwnd,TIMER_RESTORE_DDC); KillTimer(hwnd,TIMER_DISPLAYS);
+            KillTimer(hwnd,TIMER_VERIFY_COLOR); KillTimer(hwnd,TIMER_READ_DDC); KillTimer(hwnd,TIMER_DISPLAYS);
             if (displayPowerNotification_) { UnregisterPowerSettingNotification(displayPowerNotification_); displayPowerNotification_=nullptr; }
             KillTimer(hwnd,TIMER_GAMMA);
             KillTimer(hwnd,TIMER_SAVE_DDC);
