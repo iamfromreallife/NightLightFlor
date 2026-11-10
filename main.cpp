@@ -1111,7 +1111,9 @@ private:
         if (dragging_) temperaturePosition_.snap(current);
         else animate(temperaturePosition_,current,160);
         animate(temperatureEngagement_,dragging_?1.0:(temperatureHover_?0.35:0.0),120);
-        const int cx=slider_.left+static_cast<int>(std::round((temperaturePosition_.value(uiTime())-1000)*span/5500));
+        const int cx=nightlight::temperatureSliderXFromKelvin(
+            static_cast<int>(std::lround(temperaturePosition_.value(uiTime()))),
+            slider_.left,slider_.right);
         const int cy=(slider_.top+slider_.bottom)/2;
         const double engagement=temperatureEngagement_.value(uiTime());
         drawSliderThumb(dc,static_cast<float>(cx),static_cast<float>(cy),temperatureHover_?engagement:0,
@@ -1420,27 +1422,38 @@ private:
         // The refresh action is glyph-only, with no coloured button surface.
         if (id!=ID_REFRESH) rounded(dc,surface,px(8),background,border);
         if(id==ID_REFRESH) {
-            // The actual Segoe Fluent Icons U+E777 glyph replaces the
-            // previous hand-drawn arc. Retain the click-triggered spin.
-            Gdiplus::Graphics g(dc);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-            const float scale=static_cast<float>(dpi_)/96.0f;
-            g.TranslateTransform(static_cast<float>(rc.left+rc.right)/2.0f,
-                static_cast<float>(rc.top+rc.bottom)/2.0f);
-            // Counter-clockwise turn with a horizontally mirrored glyph.
-            g.RotateTransform(-static_cast<float>(std::fmod(refreshTurn_.value(now),360.0)));
-            g.ScaleTransform(-scale,scale);
+            // Convert the Fluent E777 glyph to a fixed ink-centred vector
+            // path, instead of rotating a layout rectangle. Font bearings
+            // are removed once before rotation, so the icon cannot orbit
+            // off-centre or jump as the angle changes.
             Gdiplus::FontFamily fluent(L"Segoe Fluent Icons");
             Gdiplus::FontFamily mdl2(L"Segoe MDL2 Assets");
             const Gdiplus::FontFamily* family=fluent.IsAvailable()?&fluent:&mdl2;
-            Gdiplus::Font iconFont(family,19.0f,Gdiplus::FontStyleRegular,Gdiplus::UnitPixel);
-            Gdiplus::StringFormat centered;
-            centered.SetAlignment(Gdiplus::StringAlignmentCenter);
-            centered.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-            Gdiplus::SolidBrush brush(drawingColor(foreground));
-            g.DrawString(L"\uE777",1,&iconFont,
-                Gdiplus::RectF(-17.0f,-17.0f,34.0f,34.0f),&centered,&brush);
+            Gdiplus::GraphicsPath glyph;
+            Gdiplus::StringFormat typography(Gdiplus::StringFormat::GenericTypographic());
+            glyph.AddString(L"\uE777",1,family,Gdiplus::FontStyleRegular,19.0f,
+                Gdiplus::PointF(0.0f,0.0f),&typography);
+            Gdiplus::RectF ink{};
+            if (glyph.GetBounds(&ink)==Gdiplus::Ok &&
+                ink.Width>0.0f && ink.Height>0.0f) {
+                Gdiplus::Matrix zeroInkOrigin;
+                zeroInkOrigin.Translate(-ink.X-ink.Width/2.0f,
+                    -ink.Y-ink.Height/2.0f);
+                glyph.Transform(&zeroInkOrigin);
+                Gdiplus::Graphics g(dc);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+                g.TranslateTransform(static_cast<float>(rc.left+rc.right)/2.0f,
+                    static_cast<float>(rc.top+rc.bottom)/2.0f);
+                // Positive angles rotate clockwise in Windows' y-down space.
+                g.RotateTransform(static_cast<float>(
+                    std::fmod(refreshTurn_.value(now),360.0)));
+                // Keep the requested horizontally mirrored E777 orientation.
+                const float scale=static_cast<float>(dpi_)/96.0f;
+                g.ScaleTransform(-scale,scale);
+                Gdiplus::SolidBrush brush(drawingColor(foreground));
+                g.FillPath(&brush,&glyph);
+            }
         }
         if (monitorButton) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
@@ -1515,10 +1528,8 @@ private:
 
     void setKelvinFromX(int x, bool save) {
         if (!hasMonitor() || !selectedMonitor()->enabled) return;
-        const int span=std::max(1,static_cast<int>(slider_.right-slider_.left));
-        int k=1000+static_cast<int>(std::round(
-            std::clamp(x-static_cast<int>(slider_.left),0,span)*5500.0/span/10.0))*10;
-        k=std::clamp(k,1000,6500);
+        const int k=nightlight::kelvinFromTemperatureSliderX(
+            x,slider_.left,slider_.right);
         if (save) model_.updateKelvin(selected_,k);
         else if (selectedMonitor()->kelvin != k) model_.previewKelvin(selected_,k);
         // The Kelvin number updates immediately. The graphics
