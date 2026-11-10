@@ -286,8 +286,9 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const int panelTop=px(12);
     const int panelHeight=px(46+rows*38);
     const int secondPanelTop=panelTop+panelHeight+px(12);
-    const int temperatureHeight=px((gammaUnlocked?112:162)+
-        (width<px(350)?24:0));
+    const int temperatureHeight=px((gammaUnlocked?
+        kTemperatureUnlockedHeightDip:kTemperatureLockedHeightDip)+
+        (width<px(350)?kTemperatureNarrowExtraDip:0));
     const int hardwareHeight=px(ddcMonitorRows==0?72:
         kDdcSectionBaseDip+kDdcRowStepDip*
             static_cast<int>(std::min<size_t>(ddcMonitorRows,100)));
