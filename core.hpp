@@ -92,7 +92,9 @@ public:
     bool rememberHardwarePercent(const std::wstring& device,bool contrast,int percent);
     // Physical desktop coordinates; keep negative values for monitors to the left.
     bool rememberWindowPosition(int x, int y);
+    bool rememberWindowSize(int width, int height);
     std::optional<POINT> windowPosition() const { return windowPosition_; }
+    std::optional<SIZE> windowSize() const { return windowSize_; }
     void restoreOriginals();
     void migrateAutorunEntry() const;
 
@@ -132,6 +134,7 @@ private:
     portable::Json root_ = portable::Json::object();
     Preferences preferences_;
     std::optional<POINT> windowPosition_;
+    std::optional<SIZE> windowSize_;
     std::vector<Monitor> monitors_;
     std::map<std::wstring, Ramp> originals_;
     std::string savedDocument_;
