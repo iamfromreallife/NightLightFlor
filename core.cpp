@@ -261,13 +261,10 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     int widestTab=px(108);
     for (int desired:tabDesiredWidths)
         widestTab=std::max(widestTab,desired);
-    // Each screen tab contains its icon, complete name and on/off toggle.
-    // With DDC visible, attached monitors occupy adjacent columns.
+    // Screen tabs need their full name and switch. DDC controls stack
+    // vertically, so their monitor count does not increase minimum width.
     const int tabMinimum=px(72)+widestTab;
-    const int columnCount=ddcVisible?static_cast<int>(std::min<size_t>(ddcMonitorRows,100)):0;
-    const int columnMinimum=columnCount>0?
-        px(72)+columnCount*px(320)+(columnCount-1)*px(14):0;
-    const int minimumWidth=std::max({px(420),tabMinimum,columnMinimum});
+    const int minimumWidth=std::max(px(420),tabMinimum);
     const int width=std::max(clientWidth,minimumWidth);
     const int tabsRight=width-px(36);
     int x=tabStart, rows=1;
@@ -280,7 +277,8 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const int panelHeight=px(46+rows*38);
     const int secondPanelTop=panelTop+panelHeight+px(12);
     const int temperatureHeight=px(gammaUnlocked?112:162);
-    const int hardwareHeight=px(ddcMonitorRows==0?72:172);
+    const int hardwareHeight=px(ddcMonitorRows==0?72:
+        44+128*static_cast<int>(std::min<size_t>(ddcMonitorRows,100)));
     const int height=secondPanelTop+temperatureHeight+px(20)+
         (ddcVisible?hardwareHeight+px(12):0);
     return {minimumWidth,height,rows};
