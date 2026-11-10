@@ -424,8 +424,8 @@ int main() {
             "Minimum dimensions scale with display DPI");
         const auto oversized=calculateWindowContentMinimum(96,420,
             {1500},0,false,false);
-        check(oversized.clientWidth==420 && oversized.screenRows==1,
-            "Long monitor names ellipsize instead of enforcing a wider window");
+        check(oversized.clientWidth==420 && oversized.screenRows==2,
+            "Long monitor names ellipsize, and screen-off wraps rather than enlarging width");
         const auto tiny=calculateWindowContentMinimum(96,180,tabs,2,false,true);
         check(tiny.clientWidth==180 && tiny.screenRows==4,
             "At minimum width the screen-off button wraps after three monitor rows");
