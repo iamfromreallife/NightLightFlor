@@ -63,8 +63,8 @@ struct WindowContentMinimum {
     int screenRows = 1;
 };
 WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
-    int enableButtonWidth, const std::vector<int>& tabDesiredWidths,
-    size_t ddcMonitorRows, bool gammaUnlocked, bool ddcVisible);
+    const std::vector<int>& tabDesiredWidths, size_t ddcMonitorRows,
+    bool gammaUnlocked, bool ddcVisible);
 
 // Upstream NightLight's RGB factors; shared desktop matrix avoids GDI limits.
 struct ColorGains { double red, green, blue; };
