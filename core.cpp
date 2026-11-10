@@ -336,17 +336,24 @@ POINT ddcSliderIconCenter(int iconColumnCenterX,int sliderTop,int sliderHeight) 
     return POINT{iconColumnCenterX,sliderTop+sliderHeight/2};
 }
 
-int ddcSliderWidth(int dpi,int clientWidth) {
+RECT ddcPercentageRect(int dpi,int clientWidth,int maxPercentTextWidth,
+                       int top,int height) {
+    // Match the temperature gradient's exact computed edge, including odd
+    // client widths and DPI rounding, rather than approximating with padding.
+    const int temperatureWidth=temperatureSliderWidth(dpi,clientWidth);
+    const int right=(clientWidth-temperatureWidth)/2+temperatureWidth;
+    const int left=right-std::max(1,maxPercentTextWidth);
+    return RECT{left,top,right,top+height};
+}
+int ddcSliderWidth(int dpi,int clientWidth,int maxPercentTextWidth) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
-    // Left: outer + card padding + 24 DIP from the content edge.
-    // Right: reserve a 48-DIP, left-aligned percentage field.
-    // The native trackbar's channel is inset within this rectangle, leaving
-    // clearance between its thumb and the percentage characters.
-    const int innerLeft=px(kCardOuterMarginDip+kCardInnerInsetDip);
-    const int sliderLeft=innerLeft+px(kDdcSliderLeftInsetDip);
-    const int right=clientWidth-innerLeft;
-    const int percentLeft=right-px(kDdcPercentageBlockDip);
-    return std::max(px(16),percentLeft-sliderLeft);
+    const int sliderLeft=px(kCardOuterMarginDip+kCardInnerInsetDip+
+                            kDdcSliderLeftInsetDip);
+    // The trackbar HWND ends at the percentage text box's left edge.
+    // Since the native track is inset inside the HWND, this preserves its
+    // existing small visual gap before the percentage characters.
+    const RECT percent=ddcPercentageRect(dpi,clientWidth,maxPercentTextWidth,0,1);
+    return std::max(px(16),static_cast<int>(percent.left)-sliderLeft);
 }
 
 WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
