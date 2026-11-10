@@ -300,13 +300,37 @@ int main() {
         check(wide.clientHeight-unlockedWide.clientHeight==
                 kTemperatureLockedHeightDip-kTemperatureUnlockedHeightDip,
             "Unlocked gamma state removes only the space for the unlock button");
-        check(kTemperatureLockedHeightDip==126 &&
-              kTemperatureUnlockedHeightDip==94 &&
+        check(kTemperatureLockedHeightDip==112 &&
+              kTemperatureUnlockedHeightDip==80 &&
               kTemperatureGammaTopDip+29<=kTemperatureLockedHeightDip-8,
-            "Compact temperature section retains a bottom inset beneath the gamma button");
-        check(kTemperatureSliderTopDip+4+10<kTemperatureScaleTopDip &&
-              kTemperatureScaleTopDip+22<=kTemperatureGammaTopDip,
-            "Gradient thumb, scale labels and gamma button have no vertical overlap");
+            "Temperature card is 14 DIP shorter while leaving 8 DIP under gamma button");
+        // Track is 4 DIP high and its thumb is 20 DIP across. The label
+        // text starts 2 DIP after the thumb and ends with a 6 DIP bottom inset.
+        check(kTemperatureSliderTopDip+2+10+2<=kTemperatureScaleTopDip &&
+              kTemperatureScaleTopDip+18<=kTemperatureUnlockedHeightDip-6 &&
+              kTemperatureScaleTopDip+18<kTemperatureGammaTopDip,
+            "Temperature thumb, endpoint labels and gamma button never overlap");
+        check(kTemperatureNarrowExtraDip==24 &&
+              kTemperatureSliderTopDip+kTemperatureNarrowExtraDip-8>=56,
+            "Narrow layout clears the Kelvin value's second line");
+        for (int clientWidth:{200,350,560,1024}) {
+            for (int dpi:{96,144,192}) {
+                const int trackWidth=temperatureSliderWidth(dpi,clientWidth);
+                const RECT track{(clientWidth-trackWidth)/2,42,
+                    (clientWidth-trackWidth)/2+trackWidth,46};
+                const auto labels=temperatureScaleLabelRects(track,56,18);
+                check(labels.low.left==track.left &&
+                      labels.high.right==track.right &&
+                      labels.low.right==labels.high.left,
+                    "1000 K and 6500 K remain flush with exact slider endpoints");
+                check(labels.low.top==labels.high.top &&
+                      labels.low.bottom==labels.high.bottom,
+                    "Both Kelvin labels share the same baseline at any width and DPI");
+                check(labels.low.right>labels.low.left &&
+                      labels.high.right>labels.high.left,
+                    "Even the 200px window gives both endpoint labels room");
+            }
+        }
         const auto narrowOneLine=calculateWindowContentMinimum(96,349,tabs,2,false,false);
         const auto wideOneLine=calculateWindowContentMinimum(96,350,tabs,2,false,false);
         check(narrowOneLine.clientHeight>wideOneLine.clientHeight,
