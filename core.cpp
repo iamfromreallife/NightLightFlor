@@ -405,7 +405,7 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     // The screen-off button follows all monitor tabs. Count its wrap in the
     // required minimum height, exactly as in NativeApp::layout(), so a narrow
     // window never clips the last row or DDC controls.
-    if (x>tabStart && x+px(32)>tabsRight) ++rows;
+    if (x>tabStart && x+px(kScreenOffButtonSizeDip)>tabsRight) ++rows;
     const int panelTop=px(kCardsTopMarginDip);
     const int panelHeight=px(46+rows*38);
     const int secondPanelTop=panelTop+panelHeight+px(kCardsGapDip);
