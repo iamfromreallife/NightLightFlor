@@ -523,6 +523,31 @@ private:
         if (msg==WM_PAINT && app->composedTransition_) {
             PAINTSTRUCT paint{}; BeginPaint(control,&paint); EndPaint(control,&paint); return 0;
         }
+        if (msg==WM_PAINT && app->hardwareRow(control)) {
+            // Always paint the entire slider ourselves. DefSubclassProc
+            // allows the native TRACKBAR_CLASS to draw its own intermediate
+            // thumb/rail during startup and EnableWindow transitions,
+            // producing single-frame flashes in either Windows theme.
+            PAINTSTRUCT paint{};
+            HDC dc=BeginPaint(control,&paint);
+            if (dc) {
+                NMCUSTOMDRAW draw{};
+                draw.hdr.hwndFrom=control;
+                draw.dwDrawStage=CDDS_PREPAINT;
+                draw.hdc=dc;
+                app->drawHardwareSlider(draw);
+            }
+            EndPaint(control,&paint);
+            return 0;
+        }
+        if (msg==WM_PRINTCLIENT && app->hardwareRow(control)) {
+            NMCUSTOMDRAW draw{};
+            draw.hdr.hwndFrom=control;
+            draw.dwDrawStage=CDDS_PREPAINT;
+            draw.hdc=reinterpret_cast<HDC>(wp);
+            if (draw.hdc) app->drawHardwareSlider(draw);
+            return 0;
+        }
         if (msg==WM_MOUSEMOVE) {
             TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,control,0}; TrackMouseEvent(&tracking);
             app->animate(state.hover,1);
@@ -1260,7 +1285,9 @@ private:
                 SendMessageW(slider,TBM_SETPAGESIZE,0,1000);
                 SendMessageW(slider,TBM_SETPOS,TRUE,model_.hardwarePercent(row.device,offset==1)*100);
                 SendMessageW(slider,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
-                SetWindowTheme(slider,L"",L""); watchInteraction(slider); EnableWindow(slider,FALSE);
+                // A custom WM_PAINT subclass replaces the native themed
+                // trackbar paint entirely; its input/range logic remains.
+                watchInteraction(slider); EnableWindow(slider,FALSE);
                 return slider;
             };
             row.brightness=create(0,tr(L"Brightness",L"Brilho")+L" · "+monitors[i].displayName());
@@ -1409,7 +1436,12 @@ private:
         auto& interaction=interactions_[slider];
         if (!interaction.surface) interaction.surface=std::make_unique<nightlight::PaintSurface>();
         HDC buffer=interaction.surface->ensure(draw.hdc,client.right,client.bottom);
-        if (!buffer) return CDRF_DODEFAULT;
+        if (!buffer) {
+            // Even an allocation failure must not fall back to the native
+            // themed slider, which would flash a mismatched background.
+            fill(draw.hdc,client,p.card);
+            return CDRF_SKIPDEFAULT;
+        }
         fill(buffer,client,p.card);
         const bool enabled=IsWindowEnabled(slider)!=FALSE;
         const COLORREF accent=enabled?p.accent:mix(p.accent,p.card,0.35);
