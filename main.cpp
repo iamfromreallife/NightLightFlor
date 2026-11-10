@@ -956,7 +956,10 @@ private:
             // The native trackbar reserves its own thumb inset. Extend the
             // HWND close enough to the percentage to remove the large gap,
             // while leaving room for a full 100 % reading.
-            const int sliderWidth=nightlight::ddcSliderWidth(static_cast<int>(dpi_),width_);
+            const int percentTextWidth=std::max(px(1),
+                textWidth(L"100 %",smallFont_));
+            const int sliderWidth=nightlight::ddcSliderWidth(
+                static_cast<int>(dpi_),width_,percentTextWidth);
             place(row.brightness,sliderLeft,row.top+px(36),sliderWidth,px(28),TRUE);
             place(row.contrast,sliderLeft,row.top+px(66),sliderWidth,px(28),TRUE);
         }
@@ -1349,15 +1352,17 @@ private:
                     left+px(16),y,px(28));
                 drawCenteredDdcGlyph(dc,contrast?L"\uE7A1":L"\uE706",
                     iconCenter,contrast?15:18,p.subtle);
-                // Percentage begins beside the slider's channel, rather
-                // than being pushed to the right edge of a wide text box.
-                const int percentLeft=right-px(nightlight::kDdcPercentageBlockDip);
-                RECT number{percentLeft,y,right,y+px(28)};
+                // Match the exact right edge of the temperature gradient
+                // and its 6500 K label, even with odd window widths.
+                const int percentTextWidth=std::max(px(1),
+                    textWidth(L"100 %",smallFont_));
+                const RECT number=nightlight::ddcPercentageRect(
+                    static_cast<int>(dpi_),width_,percentTextWidth,y,px(28));
                 const int percent=GetCapture()==slider?
                     (static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100:
                     model_.hardwarePercent(row.device,contrast);
                 drawTextAt(dc,formatNumber(percent)+L" %",number,
-                    smallFont_,p.subtle,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+                    smallFont_,p.subtle,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
             };
             drawChannel(row.brightness,row.top+px(36),false);
             drawChannel(row.contrast,row.top+px(66),true);
