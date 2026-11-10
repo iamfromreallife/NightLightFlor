@@ -282,6 +282,10 @@ int temperatureSliderWidth(int dpi,int clientWidth) {
     // 40-DIP card inset on each side, including the outer card margin.
     return std::max(px(16),clientWidth-px(80));
 }
+POINT ddcSliderIconCenter(int iconColumnCenterX,int sliderTop,int sliderHeight) {
+    return POINT{iconColumnCenterX,sliderTop+sliderHeight/2};
+}
+
 int ddcSliderWidth(int dpi,int clientWidth) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
     // 74 DIP from the window left to the slider, reserving 46 DIP at
