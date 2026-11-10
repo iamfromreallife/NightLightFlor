@@ -62,9 +62,9 @@ inline constexpr int kDdcRowStepDip = 100;
 inline constexpr int kDdcSectionBaseDip = 34; // +2 DIP to preserve bottom padding
 
 // Spacing around the three cards (DIPs, scaled with Windows DPI).
-// The outer edges (top/left/right/bottom) are 12 DIP; gaps between cards
+// The outer edges (top/left/right/bottom) are 16 DIP; gaps between cards
 // remain 8 DIP. Internal content padding stays 16 DIP.
-inline constexpr int kCardOuterMarginDip = 12;
+inline constexpr int kCardOuterMarginDip = 16;
 inline constexpr int kCardsTopMarginDip = kCardOuterMarginDip;
 inline constexpr int kCardsGapDip = 8;
 inline constexpr int kCardInnerInsetDip = 16;
