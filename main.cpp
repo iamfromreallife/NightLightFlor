@@ -183,8 +183,8 @@ public:
         MONITORINFO screen{sizeof(screen)};
         if (GetMonitorInfoW(MonitorFromRect(&proposed,MONITOR_DEFAULTTONEAREST),&screen)) {
             const RECT area=screen.rcWork;
-            windowWidth=std::clamp(windowWidth,px(420),
-                std::max(px(420),static_cast<int>(area.right-area.left)));
+            windowWidth=std::clamp(windowWidth,px(200),
+                std::max(px(200),static_cast<int>(area.right-area.left)));
             windowHeight=std::clamp(windowHeight,px(260),
                 std::max(px(260),static_cast<int>(area.bottom-area.top)));
             x=std::clamp(x,static_cast<int>(area.left),
@@ -907,7 +907,9 @@ private:
             auto stored=tabDesiredWidths_.find(m.device);
             if(stored==tabDesiredWidths_.end())stored=tabDesiredWidths_.emplace(
                 m.device,std::max(px(108),textWidth(m.displayName(),boldFont_)+px(88))).first;
-            const int tabW=stored->second;
+            // On very narrow windows, ellipsize the name rather than
+            // enlarging the entire window beyond the user's chosen width.
+            const int tabW=std::min(stored->second,std::max(px(1),tabsRight-tabStart));
             if (tabX>tabStart && tabX+tabW>tabsRight) { tabX=tabStart; tabY+=px(38); ++rows; }
             place(tabs_[i],tabX,tabY,tabW,tabH,TRUE);
             if(editingName_ && m.device==editingDevice_) {
@@ -920,11 +922,18 @@ private:
         }
         panelHeight_=px(46+rows*38);
         secondPanelTop_=panelTop_+panelHeight_+px(12);
-        temperatureHeight_=px(gammaUnlocked_?112:162);
-        place(btnGamma_,innerRight-px(220),secondPanelTop_+px(119),px(220),px(29),TRUE);
-        const int sliderW=std::min(px(480),innerRight-innerLeft-px(8));
+        const bool narrowTemperature=width_<px(350);
+        const int temperatureShift=narrowTemperature?px(24):0;
+        temperatureHeight_=px(gammaUnlocked_?112:162)+temperatureShift;
+        const int gammaWidth=std::min(px(220),std::max(px(1),innerRight-innerLeft));
+        place(btnGamma_,innerRight-gammaWidth,secondPanelTop_+px(119)+temperatureShift,
+            gammaWidth,px(29),TRUE);
+        // No fixed maximum: the temperature gradient extends or contracts
+        // with the window, keeping the same 40-DIP side inset.
+        const int sliderW=nightlight::temperatureSliderWidth(static_cast<int>(dpi_),width_);
         const int sliderLeft=(width_-sliderW)/2;
-        slider_={sliderLeft,secondPanelTop_+px(62),sliderLeft+sliderW,secondPanelTop_+px(66)};
+        slider_={sliderLeft,secondPanelTop_+px(62)+temperatureShift,
+            sliderLeft+sliderW,secondPanelTop_+px(66)+temperatureShift};
         hardwareTop_=secondPanelTop_+temperatureHeight_+px(12);
         hardwareHeight_=px(hardwareRows_.empty()?72:
             nightlight::kDdcSectionBaseDip+
@@ -945,7 +954,10 @@ private:
             place(row.nameButton,innerLeft,row.top,nameWidth,tabH,TRUE);
             // One full-width pair of sliders per monitor, beneath its name.
             const int sliderLeft=innerLeft+px(38);
-            const int sliderWidth=std::max(px(1),innerRight-sliderLeft-px(60));
+            // The native trackbar reserves its own thumb inset. Extend the
+            // HWND close enough to the percentage to remove the large gap,
+            // while leaving room for a full 100 % reading.
+            const int sliderWidth=nightlight::ddcSliderWidth(static_cast<int>(dpi_),width_);
             place(row.brightness,sliderLeft,row.top+px(36),sliderWidth,px(28),TRUE);
             place(row.contrast,sliderLeft,row.top+px(66),sliderWidth,px(28),TRUE);
         }
