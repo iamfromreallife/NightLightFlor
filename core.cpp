@@ -279,8 +279,9 @@ int temperatureSliderXFromKelvin(int kelvin,int left,int right) {
 
 int temperatureSliderWidth(int dpi,int clientWidth) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
-    // 40-DIP card inset on each side, including the outer card margin.
-    return std::max(px(16),clientWidth-px(80));
+    // Keep the visual track 20 DIP inside each card. The card itself now
+    // has 16-DIP outer margins, so each endpoint is 36 DIP from the window.
+    return std::max(px(16),clientWidth-2*px(kCardOuterMarginDip+20));
 }
 TemperatureScaleLabelRects temperatureScaleLabelRects(
     const RECT& sliderTrack,int top,int height) {
@@ -297,9 +298,10 @@ POINT ddcSliderIconCenter(int iconColumnCenterX,int sliderTop,int sliderHeight) 
 
 int ddcSliderWidth(int dpi,int clientWidth) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
-    // 74 DIP from the window left to the slider, reserving 46 DIP at
-    // the right for the percentage and the trackbar thumb.
-    return std::max(px(16),clientWidth-px(156));
+    // Preserve the DDC slider's in-card padding on both sides while
+    // reclaiming the same four pixels at each outer edge.
+    return std::max(px(16),clientWidth-
+        px(2*kCardOuterMarginDip+2*kCardInnerInsetDip+84));
 }
 
 WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
@@ -307,13 +309,13 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     bool gammaUnlocked, bool ddcVisible) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
     const int tabGap=px(6);
-    const int tabStart=px(36);
+    const int tabStart=px(kCardOuterMarginDip+kCardInnerInsetDip);
     // Width is user-controlled down to an outer-frame minimum of 200 DIP.
     // Never enlarge the window to fit labels: instead ellipsize monitor tabs
     // when they cannot fit within a narrow client area.
     const int minimumWidth=px(1);
     const int width=std::max(clientWidth,minimumWidth);
-    const int tabsRight=width-px(36);
+    const int tabsRight=width-px(kCardOuterMarginDip+kCardInnerInsetDip);
     const int availableTabWidth=std::max(px(1),tabsRight-tabStart);
     int x=tabStart, rows=1;
     for (int desired:tabDesiredWidths) {
@@ -321,17 +323,17 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
         if (x>tabStart && x+tabWidth>tabsRight) { x=tabStart; ++rows; }
         x+=tabWidth+tabGap;
     }
-    const int panelTop=px(12);
+    const int panelTop=px(kCardsTopMarginDip);
     const int panelHeight=px(46+rows*38);
-    const int secondPanelTop=panelTop+panelHeight+px(12);
+    const int secondPanelTop=panelTop+panelHeight+px(kCardsGapDip);
     const int temperatureHeight=px((gammaUnlocked?
         kTemperatureUnlockedHeightDip:kTemperatureLockedHeightDip)+
         (width<px(350)?kTemperatureNarrowExtraDip:0));
     const int hardwareHeight=px(ddcMonitorRows==0?72:
         kDdcSectionBaseDip+kDdcRowStepDip*
             static_cast<int>(std::min<size_t>(ddcMonitorRows,100)));
-    const int height=secondPanelTop+temperatureHeight+px(20)+
-        (ddcVisible?hardwareHeight+px(12):0);
+    const int height=secondPanelTop+temperatureHeight+px(kCardOuterMarginDip)+
+        (ddcVisible?hardwareHeight+px(kCardsGapDip):0);
     // Width remains user-controlled; only height is content-constrained.
     return {width,height,rows};
 }
