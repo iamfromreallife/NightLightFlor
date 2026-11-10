@@ -1156,14 +1156,21 @@ private:
         RECT screensTitle{px(60),panelTop_+px(8),client.right-px(84),panelTop_+px(30)};
         drawTextAt(mem,tr(L"Screens",L"Ecrãs"),screensTitle,sectionTitleFont_,p.text);
         drawSectionIcon(mem,1,px(36),secondPanelTop_+px(11),p.subtle);
-        RECT label{px(60),secondPanelTop_+px(8),client.right-px(176),secondPanelTop_+px(30)};
+        const bool narrowTemperature=width_<px(350);
+        RECT label{px(60),secondPanelTop_+px(8),
+            narrowTemperature?client.right-px(36):client.right-px(176),
+            secondPanelTop_+px(30)};
         drawTextAt(mem,tr(L"Color temperature",L"Temperatura de cor"),label,sectionTitleFont_,p.text);
         const int current=hasMonitor()?selectedMonitor()->kelvin:5000;
-        RECT valueRect{client.right-px(176),secondPanelTop_+px(9),client.right-px(36),secondPanelTop_+px(59)};
+        RECT valueRect{narrowTemperature?px(36):client.right-px(176),
+            secondPanelTop_+(narrowTemperature?px(30):px(9)),
+            client.right-px(36),secondPanelTop_+(narrowTemperature?px(62):px(59))};
         drawTextAt(mem,formatNumber(current)+L" K",valueRect,headlineFont_,p.accent,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
         drawSlider(mem);
-        RECT low{px(36),secondPanelTop_+px(84),px(270),secondPanelTop_+px(106)};
-        RECT high{client.right-px(270),secondPanelTop_+px(84),client.right-px(36),secondPanelTop_+px(106)};
+        const int footerY=secondPanelTop_+px(84)+(narrowTemperature?px(24):0);
+        const int midpoint=client.right/2;
+        RECT low{px(36),footerY,midpoint-px(4),footerY+px(22)};
+        RECT high{midpoint+px(4),footerY,client.right-px(36),footerY+px(22)};
         drawTextAt(mem,L"1000 K",low,smallFont_,p.muted);
         drawTextAt(mem,L"6500 K",high,smallFont_,p.muted,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
 
@@ -1394,8 +1401,9 @@ private:
             const float scale=static_cast<float>(dpi_)/96.0f;
             g.TranslateTransform(static_cast<float>(rc.left+rc.right)/2.0f,
                 static_cast<float>(rc.top+rc.bottom)/2.0f);
-            g.RotateTransform(static_cast<float>(std::fmod(refreshTurn_.value(now),360.0)));
-            g.ScaleTransform(scale,scale);
+            // Counter-clockwise turn with a horizontally mirrored glyph.
+            g.RotateTransform(-static_cast<float>(std::fmod(refreshTurn_.value(now),360.0)));
+            g.ScaleTransform(-scale,scale);
             Gdiplus::FontFamily fluent(L"Segoe Fluent Icons");
             Gdiplus::FontFamily mdl2(L"Segoe MDL2 Assets");
             const Gdiplus::FontFamily* family=fluent.IsAvailable()?&fluent:&mdl2;
@@ -1749,8 +1757,10 @@ private:
             auto* sizes=reinterpret_cast<MINMAXINFO*>(lParam);
             RECT current{}; GetWindowRect(hwnd,&current);
             const SIZE minimum=requiredWindowSizeForWidth(
-                std::max(px(420),static_cast<int>(current.right-current.left)));
-            sizes->ptMinTrackSize.x=std::max(static_cast<LONG>(minimum.cx),sizes->ptMinTrackSize.x);
+                std::max(px(200),static_cast<int>(current.right-current.left)));
+            // Honor an actual 200-DIP outer frame width. The content may
+            // truncate labels, but slider tracks continue to respond.
+            sizes->ptMinTrackSize.x=px(200);
             sizes->ptMinTrackSize.y=std::max(static_cast<LONG>(minimum.cy),sizes->ptMinTrackSize.y);
             return 0;
         }
@@ -1759,9 +1769,7 @@ private:
             // require a taller window. Clamp the actual drag rectangle.
             auto* proposed=reinterpret_cast<RECT*>(lParam);
             if (!proposed) return TRUE;
-            const SIZE minimum=requiredWindowSizeForWidth(
-                proposed->right-proposed->left);
-            const int minWidth=static_cast<int>(minimum.cx);
+            const int minWidth=px(200);
             if (proposed->right-proposed->left<minWidth) {
                 if (wParam==WMSZ_LEFT || wParam==WMSZ_TOPLEFT || wParam==WMSZ_BOTTOMLEFT)
                     proposed->left=proposed->right-minWidth;
