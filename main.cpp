@@ -165,13 +165,12 @@ public:
         if (!RegisterClassExW(&wc)) return 3;
 
         int windowWidth=560;
-        int windowHeight=std::clamp((gammaUnlocked_?338:388)+56+
-            128*static_cast<int>(model_.monitors().size()),260,
-            std::max(260,GetSystemMetrics(SM_CYSCREEN)-80));
+        // Fixed first-run height. The user controls the window size from then on,
+        // and scrollbars handle content that exceeds the available space.
+        int windowHeight=620;
         if (const auto savedSize=model_.windowSize()) {
             windowWidth=static_cast<int>(savedSize->cx);
             windowHeight=static_cast<int>(savedSize->cy);
-            sizeCustomized_=true; // Do not auto-fit away the saved window height.
         }
         const auto savedPosition=model_.windowPosition();
         int x=savedPosition?static_cast<int>(savedPosition->x):
@@ -280,14 +279,13 @@ private:
     RECT slider_ = {};
     int scrollOffset_=0, contentHeight_=0;
     bool layingOut_=false;
-    bool sizeCustomized_=false, sizingByUser_=false, initializingWindow_=true;
+    bool initializingWindow_=true;
     unsigned layoutDepth_=0;
     ULONGLONG layoutTime_=0;
     int panelTop_ = 84, panelHeight_ = 142, secondPanelTop_ = 238;
     bool dragging_ = false;
     bool trayReady_ = false, shuttingDown_ = false;
     bool trayVersion4_ = false;
-    ULONGLONG lastTrayClick_ = 0;
     UINT taskbarCreated_ = 0;
     NOTIFYICONDATAW notify_ = {};
 
@@ -299,9 +297,7 @@ private:
     std::map<HWND,Interaction> interactions_;
     nightlight::Motion temperaturePosition_,temperatureEngagement_{0},entrance_{0};
     nightlight::Motion hardwareReveal_{1},refreshTurn_{0};
-    bool sizeAnchorValid_=false;
-    RECT sizeAnchor_{};
-    int anchorClientHeight_=0,hardwareVisibleHeight_=0;
+    int hardwareVisibleHeight_=0;
     bool animations_=true,highContrast_=false,opening_=false,temperatureHover_=false;
     bool entranceAddedLayer_=false,entranceMove_=true,parentAnimating_=false,reflowAnimating_=false,composedTransition_=false;
     RECT entranceBounds_{};
@@ -705,11 +701,6 @@ private:
         ensureHardwareRows();
         layout();
     }
-    void rememberSizeAnchor() {
-        if (sizeAnchorValid_ || !IsWindowVisible(window_) || IsZoomed(window_) || IsIconic(window_)) return;
-        finishEntrance(); GetWindowRect(window_,&sizeAnchor_);
-        anchorClientHeight_=height_; sizeAnchorValid_=true;
-    }
     void startInlineRename(size_t index) {
         if(index>=model_.monitors().size())return;
         finishInlineRename(true);
@@ -839,29 +830,8 @@ private:
         hardwareVisibleHeight_=static_cast<int>(std::round(hardwareHeight_*hardwareProgress));
         contentHeight_=secondPanelTop_+temperatureHeight_+margin+
             static_cast<int>(std::round((hardwareHeight_+px(12))*hardwareProgress));
-        // Fit the outer frame to the measured content, preserving the user's
-        // width. Keep the window inside its own monitor's usable work area.
-        if (!sizeCustomized_ && !sizingByUser_ &&
-            !IsZoomed(window_) && !IsIconic(window_)) {
-            RECT outer{}; GetWindowRect(window_,&outer);
-            MONITORINFO monitor{}; monitor.cbSize=sizeof(monitor);
-            if (GetMonitorInfoW(MonitorFromWindow(window_,MONITOR_DEFAULTTONEAREST),&monitor)) {
-                const int chrome=(outer.bottom-outer.top)-height_;
-                const int available=std::max(px(260),static_cast<int>(monitor.rcWork.bottom-monitor.rcWork.top));
-                const int desired=std::clamp(contentHeight_+chrome,px(260),available);
-                // Keep the window inside the work area as display rows change.
-                const int preferredTop=sizeAnchorValid_?sizeAnchor_.top:outer.top;
-                const int y=std::clamp(preferredTop,static_cast<int>(monitor.rcWork.top),
-                    std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-desired));
-                if (outer.bottom-outer.top!=desired || outer.top!=y) {
-                    rememberSizeAnchor();
-                    finishEntrance();
-                    SetWindowPos(window_,nullptr,outer.left,y,outer.right-outer.left,desired,
-                        SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
-                    layingOut_=false; layout(); return;
-                }
-            }
-        }
+        // Never resize the outer window to fit content. The stored/user-chosen
+        // height is authoritative; vertical scrolling exposes overflow.
         const int correctedScroll=std::clamp(scrollOffset_,0,std::max(0,contentHeight_-height_));
         const bool scrollChanged=correctedScroll!=scrollOffset_;
         scrollOffset_=correctedScroll;
@@ -927,8 +897,6 @@ private:
                 if (!SetWindowRgn(placement.control,region,FALSE)) DeleteObject(region);
             } else SetWindowRgn(placement.control,nullptr,FALSE);
         }
-        if (sizeAnchorValid_ && !hardwareReveal_.active(uiTime()) && height_==anchorClientHeight_)
-            sizeAnchorValid_=false;
         layingOut_=false;
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_FRAME|RDW_NOERASE);
     }
@@ -1165,7 +1133,6 @@ private:
         }
     }
     void toggleHardware() {
-        rememberSizeAnchor();
         ddcVisible_=!ddcVisible_;
         animate(hardwareReveal_,ddcVisible_?1:0,240);
         if (ddcVisible_) refreshHardware();
@@ -1438,11 +1405,15 @@ private:
             model_.save();
         }
     }
-    void openWindow() {
-        syncGammaButton();
-        updateMotionPreference();
+    void openWindow(bool immediate=false) {
+        // Tray interaction is synchronous: no fade-in and no blocking
+        // registry/system-preference checks on the click hot path.
+        if (!immediate) {
+            syncGammaButton();
+            updateMotionPreference();
+        }
         const bool reveal=!IsWindowVisible(window_) || IsIconic(window_);
-        if (reveal && animations_) {
+        if (reveal && animations_ && !immediate) {
             const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
             entranceAddedLayer_=(style&WS_EX_LAYERED)==0;
             SetWindowLongPtrW(window_,GWL_EXSTYLE,style|WS_EX_LAYERED);
@@ -1467,7 +1438,9 @@ private:
         // Hide rather than minimize: this keeps the window out of the taskbar
         // without destroying it or interrupting per-monitor adjustments.
         if (trayReady_ && !shuttingDown_) {
-            noteWindowPosition(true);
+            // Do not block the UI waiting for config.json to be written.
+            // The existing save timer persists geometry after the click.
+            noteWindowPosition();
             ShowWindow(window_,SW_HIDE);
         }
     }
@@ -1476,15 +1449,12 @@ private:
         if (IsWindowVisible(window_) && !IsIconic(window_)) {
             hideWindowToTray();
         } else {
-            openWindow();
+            openWindow(true);
         }
     }
     void handleTrayActivation() {
-        // Ignore the second activation from a double-click. A single
-        // physical activation must never immediately undo the first toggle.
-        const ULONGLONG now=GetTickCount64();
-        if (lastTrayClick_ && now-lastTrayClick_<=GetDoubleClickTime()) return;
-        lastTrayClick_=now;
+        // Each real click toggles immediately. Event-mode filtering below
+        // prevents duplicate legacy/v4 notifications, with no time throttle.
         toggleTrayWindow();
     }
     bool addTray() {
@@ -1633,9 +1603,6 @@ private:
             }
             break;
         case WM_SIZE:
-            if (wParam==SIZE_RESTORED && !initializingWindow_ &&
-                !layingOut_ && !opening_ && IsWindowVisible(hwnd))
-                sizeCustomized_=true;
             if (wParam==SIZE_MINIMIZED) {
                 // Fallback for ShowWindow(SW_MINIMIZE), Win+M and external
                 // minimize requests that bypass WM_SYSCOMMAND. Never hide
@@ -1681,16 +1648,15 @@ private:
             paintClient(reinterpret_cast<HDC>(wParam),client); return 0;
         }
         case WM_ENTERSIZEMOVE:
-            sizingByUser_=true;
             finishEntrance();finishReordering(); hardwareReveal_.finish();
-            sizeAnchorValid_=false; layout(); return 0;
+            layout(); return 0;
         case WM_EXITSIZEMOVE:
-            sizingByUser_=false;
             noteWindowPosition(true);
             return 0;
         case WM_WINDOWPOSCHANGED: {
             const auto* position=reinterpret_cast<const WINDOWPOS*>(lParam);
-            if (position && !(position->flags & SWP_NOMOVE))
+            if (position && (!(position->flags & SWP_NOMOVE) ||
+                             !(position->flags & SWP_NOSIZE)))
                 noteWindowPosition();
             // Default processing must still generate WM_MOVE and WM_SIZE.
             break;
