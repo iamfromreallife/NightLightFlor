@@ -253,28 +253,26 @@ bool updateGammaRamp(const Ramp& target,GammaRefresh refresh,GammaRampState& sta
 }
 
 WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
-    int enableButtonWidth, const std::vector<int>& tabDesiredWidths,
-    size_t ddcMonitorRows, bool gammaUnlocked, bool ddcVisible) {
+    const std::vector<int>& tabDesiredWidths, size_t ddcMonitorRows,
+    bool gammaUnlocked, bool ddcVisible) {
     const auto px=[dpi](int value) { return MulDiv(value,std::max(96,dpi),96); };
-    const int gap=px(8), tabGap=px(6);
+    const int tabGap=px(6);
     const int tabStart=px(36);
-    int widestTab=px(44);
+    int widestTab=px(108);
     for (int desired:tabDesiredWidths)
-        widestTab=std::max(widestTab,std::clamp(desired,px(44),px(279)));
-    // An individual tab and the Enabled button must fit. With DDC/CI
-    // visible, every attached monitor has its own horizontal column.
-    // Never wrap DDC/CI control groups into vertical rows.
-    const int tabMinimum=px(72)+widestTab+enableButtonWidth+gap;
+        widestTab=std::max(widestTab,desired);
+    // Each screen tab contains its icon, complete name and on/off toggle.
+    // With DDC visible, attached monitors occupy adjacent columns.
+    const int tabMinimum=px(72)+widestTab;
     const int columnCount=ddcVisible?static_cast<int>(std::min<size_t>(ddcMonitorRows,100)):0;
     const int columnMinimum=columnCount>0?
         px(72)+columnCount*px(320)+(columnCount-1)*px(14):0;
     const int minimumWidth=std::max({px(420),tabMinimum,columnMinimum});
     const int width=std::max(clientWidth,minimumWidth);
-    const int tabsRight=width-px(36)-enableButtonWidth-gap;
-    const int space=std::max(px(44),tabsRight-tabStart);
+    const int tabsRight=width-px(36);
     int x=tabStart, rows=1;
     for (int desired:tabDesiredWidths) {
-        const int tabWidth=std::clamp(desired,px(44),std::min(px(279),space));
+        const int tabWidth=std::max(px(108),desired);
         if (x>tabStart && x+tabWidth>tabsRight) { x=tabStart; ++rows; }
         x+=tabWidth+tabGap;
     }
@@ -282,7 +280,6 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     const int panelHeight=px(46+rows*38);
     const int secondPanelTop=panelTop+panelHeight+px(12);
     const int temperatureHeight=px(gammaUnlocked?112:162);
-    // All monitor columns share one vertical row.
     const int hardwareHeight=px(ddcMonitorRows==0?72:172);
     const int height=secondPanelTop+temperatureHeight+px(20)+
         (ddcVisible?hardwareHeight+px(12):0);
