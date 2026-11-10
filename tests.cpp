@@ -377,31 +377,43 @@ int main() {
         check(temperatureSliderWidth(96,200)==144 &&
               temperatureSliderWidth(96,800)==744,
             "Temperature slider follows reduced 8 DIP outer margins");
-        check(ddcSliderWidth(96,200)==80 &&
-              ddcSliderWidth(96,800)==680,
-            "DDC slider fills more of the area between icons and percent readings");
+        // Reserve the width of the longest percentage once. This avoids
+        // changing the trackbar's geometry when 99 % becomes 100 %.
+        check(ddcSliderWidth(96,200,30)==94 &&
+              ddcSliderWidth(96,800,30)==694,
+            "DDC trackbars extend toward right-aligned percentage fields");
         check(temperatureSliderWidth(144,300)==216 &&
-              ddcSliderWidth(144,300)==120,
-            "Tighter DDC spacing remains DPI aware");
+              ddcSliderWidth(144,300,45)==141,
+            "DDC endpoint alignment and measured text width scale with DPI");
         for (int dpi:{96,120,144,192}) {
             const auto dip=[dpi](int v) { return MulDiv(v,dpi,96); };
             for (int widthDip:{200,350,560,1024}) {
-                // Pixel widths scale with DPI just as the real 200-DIP
-                // minimum Win32 window width does.
                 const int clientWidth=dip(widthDip);
-                const int contentLeft=dip(kCardOuterMarginDip+kCardInnerInsetDip);
-                const int right=clientWidth-contentLeft;
-                const int sliderLeft=contentLeft+dip(kDdcSliderLeftInsetDip);
-                const int percentLeft=right-dip(kDdcPercentageBlockDip);
-                const int width=ddcSliderWidth(dpi,clientWidth);
-                check(width>0 && sliderLeft+width==percentLeft,
-                    "DDC slider HWND reaches exactly the percentage field boundary");
-                check(kDdcSliderLeftInsetDip==24 && kDdcPercentageBlockDip==48,
-                    "Compact DDC inset and percentage width are stable across DPI");
-                check(percentLeft<right &&
-                      percentLeft-sliderLeft>=dip(16),
-                    "DDC slider and label stay separated at 200px minimum window width");
+                const int maxTextWidth=dip(30); // measured "100 %" sample
+                const int trackWidth=temperatureSliderWidth(dpi,clientWidth);
+                const int trackLeft=(clientWidth-trackWidth)/2;
+                const int sliderRight=trackLeft+trackWidth;
+                const int sliderLeft=dip(kCardOuterMarginDip+
+                    kCardInnerInsetDip+kDdcSliderLeftInsetDip);
+                const RECT percent=ddcPercentageRect(dpi,clientWidth,
+                    maxTextWidth,42,dip(28));
+                const int width=ddcSliderWidth(dpi,clientWidth,maxTextWidth);
+                check(percent.right==sliderRight,
+                    "Brightness and contrast percentage right edges equal 6500 K's endpoint");
+                check(percent.left==percent.right-maxTextWidth &&
+                      percent.top==42 && percent.bottom==42+dip(28),
+                    "Measured 100 percent field keeps a fixed width and correct height");
+                check(width>0 && sliderLeft+width==percent.left,
+                    "DDC trackbar ends at the percentage field start, preserving the gap");
+                check(width>=dip(16),
+                    "DDC slider remains usable at the 200-DIP minimum window width");
             }
+        }
+        for (int width:{201,355,561,801}) {
+            const RECT percent=ddcPercentageRect(96,width,31,0,28);
+            const int sliderWidth=temperatureSliderWidth(96,width);
+            check(percent.right==(width-sliderWidth)/2+sliderWidth,
+                "Odd window sizes keep percentages exactly aligned with Kelvin labels");
         }
         // Tray selection must toggle on every physical down, including the
         // second press of a double-click, but not again on its release.
