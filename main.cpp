@@ -84,12 +84,12 @@ public:
         correctionPending_.store(false,std::memory_order_release);
         lastCorrection_.store(0,std::memory_order_release);
         correctionCount_.store(0,std::memory_order_release);
-        const DWORD generation=generation_.fetch_add(1)+1;
+        generation_.fetch_add(1);
         auto started=std::make_shared<std::promise<bool>>();
         auto ready=started->get_future();
         try {
-            worker_=std::thread([this,started,generation] {
-                run(started,generation);
+            worker_=std::thread([this,started] {
+                run(started);
             });
         } catch (...) { return false; }
         if (ready.wait_for(std::chrono::milliseconds(1500))!=
@@ -194,7 +194,7 @@ private:
         // this extra request. No polling, retry timer or synchronous broadcast.
         PostMessageW(HWND_BROADCAST,WM_SYSCOMMAND,SC_MONITORPOWER,2);
     }
-    void run(const std::shared_ptr<std::promise<bool>>& started,DWORD generation) {
+    void run(const std::shared_ptr<std::promise<bool>>& started) {
         MSG message{};
         PeekMessageW(&message,nullptr,WM_USER,WM_USER,PM_NOREMOVE);
         threadId_.store(GetCurrentThreadId(),std::memory_order_release);
@@ -2361,15 +2361,6 @@ private:
             return 0;
         }
         case WM_SHOW_EXISTING: openWindow(); return 0;
-        case WM_SCREEN_GUARD_WAKE:
-            // Hooks/power notifications post at most one request until the
-            // timer is serviced; never perform display power calls inside a
-            // low-level input hook (Windows can silently remove slow hooks).
-            if (screenOffGuard_.guarding())
-                SetTimer(hwnd,TIMER_SCREEN_GUARD_WAKE,
-                    nightlight::kScreenOffResleepDelayMs,nullptr);
-            else gScreenOffWakeQueued.store(false,std::memory_order_relaxed);
-            return 0;
         case nightlight::WM_DDC_COMPLETE:
             syncHardware(); repaint(); return 0;
         case WM_HSCROLL: {
