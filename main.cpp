@@ -1940,39 +1940,40 @@ private:
         }
     }
     void turnOffScreens() {
-        // Do not use DDC/CI VCP D6: that would power the physical monitors
-        // off. SC_MONITORPOWER with lParam=2 requests display sleep, from
-        // which normal input resumes the desktop.
-        //
-        // Install input suppression before requesting display sleep.
-        // Use BlockInput when permitted, falling back to both low-level
-        // hooks and fast re-sleep if the display wakes before app input is
-        // dispatched. Do not proceed without either protective mechanism.
-        if (!screenOffGuard_.start(window_)) {
+        // Give the click's mouse-up 250ms to finish, like the Windhawk mod.
+        // Repeated clicks reset only the initial one-shot delay.
+        if (screenOffGuard_.guarding()) return;
+        if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
+        KillTimer(window_,TIMER_SCREEN_OFF_ACTION);
+        if (!SetTimer(window_,TIMER_SCREEN_OFF_ACTION,
+                      nightlight::kScreenOffActionDelayMs,nullptr)) {
+            dispatchScreenOff();
+        }
+    }
+    void dispatchScreenOff() {
+        // No DDC/CI power-off or sleep/suspend: only ask Windows to turn
+        // the displays off while normal apps and audio keep running.
+        if (screenOffGuard_.guarding()) return;
+        if (!screenOffGuard_.start()) {
             MessageBoxW(window_,tr(
-                L"Could not activate the three-second mouse and keyboard guard. Screens were not turned off.",
+                L"Could not install the three-second mouse and keyboard protection. Screens were not turned off.",
                 L"Não foi possível ativar a proteção do rato e teclado durante três segundos. Os ecrãs não foram desligados.").c_str(),
                 L"NightLight",MB_OK|MB_ICONWARNING);
             return;
         }
-        if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
-        DWORD_PTR ignored=0;
-        // Handle the system monitor-power command in our own top-level
-        // window. A HWND_BROADCAST can process many unrelated windows
-        // sequentially, delaying sleep and consuming the entire guard.
-        // DefWindowProcW handles SC_MONITORPOWER for this window; no
-        // monitor hardware/VCP power-off commands are issued.
-        const LRESULT sent=SendMessageTimeoutW(window_,WM_SYSCOMMAND,
-            SC_MONITORPOWER,2,SMTO_ABORTIFHUNG,700,&ignored);
-        if (!sent) {
+        // Exactly one asynchronous display-off broadcast per button press.
+        // Subsequent requests occur only on physical input or a real wake,
+        // at most 8 and no more often than every 450ms during protection.
+        if (PostMessageW(HWND_BROADCAST,WM_SYSCOMMAND,
+                         SC_MONITORPOWER,2)) {
+            screenOffGuard_.markOffRequested();
+        } else {
             screenOffGuard_.stop();
             MessageBoxW(window_,tr(
                 L"Windows did not accept the screen-off request.",
                 L"O Windows não aceitou o pedido para desligar os ecrãs.").c_str(),
                 L"NightLight",MB_OK|MB_ICONWARNING);
-            return;
         }
-        screenOffGuard_.screenOffDispatched();
     }
     void openWindow(bool fromTray=false) {
         // Keep the fast tray-click path free of slow registry checks while
@@ -2467,10 +2468,9 @@ private:
                     DWORD state=0; CopyMemory(&state,setting->Data,sizeof(state));
                     displayAwake_=state!=0;
                     if (displayAwake_ && screenOffGuard_.guarding()) {
-                        // Display power management can react before the
-                        // low-level hook sees input. Reassert sleep promptly,
-                        // and postpone hardware refresh until the guard ends.
-                        requestScreenOffReassert();
+                        // The guard's worker receives CONSOLE_DISPLAY_STATE,
+                        // and only it is allowed to correct a genuine wake.
+                        // Avoid DDC operations until the guard has expired.
                         KillTimer(hwnd,TIMER_DISPLAYS);
                     } else if (displayAwake_) scheduleDisplayRecovery();
                     else KillTimer(hwnd,TIMER_DISPLAYS);
@@ -2482,14 +2482,9 @@ private:
             }
             return TRUE;
         case WM_TIMER:
-            if (wParam==TIMER_SCREEN_GUARD_WAKE) {
-                KillTimer(hwnd,TIMER_SCREEN_GUARD_WAKE);
-                gScreenOffWakeQueued.store(false,std::memory_order_relaxed);
-                if (screenOffGuard_.guarding()) {
-                    DWORD_PTR ignored=0;
-                    SendMessageTimeoutW(hwnd,WM_SYSCOMMAND,
-                        SC_MONITORPOWER,2,SMTO_ABORTIFHUNG,350,&ignored);
-                }
+            if (wParam==TIMER_SCREEN_OFF_ACTION) {
+                KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
+                dispatchScreenOff();
                 return 0;
             }
             if (wParam==TIMER_ANIMATION) { if (animationTimerRunning_) tickAnimations(); return 0; }
@@ -2541,7 +2536,7 @@ private:
             }
             return 0;
         case WM_DESTROY:
-            KillTimer(hwnd,TIMER_SCREEN_GUARD_WAKE);
+            KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
             screenOffGuard_.stop();
             noteWindowPosition(true);
             shuttingDown_=true;
