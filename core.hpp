@@ -83,15 +83,20 @@ inline constexpr UINT kHideToTrayFlags =
     SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE |
     SWP_NOZORDER | SWP_NOOWNERZORDER;
 
+// Screen-off protection follows the Windhawk mod: allow the releasing
+// mouse click to finish before activating low-level input filters; during
+// the next 3 seconds, only react to real input/wake events. Rate-limit
+// corrective sleep requests (never retry periodically).
+inline constexpr unsigned kScreenOffActionDelayMs = 250;
+inline constexpr unsigned kScreenOffInputGuardMs = 3000;
+inline constexpr unsigned kScreenOffMinCorrectionIntervalMs = 450;
+inline constexpr unsigned kScreenOffMaxCorrections = 8;
+bool shouldCorrectScreenWake(std::uint64_t nowMs,std::uint64_t previousMs,
+                             unsigned correctionCount);
 // The entrance uses one shared 150-ms motion for both opacity and the
 // upward slide. A small initial alpha makes the first frame perceptible.
-// Temporarily suppress input after display sleep. The preparation grace
-// also bounds input suppression if Windows' monitor command stalls.
-inline constexpr unsigned kScreenOffInputGuardMs = 3000;
-inline constexpr unsigned kScreenOffPreparationGraceMs = 3000;
 // Compact action (28 DIP) fits within the 32-DIP monitor-tab row.
 inline constexpr int kScreenOffButtonSizeDip = 28;
-inline constexpr unsigned kScreenOffResleepDelayMs = 80;
 inline constexpr unsigned kWindowOpeningDurationMs = 150;
 inline constexpr int kWindowOpeningSlideDip = 12;
 inline constexpr unsigned char kWindowOpeningInitialAlpha = 24;
