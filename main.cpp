@@ -48,6 +48,7 @@ constexpr GUID displayStateGuid{0x2b84c20e,0xad23,0x4ddf,{0x93,0xdb,0x05,0xff,0x
 constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_STARTUP_BASE = 4100;
+constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_SHOW_EXISTING = WM_APP + 38;
@@ -2117,6 +2118,9 @@ private:
         append(startup,MF_STRING|(mode==L"minimized"?MF_CHECKED:0),ID_TRAY_STARTUP_BASE+1,tr(L"Minimized",L"Minimizado").c_str(),nightlight::MenuIcon::Minimize);
         append(startup,MF_STRING|(mode==L"tray"?MF_CHECKED:0),ID_TRAY_STARTUP_BASE+2,tr(L"Notification area",L"Área de notificação").c_str(),nightlight::MenuIcon::Tray);
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(startup),tr(L"Start",L"Iniciar").c_str(),nightlight::MenuIcon::Start);
+        append(menu,MF_STRING|(model_.preferences().closeByClickingOutside?MF_CHECKED:0),
+            ID_TRAY_CLOSE_OUTSIDE,tr(L"Close by clicking outside",L"Fechar ao clicar fora").c_str(),
+            nightlight::MenuIcon::Window);
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         append(menu,MF_STRING|(ddcVisible_?MF_CHECKED:0),ID_DDC,tr(L"DDC/CI Controls",L"Controlos DDC/CI").c_str(),nightlight::MenuIcon::Adjust);
         if (model_.monitors().empty()) {
@@ -2159,6 +2163,10 @@ private:
                 cmd==ID_TRAY_THEME_BASE+1?L"dark":L"system");
         } else if (cmd>=ID_TRAY_STARTUP_BASE && cmd<=ID_TRAY_STARTUP_BASE+2) {
             populateStartup(static_cast<int>(cmd-ID_TRAY_STARTUP_BASE));
+        } else if (cmd==ID_TRAY_CLOSE_OUTSIDE) {
+            Preferences pref=model_.preferences();
+            pref.closeByClickingOutside=!pref.closeByClickingOutside;
+            model_.updatePreferences(pref);
         } else if (cmd>=ID_TRAY_DISABLE_BASE &&
                    cmd<ID_TRAY_DISABLE_BASE+model_.monitors().size()) {
             const size_t index=cmd-ID_TRAY_DISABLE_BASE;
@@ -2216,6 +2224,16 @@ private:
                 (wParam != FALSE || IsIconic(hwnd)))
                 hideWindowToTray();
             return 0;
+        case WM_ACTIVATE:
+            if (LOWORD(wParam)==WA_INACTIVE && model_.preferences().closeByClickingOutside &&
+                trayReady_ && !shuttingDown_ && !trayMenuOpen_ &&
+                IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+                // Avoid hiding when switching to a modal/owned dialog of this app.
+                const HWND next=reinterpret_cast<HWND>(lParam);
+                if (!next || (next!=hwnd && GetAncestor(next,GA_ROOTOWNER)!=hwnd))
+                    hideWindowToTray();
+            }
+            break;
         case WM_CLOSE:
             if (trayReady_ && !shuttingDown_) hideWindowToTray();
             else { noteWindowPosition(true); DestroyWindow(hwnd); }
