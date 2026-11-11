@@ -315,17 +315,23 @@ int main() {
         // with no standalone Enabled button or truncated-label width cap.
         // Opening fade and upward translation use exactly the same
         // 150ms motion, ending at the saved resting window coordinates.
-        check(kScreenOffInputGuardMs==3000,
-            "Screen-off protection lasts exactly three seconds after sleep dispatch");
+        check(kScreenOffActionDelayMs==250 && kScreenOffInputGuardMs==3000,
+            "Screen-off waits 250ms for the click release then protects input for 3 seconds");
         check(kScreenOffButtonSizeDip==28 &&
               kScreenOffButtonSizeDip<32,
             "Screen-off button is a smaller 28-DIP square centred beside 32-DIP monitor tabs");
-        check(kScreenOffPreparationGraceMs>=1000 &&
-              kScreenOffPreparationGraceMs<=4000,
-            "Guard startup has a bounded grace period for the display command");
-        check(kScreenOffResleepDelayMs>0 &&
-              kScreenOffResleepDelayMs<=100,
-            "A wake-up intercepted during the guard triggers fast re-sleep");
+        check(kScreenOffMinCorrectionIntervalMs==450 &&
+              kScreenOffMaxCorrections==8,
+            "Event-driven screen-wake corrections are capped at 8 and 450ms apart");
+        check(shouldCorrectScreenWake(1000,0,0) &&
+              shouldCorrectScreenWake(1450,1000,1),
+            "The initial physical wake and an event after a full cooldown can be corrected");
+        check(!shouldCorrectScreenWake(1449,1000,1) &&
+              !shouldCorrectScreenWake(999,1000,1),
+            "Burst input and nonmonotonic timestamps do not cause repeated screen-off");
+        check(!shouldCorrectScreenWake(3000,1000,8) &&
+              shouldCorrectScreenWake(3000,1000,7),
+            "At most eight reactive corrections are permitted per screen-off activation");
         check(kWindowOpeningDurationMs==150 &&
               kWindowOpeningSlideDip==12 &&
               kWindowOpeningInitialAlpha>0 &&
