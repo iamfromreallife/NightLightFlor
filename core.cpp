@@ -13,6 +13,16 @@
 namespace nightlight {
 namespace fs = std::filesystem;
 
+bool shouldCorrectScreenWake(std::uint64_t nowMs,std::uint64_t previousMs,
+                             unsigned correctionCount) {
+    if (correctionCount>=kScreenOffMaxCorrections) return false;
+    // Non-monotonic clocks are treated as ineligible for another correction.
+    if (previousMs!=0 &&
+        (nowMs<previousMs ||
+         nowMs-previousMs<kScreenOffMinCorrectionIntervalMs)) return false;
+    return true;
+}
+
 std::wstring fromUtf8(const std::string& input) {
     if (input.empty()) return L"";
     const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
