@@ -484,6 +484,7 @@ bool Model::load() {
     const std::string startup = general.get("startup_mode").str("normal");
     preferences_.startup = (startup == "minimized" || startup == "tray")
         ? fromUtf8(startup) : L"normal";
+    preferences_.closeByClickingOutside = general.get("close_by_clicking_outside").boolean(true);
     const auto& position=general.get("window_position");
     if (position.isObject()) {
         const int x=position.get("x").integer(INT_MIN);
@@ -541,6 +542,7 @@ bool Model::save() {
     root_["general"]["language"] = toUtf8(preferences_.locale);
     root_["general"]["appearance"] = toUtf8(preferences_.theme);
     root_["general"]["startup_mode"] = toUtf8(preferences_.startup);
+    root_["general"]["close_by_clicking_outside"] = preferences_.closeByClickingOutside;
     for (const auto& mon : monitors_) {
         auto& profile = root_["screen"]["monitor_profiles"][toUtf8(mon.device)];
         profile["kelvin"] = mon.kelvin;
@@ -552,7 +554,7 @@ bool Model::save() {
     auto clean=portable::Json::object();
     clean["screen"]["kelvin"]=std::clamp(root_.get("screen").get("kelvin").integer(5000),1000,6500);
     clean["general"]=portable::Json::object();
-    for(const char* key:{"language","appearance","startup_mode"})
+    for(const char* key:{"language","appearance","startup_mode","close_by_clicking_outside"})
         clean["general"][key]=root_.get("general").get(key);
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
@@ -866,6 +868,7 @@ void Model::updatePreferences(const Preferences& updated) {
         updated.theme==L"dark"?L"dark":L"system";
     preferences_.startup = (updated.startup == L"tray" ||
         updated.startup == L"minimized") ? updated.startup : L"normal";
+    preferences_.closeByClickingOutside = updated.closeByClickingOutside;
     save();
 }
 void Model::restoreOriginals() {
