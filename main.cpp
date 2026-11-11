@@ -1808,10 +1808,10 @@ private:
             }
         }
         if (id==ID_SCREEN_OFF) {
-            // U+F1B1 is Fluent PowerButtonUpdate2, centred by actual glyph
+            // U+E7E8 is Segoe Fluent's PowerButton glyph, centred by actual
             // ink bounds (the same technique as DDC brightness icons).
             const POINT center{(rc.left+rc.right)/2,(rc.top+rc.bottom)/2};
-            drawCenteredDdcGlyph(dc,L"\uF1B1",center,17,foreground);
+            drawCenteredDdcGlyph(dc,L"\uE7E8",center,17,foreground);
         }
         if (monitorButton) {
             drawSectionIcon(dc,0,rc.left+px(10),(rc.top+rc.bottom-px(16))/2,foreground);
