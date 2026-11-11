@@ -37,6 +37,7 @@ struct Preferences {
     std::wstring locale = L"en-US";
     std::wstring theme = L"system"; // system, light, dark
     std::wstring startup = L"normal";
+    bool closeByClickingOutside = true;
 };
 
 // System app mode is AppsUseLightTheme (not the separate system/taskbar mode).
