@@ -2230,8 +2230,11 @@ private:
                 IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                 // Avoid hiding when switching to a modal/owned dialog of this app.
                 const HWND next=reinterpret_cast<HWND>(lParam);
-                if (!next || (next!=hwnd && GetAncestor(next,GA_ROOTOWNER)!=hwnd))
-                    hideWindowToTray();
+                bool belongsToApp=false;
+                for (HWND owner=next;owner;owner=GetWindow(owner,GW_OWNER)) {
+                    if (owner==hwnd) { belongsToApp=true; break; }
+                }
+                if (!belongsToApp) hideWindowToTray();
             }
             break;
         case WM_CLOSE:
