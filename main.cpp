@@ -1111,7 +1111,7 @@ private:
     SIZE requiredWindowSizeForWidth(int outerWidth) const {
         const SIZE frame=frameThickness();
         const auto needed=minimumContentForWidth(std::max(1,outerWidth-static_cast<int>(frame.cx)));
-        return SIZE{needed.clientWidth+frame.cx,needed.clientHeight+frame.cy};
+        return SIZE{needed.clientWidth+frame.cx,needed.clientHeight+frame.cy+px(30)};
     }
     bool ensureWindowFitsContents() {
         if (!window_ || IsIconic(window_) || IsZoomed(window_)) return false;
@@ -1497,6 +1497,12 @@ private:
             drawHardware(mem); RestoreDC(mem,saved);
         }
         if (composedTransition_) drawTransitionControls(mem);
+        // Borderless footer painted on the page background: no divider.
+        // The minimum window height reserves a 30-DIP strip for this label.
+        RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
+            std::max(px(12),client.right-px(12)),client.bottom};
+        drawTextAt(mem,L"NightLight v1.0",statusRect,smallFont_,p.muted,
+            DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         SetViewportOrgEx(mem,0,0,nullptr);
         BitBlt(hdc,0,0,client.right,client.bottom,mem,0,0,SRCCOPY);
     }
