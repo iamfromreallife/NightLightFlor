@@ -2047,6 +2047,21 @@ private:
             SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         }
     }
+    bool cursorIsOverTrayIcon() const {
+        // During a tray click Explorer can take foreground activation BEFORE
+        // Windows delivers WM_TRAY_ICON. Do not treat this as an outside click.
+        // Use the Shell's actual icon rectangle, including overflow placement
+        // and non-primary monitors, rather than approximating the taskbar.
+        if (!trayReady_ || !window_) return false;
+        NOTIFYICONIDENTIFIER icon{};
+        icon.cbSize=sizeof(icon);
+        icon.hWnd=window_;
+        icon.uID=TRAY_ID;
+        RECT bounds{};
+        if (FAILED(Shell_NotifyIconGetRect(&icon,&bounds))) return false;
+        POINT cursor{};
+        return GetCursorPos(&cursor) && PtInRect(&bounds,cursor)!=FALSE;
+    }
     void toggleTrayWindow() {
         // Minimized windows are not displayed, so a click should restore them.
         if (IsWindowVisible(window_) && !IsIconic(window_)) {
@@ -2240,7 +2255,11 @@ private:
                 for (HWND owner=next;owner;owner=GetWindow(owner,GW_OWNER)) {
                     if (owner==hwnd) { belongsToApp=true; break; }
                 }
-                if (!belongsToApp) hideWindowToTray();
+                // Clicking our own notification icon must be handled by
+                // WM_TRAY_ICON, which toggles the window once. Otherwise this
+                // deactivation hides it first and the same click reopens it.
+                if (!belongsToApp && !cursorIsOverTrayIcon())
+                    hideWindowToTray();
             }
             break;
         case WM_CLOSE:
