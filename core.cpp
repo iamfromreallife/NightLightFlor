@@ -616,37 +616,80 @@ void Model::readProfile(Monitor& m) const {
         profile.get("kelvin").integer(profileDefaultKelvin(root_)), 1000, 6500);
     m.alias = fromUtf8(profile.get("custom_name").str());
 }
-bool Model::refreshMonitors() {
+static bool sameDisplaySnapshot(const std::vector<Monitor>& a,
+                                const std::vector<Monitor>& b) {
+    if (a.size()!=b.size()) return false;
+    for (size_t i=0;i<a.size();++i)
+        if (a[i].device!=b[i].device ||
+            a[i].physicalId!=b[i].physicalId ||
+            a[i].windowsName!=b[i].windowsName ||
+            a[i].primary!=b[i].primary) return false;
+    return true;
+}
+bool Model::refreshMonitors(bool afterWake,bool* stable) {
+    if (stable) *stable=false;
+    const auto physical=queryPhysicalDisplayTargets();
     EnumerateContext context;
-    EnumDisplayMonitors(nullptr, nullptr, enumerateMonitors,
-                        reinterpret_cast<LPARAM>(&context));
-    auto& entries = context.entries;
+    context.targets=&physical;
+    if (!EnumDisplayMonitors(nullptr,nullptr,enumerateMonitors,
+                             reinterpret_cast<LPARAM>(&context)) ||
+        context.entries.empty()) return false;
+    auto& entries=context.entries;
     std::vector<std::wstring> order;
-    if(auto saved=std::get_if<portable::Json::Array>(&root_.get("screen").get("monitor_order").value))
+    if (auto saved=std::get_if<portable::Json::Array>(
+            &root_.get("screen").get("monitor_order").value))
         for(const auto& value:*saved)order.push_back(fromUtf8(value.str()));
+    auto orderIndex=[&](const Monitor& monitor) {
+        auto pos=std::find(order.begin(),order.end(),monitorProfileKey(monitor));
+        if(pos==order.end())
+            pos=std::find(order.begin(),order.end(),monitor.device);
+        return static_cast<size_t>(pos-order.begin());
+    };
     std::sort(entries.begin(),entries.end(),[&](const Monitor& a,const Monitor& b) {
-        const auto ai=std::find(order.begin(),order.end(),a.device),bi=std::find(order.begin(),order.end(),b.device);
-        if(ai!=bi)return ai<bi;
+        const auto ai=orderIndex(a),bi=orderIndex(b);
+        if (ai!=bi) return ai<bi;
         return a.device<b.device;
     });
-    bool changed = entries.size() != monitors_.size();
-    if (!changed) {
-        for (size_t i = 0; i < entries.size(); ++i) {
-            if (entries[i].device != monitors_[i].device ||
-                entries[i].windowsName != monitors_[i].windowsName ||
-                entries[i].primary != monitors_[i].primary) {
-                changed = true; break;
-            }
+    if (afterWake) {
+        // QueryDisplayConfig can report still-active-but-unavailable targets.
+        // Never replace live monitors with such a partial/suspect snapshot.
+        if (!physical.complete || !context.complete ||
+            !wakeTopologyIsUsable(monitors_,entries)) {
+            wakeCandidate_.clear();
+            wakeConsistentSamples_=0;
+            return false;
+        }
+        if (sameDisplaySnapshot(wakeCandidate_,entries))
+            ++wakeConsistentSamples_;
+        else {
+            wakeCandidate_=entries;
+            wakeConsistentSamples_=1;
+        }
+        // Two identical samples, on distinct timer ticks, are required.
+        if (wakeConsistentSamples_<2) return false;
+        if (stable) *stable=true;
+    } else {
+        wakeCandidate_.clear();
+        wakeConsistentSamples_=0;
+    }
+    if (sameDisplaySnapshot(monitors_,entries)) return false;
+    for(auto& mon:entries) {
+        const auto old=std::find_if(monitors_.begin(),monitors_.end(),
+            [&](const Monitor& previous) {
+                return samePhysicalMonitor(previous,mon);
+            });
+        if (old==monitors_.end()) readProfile(mon);
+        else {
+            mon.kelvin=old->kelvin;
+            mon.enabled=old->enabled;
+            mon.alias=old->alias;
         }
     }
-    if (!changed) return false;
-    for (auto& mon : entries) {
-        const auto previous=std::find_if(monitors_.begin(),monitors_.end(),[&](const Monitor& old){return old.device==mon.device;});
-        if (previous==monitors_.end()) readProfile(mon);
-        else { mon.kelvin=previous->kelvin; mon.enabled=previous->enabled; mon.alias=previous->alias; }
-    }
-    monitors_ = std::move(entries);
+    monitors_=std::move(entries);
     applyAll();
+    // A successful physical mapping is a safe opportunity to migrate old
+    // DISPLAYx config records, without destroying disconnected profiles.
+    if (physical.complete && context.complete) save();
     return true;
 }
 bool Model::moveMonitor(size_t from,size_t to) {
