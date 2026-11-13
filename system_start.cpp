@@ -231,18 +231,16 @@ bool hasRunningAgent(DWORD sessionId) {
     PROCESSENTRY32W entry{sizeof(entry)};
     bool found=false;
     if (Process32FirstW(snapshot,&entry)) do {
+        // A user may still be running the portable edition. Don't spawn a
+        // duplicate agent every 15s simply because its path differs from
+        // the protected Program Files copy.
         if (_wcsicmp(entry.szExeFile,L"NightLight.exe")!=0) continue;
         DWORD processSession=0;
-        if (!ProcessIdToSessionId(entry.th32ProcessID,&processSession) ||
-            processSession!=sessionId) continue;
-        HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,entry.th32ProcessID);
-        if (!process) continue;
-        wchar_t path[32768]{};
-        DWORD length=32768;
-        if (QueryFullProcessImageNameW(process,0,path,&length) &&
-            _wcsicmp(path,installedPath().c_str())==0) found=true;
-        CloseHandle(process);
-        if (found) break;
+        if (ProcessIdToSessionId(entry.th32ProcessID,&processSession) &&
+            processSession==sessionId) {
+            found=true;
+            break;
+        }
     } while (Process32NextW(snapshot,&entry));
     CloseHandle(snapshot);
     return found;
