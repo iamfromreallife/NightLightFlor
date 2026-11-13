@@ -50,7 +50,6 @@ constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
-constexpr UINT WM_SHOW_EXISTING = WM_APP + 38;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
 constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
 constexpr UINT TIMER_DISPLAYS = 10;
@@ -2391,7 +2390,6 @@ private:
             if (toggle) handleTrayActivation();
             return 0;
         }
-        case WM_SHOW_EXISTING: openWindow(); return 0;
         case nightlight::WM_DDC_COMPLETE:
             syncHardware(); repaint(); return 0;
         case WM_HSCROLL: {
@@ -2605,8 +2603,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE, PWSTR, int show) {
     HANDLE mutex=CreateMutexW(nullptr,TRUE,L"NightLight_SingleInstance_Mutex");
     if (!mutex) return 1;
     if (GetLastError()==ERROR_ALREADY_EXISTS) {
-        HWND existing=FindWindowW(CLASS_NAME,nullptr);
-        if (existing) PostMessageW(existing,WM_SHOW_EXISTING,0,0);
+        // Scheduled Tasks, autorun, and a second manual launch must not
+        // bring the existing window to the foreground. The tray icon is
+        // the sole control for showing and hiding the main window.
         CloseHandle(mutex);
         return 0;
     }
