@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <dwmapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
@@ -2173,12 +2174,31 @@ private:
         append(menu,MF_STRING,ID_TRAY_EXIT,tr(L"Exit",L"Sair").c_str(),nightlight::MenuIcon::Exit);
         return menu;
     }
+    void prepareManagedProfile() {
+        // The portable build stores config.json alongside the executable,
+        // while the protected Program Files copy uses each user's AppData.
+        // Copy the current user's preferences once, without overwriting an
+        // existing managed profile or touching any other user's files.
+        PWSTR appData=nullptr;
+        if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData,0,nullptr,
+                                        &appData)) || !appData) return;
+        const std::wstring dir=std::wstring(appData)+L"\\NightLight";
+        const std::wstring target=dir+L"\\config.json";
+        if (_wcsicmp(model_.configPath().c_str(),target.c_str())!=0) {
+            if (CreateDirectoryW(dir.c_str(),nullptr) ||
+                GetLastError()==ERROR_ALREADY_EXISTS) {
+                CopyFileW(model_.configPath().c_str(),target.c_str(),TRUE);
+            }
+        }
+        CoTaskMemFree(appData);
+    }
     void changeSystemStartup(bool service) {
         if (systemHelper_) return;
         const bool currentlyInstalled=service?
             nightlight::system_start::serviceInstalled():
             nightlight::system_start::taskInstalled();
         const bool enable=!currentlyInstalled;
+        if (enable) prepareManagedProfile();
         if (enable && service) {
             if (MessageBoxW(window_,tr(
                 L"This installs an automatic LocalSystem service at boot, which starts a normal user-mode NightLight agent when a user signs in. It does NOT control the protected Windows sign-in screen or UAC Secure Desktop. The executable is copied to the protected Program Files folder. Continue?",
