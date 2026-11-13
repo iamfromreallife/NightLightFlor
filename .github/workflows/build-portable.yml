@@ -86,9 +86,11 @@ jobs:
               throw 'Task remains after disabling the option'
             }
             Invoke-Setup '--install-service'
+            Start-Sleep -Seconds 2
             $service = Get-CimInstance Win32_Service -Filter "Name='NightLightBackground'"
-            if (-not $service -or $service.StartMode -ne 'Auto') {
-              throw 'Automatic boot service was not registered'
+            if (-not $service -or $service.StartMode -ne 'Auto' -or
+                $service.State -ne 'Running') {
+              throw 'Boot service did not remain running after installation'
             }
             Invoke-Setup '--remove-service'
           } finally {
