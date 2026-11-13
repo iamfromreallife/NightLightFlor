@@ -866,13 +866,14 @@ void Model::stopGamma() {
 bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
     // Capture the pre-NightLight ramp on this (infrequent) monitor-discovery
     // path. Never read or mutate originals_ from the gamma worker.
-    if (originals_.find(mon.device) == originals_.end()) {
+    const auto persistent=monitorProfileKey(mon);
+    if (originals_.find(persistent) == originals_.end()) {
         HDC dc = CreateDCW(L"DISPLAY", mon.device.c_str(), nullptr, nullptr);
         if (!dc) { mon.gammaStatus = 0; return false; }
-        adoptOriginal(mon.device, dc);
+        adoptOriginal(persistent, dc);
         DeleteDC(dc);
     }
-    const auto original = originals_.find(mon.device);
+    const auto original = originals_.find(persistent);
     const Ramp* baseline = original != originals_.end() ? &original->second : nullptr;
     const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled, baseline);
     mon.gammaStatus = -1;  // Worker publishes real hardware result later.
@@ -928,10 +929,15 @@ void Model::updatePreferences(const Preferences& updated) {
 void Model::restoreOriginals() {
     // No queued/active gamma request may overwrite a restored calibration.
     stopGamma();
-    for (const auto& item : originals_) {
-        HDC dc = CreateDCW(L"DISPLAY", item.first.c_str(), nullptr, nullptr);
+    // The GDI source name can point to a different physical display after
+    // wake. Restore original gamma only to the currently matched physical
+    // target, never to whichever panel received an old DISPLAYx number.
+    for (const auto& mon:monitors_) {
+        const auto original=originals_.find(monitorProfileKey(mon));
+        if (original==originals_.end()) continue;
+        HDC dc=CreateDCW(L"DISPLAY",mon.device.c_str(),nullptr,nullptr);
         if (dc) {
-            SetDeviceGammaRamp(dc, const_cast<Ramp*>(&item.second));
+            SetDeviceGammaRamp(dc,const_cast<Ramp*>(&original->second));
             DeleteDC(dc);
         }
     }
