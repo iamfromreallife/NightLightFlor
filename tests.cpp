@@ -588,12 +588,6 @@ int main() {
               !swapped.shouldToggle(Click::Select,5001) &&
               !swapped.shouldToggle(Click::MouseUp,5015),
             "Reordered Shell selection and release stay deduplicated");
-        check(resolveStartup(L"normal",L"",true)==L"normal","Normal startup");
-        check(resolveStartup(L"minimized",L"",true)==L"minimized","Minimized startup");
-        check(resolveStartup(L"tray",L"",true)==L"tray","Tray startup");
-        check(resolveStartup(L"tray",L"",false)==L"normal","No invisible app without tray");
-        check(resolveStartup(L"tray",L"--normal",true)==L"normal","CLI override");
-
         wchar_t tmp[MAX_PATH]{};
         check(GetTempPathW(MAX_PATH,tmp)>0,"Temp path");
         const fs::path root=fs::path(tmp)/
@@ -614,7 +608,6 @@ int main() {
             check(model.load(),"Load local portable config");
             check(model.preferences().locale==L"pt-PT","PT language");
             check(model.preferences().theme==L"light","Light theme");
-            check(model.preferences().startup==L"tray","Tray mode");
             check(!model.windowPosition().has_value(),"Legacy config without a window position keeps default placement");
             check(!model.windowSize().has_value(),"Legacy config without dimensions keeps automatic first-run sizing");
             check(model.rememberWindowPosition(-1900,235),"Remember position on monitor left of primary");
@@ -631,7 +624,6 @@ int main() {
             check(!model.rememberWindowPosition(-1900,235),"Unchanged window location requires no new write");
             Preferences updated=model.preferences();
             updated.locale=L"en-US";
-            updated.startup=L"minimized";
             updated.theme=L"system";
             model.updatePreferences(updated);
             check(model.preferences().theme==L"system",
@@ -650,7 +642,6 @@ int main() {
             Model model(root);
             check(model.load(),"Reload from same folder");
             check(model.preferences().locale==L"en-US","Saved language");
-            check(model.preferences().startup==L"minimized","Saved startup mode");
             check(model.preferences().theme==L"system",
                 "System-following theme round-trips through portable config");
             const auto restoredWindow=model.windowPosition();
@@ -676,6 +667,9 @@ int main() {
             auto saved=Json::parse(content);
             check(saved.get("general").get("appearance").str()=="system",
                 "Portable config retains system theme mode");
+            check(std::holds_alternative<std::nullptr_t>(
+                saved.get("general").get("startup_mode").value),
+                "Obsolete startup preferences are removed from saved config");
             check(saved.get("general").get("window_position").get("x").integer()==-1900 &&
                 saved.get("general").get("window_position").get("y").integer()==235 &&
                 saved.get("general").get("window_position").get("width").integer()==200 &&
