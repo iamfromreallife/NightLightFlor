@@ -2227,14 +2227,14 @@ private:
     }
     void toggleUacSameDesktop() {
         if (uacHelper_) return;
-        const bool enable=!(!uacUsesSecureDesktop()); // true if currently secure
+        const bool enable=uacUsesSecureDesktop(); // enable same-desktop prompts
         if (enable) {
             const int confirmation=MessageBoxW(window_,tr(
-                L"To keep NightLight's warm colours visible during UAC prompts, Windows must show UAC prompts on the regular desktop instead of the protected Secure Desktop.\\n\\n"
-                L"This is a SYSTEM-WIDE security reduction, not just a NightLight setting: other applications may be able to interfere with elevation prompts. UAC is NOT turned off.\\n\\n"
+                L"To keep NightLight's warm colours visible during UAC prompts, Windows must show UAC prompts on the regular desktop instead of the protected Secure Desktop.\n\n"
+                L"This is a SYSTEM-WIDE security reduction, not just a NightLight setting: other applications may be able to interfere with elevation prompts. UAC is NOT turned off.\n\n"
                 L"Do you want to change this Windows security policy?",
-                L"Para manter as cores quentes do NightLight nos pedidos UAC, o Windows terá de mostrar os pedidos no ambiente de trabalho normal, em vez do Ambiente de Trabalho Seguro.\\n\\n"
-                L"Esta alteração reduz a segurança de TODO O SISTEMA, não apenas do NightLight: outras aplicações poderão interferir com os pedidos de elevação. O UAC NÃO será desativado.\\n\\n"
+                L"Para manter as cores quentes do NightLight nos pedidos UAC, o Windows terá de mostrar os pedidos no ambiente de trabalho normal, em vez do Ambiente de Trabalho Seguro.\n\n"
+                L"Esta alteração reduz a segurança de TODO O SISTEMA, não apenas do NightLight: outras aplicações poderão interferir com os pedidos de elevação. O UAC NÃO será desativado.\n\n"
                 L"Pretende alterar esta política de segurança do Windows?").c_str(),
                 L"NightLight - UAC",MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING);
             if (confirmation!=IDYES) return;
