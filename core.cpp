@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "display_identity.hpp"
 #include <shlobj.h>
 #include <magnification.h>
 #include <algorithm>
@@ -221,12 +222,14 @@ bool atomicWrite(const fs::path& path, const std::string& data) {
 }
 struct EnumerateContext {
     std::vector<Monitor> entries;
+    const DisplayTargetSnapshot* targets=nullptr;
+    bool complete=true;
 };
 BOOL CALLBACK enumerateMonitors(HMONITOR hMon, HDC, LPRECT, LPARAM user) {
     auto* context = reinterpret_cast<EnumerateContext*>(user);
     MONITORINFOEXW info{};
     info.cbSize = sizeof(info);
-    if (!GetMonitorInfoW(hMon, &info)) return TRUE;
+    if (!GetMonitorInfoW(hMon, &info)) { context->complete=false; return FALSE; }
     Monitor monitor;
     monitor.device = info.szDevice;
     monitor.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
@@ -238,6 +241,20 @@ BOOL CALLBACK enumerateMonitors(HMONITOR hMon, HDC, LPRECT, LPARAM user) {
         if (dd.DeviceString[0]) {
             monitor.windowsName = dd.DeviceString;
             if (dd.StateFlags & DISPLAY_DEVICE_ACTIVE) break;
+        }
+    }
+    if (context->targets) {
+        const auto found=context->targets->bySource.find(
+            normalizedDisplayId(monitor.device));
+        if (found!=context->targets->bySource.end() &&
+            found->second.size()==1) {
+            monitor.physicalId=found->second.front().physicalId;
+            if (!found->second.front().friendlyName.empty())
+                monitor.windowsName=found->second.front().friendlyName;
+        } else {
+            // Clone/mirror sources and unfinished target enumeration cannot
+            // be safely attached to one unique physical monitor profile.
+            context->complete=false;
         }
     }
     context->entries.push_back(std::move(monitor));
@@ -492,18 +509,23 @@ bool Model::load() {
     migrateAutorunEntry();
     return true;
 }
+std::wstring Model::profileKeyForDevice(const std::wstring& device) const {
+    const auto found=std::find_if(monitors_.begin(),monitors_.end(),
+        [&](const Monitor& m){return m.device==device;});
+    return found==monitors_.end()?device:monitorProfileKey(*found);
+}
 bool Model::hasHardwarePercent(const std::wstring& device,bool contrast) const {
-    return root_.get("screen").get("monitor_profiles").get(toUtf8(device))
+    return root_.get("screen").get("monitor_profiles").get(toUtf8(profileKeyForDevice(device)))
         .get(contrast?"ddc_contrast":"ddc_brightness").integer(-1)>=0;
 }
 int Model::hardwarePercent(const std::wstring& device,bool contrast) const {
-    return std::clamp(root_.get("screen").get("monitor_profiles").get(toUtf8(device))
+    return std::clamp(root_.get("screen").get("monitor_profiles").get(toUtf8(profileKeyForDevice(device)))
         .get(contrast?"ddc_contrast":"ddc_brightness").integer(50),0,100);
 }
 bool Model::rememberHardwarePercent(const std::wstring& device,bool contrast,int percent) {
     if (!loaded_ || device.empty()) return false;
     percent=std::clamp(percent,0,100);
-    auto& profile=root_["screen"]["monitor_profiles"][toUtf8(device)];
+    auto& profile=root_["screen"]["monitor_profiles"][toUtf8(profileKeyForDevice(device))];
     const char* key=contrast?"ddc_contrast":"ddc_brightness";
     if (profile.get(key).integer(-1)==percent) return false;
     profile[key]=percent;
@@ -530,7 +552,7 @@ bool Model::save() {
     root_["general"]["appearance"] = toUtf8(preferences_.theme);
     root_["general"]["close_by_clicking_outside"] = preferences_.closeByClickingOutside;
     for (const auto& mon : monitors_) {
-        auto& profile = root_["screen"]["monitor_profiles"][toUtf8(mon.device)];
+        auto& profile = root_["screen"]["monitor_profiles"][toUtf8(monitorProfileKey(mon))];
         profile["kelvin"] = mon.kelvin;
         profile["enabled"] = mon.enabled;
         profile["custom_name"] = toUtf8(mon.alias);
@@ -583,7 +605,12 @@ bool Model::save() {
     return true;
 }
 void Model::readProfile(Monitor& m) const {
-    const auto& profile = root_.get("screen").get("monitor_profiles").get(toUtf8(m.device));
+    const auto& profiles=root_.get("screen").get("monitor_profiles");
+    const auto& physical=profiles.get(toUtf8(monitorProfileKey(m)));
+    // Migrate existing DISPLAYx profiles once; physical IDs take priority
+    // from then on, including after Windows renumbers outputs.
+    const auto& profile=physical.isObject()?physical:
+        profiles.get(toUtf8(m.device));
     m.enabled = profile.get("enabled").boolean(true);
     m.kelvin = std::clamp(
         profile.get("kelvin").integer(profileDefaultKelvin(root_)), 1000, 6500);
@@ -629,7 +656,7 @@ bool Model::moveMonitor(size_t from,size_t to) {
     monitors_.insert(monitors_.begin()+to,std::move(moved));
     auto order=portable::Json::array();
     auto& values=std::get<portable::Json::Array>(order.value);
-    for(const auto& monitor:monitors_)values.emplace_back(toUtf8(monitor.device));
+    for(const auto& monitor:monitors_)values.emplace_back(toUtf8(monitorProfileKey(monitor)));
     if(auto saved=std::get_if<portable::Json::Array>(&root_.get("screen").get("monitor_order").value))
         for(const auto& value:*saved)
             if(std::none_of(values.begin(),values.end(),[&](const portable::Json& item){return item.str()==value.str();}))values.push_back(value);
@@ -816,7 +843,7 @@ void Model::applyAll(GammaRefresh refresh) {
 bool Model::persistProfile(size_t index) {
     if (index >= monitors_.size() || !loaded_) return false;
     const auto& mon = monitors_[index];
-    auto& profile = root_["screen"]["monitor_profiles"][toUtf8(mon.device)];
+    auto& profile = root_["screen"]["monitor_profiles"][toUtf8(monitorProfileKey(mon))];
     profile["enabled"] = mon.enabled;
     profile["kelvin"] = mon.kelvin;
     profile["custom_name"] = toUtf8(mon.alias);
