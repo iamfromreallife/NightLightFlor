@@ -2584,16 +2584,81 @@ private:
             }
             if (wParam==TIMER_DISPLAYS) {
                 KillTimer(hwnd,TIMER_DISPLAYS);
-                if (!displayAwake_) return 0;
-                if (model_.refreshMonitors()) refreshTabs();
-                model_.applyAll(nightlight::GammaRefresh::Restore);
-                refreshHardware(); // Read physical settings after reconnect/wake; never overwrite them.
-                // Display drivers and DDC transports can become ready several
-                // seconds apart. Retry beyond the first successful enumeration.
-                const UINT delays[]{1000,2500,5000,10000};
-                if (recoveryAttempt_<4) SetTimer(hwnd,TIMER_DISPLAYS,delays[recoveryAttempt_++],nullptr);
-                updateTrayTooltip();
-                repaint();
+                if (!displayAwake_ || !displayRecoveryActive_) return 0;
+                if (screenOffGuard_.guarding()) {
+                    SetTimer(hwnd,TIMER_DISPLAYS,1000,nullptr);
+                    return 0;
+                }
+                // No monitor profile, gamma ramp, or physical DDC command may
+                // be reassigned from one DISPLAYx to another until both CCD
+                // and GDI report the same complete topology on two samples.
+                bool stable=false;
+                const auto selectedKey=hasMonitor()?
+                    nightlight::monitorProfileKey(*selectedMonitor()):L"";
+                const bool changed=model_.refreshMonitors(true,&stable);
+                if (stable) {
+                    if (changed) {
+                        const auto& monitors=model_.monitors();
+                        const auto found=std::find_if(monitors.begin(),monitors.end(),
+                            [&](const Monitor& mon) {
+                                return nightlight::monitorProfileKey(mon)==selectedKey;
+                            });
+                        selected_=found==monitors.end()?0:
+                            static_cast<size_t>(found-monitors.begin());
+                        refreshTabs();
+                    }
+                    // Force gamma reapplication because the driver may have
+                    // reset its LUT during sleep even without topology changes.
+                    model_.applyAll(nightlight::GammaRefresh::Restore);
+                    if (!ddcRestoreIssued_) {
+                        ensureHardwareRows();
+                        for (const auto& row:hardwareRows_) {
+                            const auto brightness=model_.hardwarePercent(row.device,false);
+                            const auto contrast=model_.hardwarePercent(row.device,true);
+                            const bool savedBrightness=model_.hasHardwarePercent(row.device,false);
+                            const bool savedContrast=model_.hasHardwarePercent(row.device,true);
+                            ddc_.seed(row.device,brightness,contrast,
+                                      savedBrightness,savedContrast);
+                            if (restoreDdcAfterWake_)
+                                ddc_.restore(row.device,brightness,contrast,
+                                             savedBrightness,savedContrast);
+                        }
+                        ddcRestoreIssued_=true;
+                        refreshHardware();
+                    } else if (restoreDdcAfterWake_) {
+                        // A monitor's DDC transport may wake seconds later
+                        // than its video path. Retry ONLY failed writes,
+                        // leaving successfully restored screens untouched.
+                        for (const auto& row:hardwareRows_) {
+                            const auto current=ddc_.state(row.device);
+                            const bool retryBrightness=current.brightness.failed &&
+                                model_.hasHardwarePercent(row.device,false);
+                            const bool retryContrast=current.contrast.failed &&
+                                model_.hasHardwarePercent(row.device,true);
+                            if (retryBrightness || retryContrast)
+                                ddc_.restore(row.device,
+                                    model_.hardwarePercent(row.device,false),
+                                    model_.hardwarePercent(row.device,true),
+                                    retryBrightness,retryContrast);
+                        }
+                    }
+                    updateTrayTooltip();
+                    repaint();
+                }
+                // Continue checking for delayed driver/physical-monitor wake.
+                // If topology remains incomplete, keep the original mapping
+                // rather than attaching another screen's saved profile.
+                constexpr UINT delays[]{750,1250,2000,3500,5500,8000,12000};
+                if (recoveryAttempt_<std::size(delays)) {
+                    SetTimer(hwnd,TIMER_DISPLAYS,delays[recoveryAttempt_++],nullptr);
+                } else if (!stable) {
+                    SetTimer(hwnd,TIMER_DISPLAYS,12000,nullptr);
+                } else {
+                    displayRecoveryActive_=false;
+                    restoreDdcAfterWake_=false;
+                    ddcRestoreIssued_=false;
+                    syncHardware();
+                }
             }
             return 0;
         case WM_QUERYENDSESSION:
