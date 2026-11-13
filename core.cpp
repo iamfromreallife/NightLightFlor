@@ -9,6 +9,7 @@
 #include <iterator>
 #include <climits>
 #include <stdexcept>
+#include <set>
 #include <utility>
 
 namespace nightlight {
@@ -687,9 +688,27 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
     }
     monitors_=std::move(entries);
     applyAll();
-    // A successful physical mapping is a safe opportunity to migrate old
-    // DISPLAYx config records, without destroying disconnected profiles.
-    if (physical.complete && context.complete) save();
+    // Migrate existing user-defined tab order to physical target keys.
+    // Otherwise a legacy order stored as DISPLAY1/DISPLAY2 would still
+    // reverse the visible tabs after Windows swaps those source numbers.
+    if (physical.complete && context.complete) {
+        if (auto saved=std::get_if<portable::Json::Array>(
+                &root_.get("screen").get("monitor_order").value)) {
+            auto migrated=portable::Json::array();
+            auto& values=std::get<portable::Json::Array>(migrated.value);
+            std::set<std::string> seen;
+            for (const auto& item:*saved) {
+                const auto original=fromUtf8(item.str());
+                const auto found=std::find_if(monitors_.begin(),monitors_.end(),
+                    [&](const Monitor& mon){return mon.device==original;});
+                const auto key=found==monitors_.end()?item.str():
+                    toUtf8(monitorProfileKey(*found));
+                if (seen.insert(key).second) values.emplace_back(key);
+            }
+            root_["screen"]["monitor_order"]=std::move(migrated);
+        }
+        save();
+    }
     return true;
 }
 bool Model::moveMonitor(size_t from,size_t to) {
