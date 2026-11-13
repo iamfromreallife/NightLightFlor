@@ -192,6 +192,14 @@ int main() {
                   "Recovery must never write an unknown feature's placeholder percentage");
             check(ddc.state(L"NightLight-test-second-display").brightness.percent==81,
                   "Recovery must never retarget another monitor");
+            ddc.invalidateTopology();
+            check(!ddc.state(L"NightLight-test-no-such-display").brightness.hasValue &&
+                  !ddc.state(L"NightLight-test-second-display").brightness.hasValue,
+                  "A topology change invalidates every cached GDI-targeted DDC reading");
+            ddc.seed(L"NightLight-test-no-such-display",23,67,true,true);
+            check(ddc.state(L"NightLight-test-no-such-display").brightness.percent==23 &&
+                  ddc.state(L"NightLight-test-no-such-display").contrast.percent==67,
+                  "Per-screen last applied values can be reseeded after a wake");
             ddc.stop();
             check(!ddc.set(L"missing",DdcFeature::Contrast,40),"DDC refuses writes after shutdown");
         }
