@@ -22,7 +22,11 @@ struct Ramp {
 };
 
 struct Monitor {
+    // GDI source (\\.\DISPLAYx) can be reassigned after display sleep.
     std::wstring device;
+    // Device interface path of the physical display target (stable across
+    // source-number changes); empty on drivers that cannot provide it.
+    std::wstring physicalId;
     std::wstring windowsName;
     std::wstring alias;
     bool primary = false;
@@ -32,6 +36,13 @@ struct Monitor {
     int gammaStatus = -1;
     std::wstring displayName() const { return alias.empty() ? windowsName : alias; }
 };
+
+// Use the physical target ID for profile persistence and wake remapping.
+// Leave GDI identifiers solely for CreateDC and DDC/WMI I/O.
+std::wstring monitorProfileKey(const Monitor& monitor);
+bool samePhysicalMonitor(const Monitor& a,const Monitor& b);
+bool wakeTopologyIsUsable(const std::vector<Monitor>& previous,
+                          const std::vector<Monitor>& detected);
 
 struct Preferences {
     std::wstring locale = L"en-US";
@@ -185,7 +196,7 @@ public:
 
     bool load();
     bool save();
-    bool refreshMonitors();
+    bool refreshMonitors(bool afterWake=false,bool* stable=nullptr);
     bool moveMonitor(size_t from,size_t to);
     void applyAll(GammaRefresh refresh=GammaRefresh::Normal);
     void setStatusWindow(HWND window);
@@ -214,6 +225,7 @@ public:
 private:
     bool persistProfile(size_t index);
     void readProfile(Monitor& monitor) const;
+    std::wstring profileKeyForDevice(const std::wstring& device) const;
     bool applyDisplay(Monitor& monitor,GammaRefresh refresh);
     void adoptOriginal(const std::wstring& device, HDC dc);
     void queueGamma(const std::wstring& device, const Ramp& ramp, int matrixKelvin, const Ramp& fallback,GammaRefresh refresh);
@@ -244,6 +256,8 @@ private:
     std::optional<POINT> windowPosition_;
     std::optional<SIZE> windowSize_;
     std::vector<Monitor> monitors_;
+    std::vector<Monitor> wakeCandidate_;
+    unsigned wakeConsistentSamples_=0;
     std::map<std::wstring, Ramp> originals_;
     std::string savedDocument_;
     FILETIME savedStamp_{};
