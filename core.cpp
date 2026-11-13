@@ -70,16 +70,6 @@ fs::path executableDirectory() {
         throw std::runtime_error("Cannot discover executable folder");
     return fs::path(std::wstring(path.data(), written)).parent_path();
 }
-std::wstring resolveStartup(const std::wstring& pref,
-    const std::wstring& argument, bool trayAvailable) {
-    std::wstring mode = (pref == L"tray" || pref == L"minimized") ? pref : L"normal";
-    if (argument == L"--tray") mode = L"tray";
-    else if (argument == L"--minimized") mode = L"minimized";
-    else if (argument == L"--normal") mode = L"normal";
-    if (mode == L"tray" && !trayAvailable) return L"normal";
-    return mode;
-}
-
 ColorGains kelvinGains(int kelvin) {
     const double k = std::clamp(kelvin, 1000, 6500);
     if (k == 6500) return {1, 1, 1};
@@ -481,9 +471,6 @@ bool Model::load() {
     const std::string appearance=general.get("appearance").str("system");
     preferences_.theme=appearance=="light"?L"light":
         appearance=="dark"?L"dark":L"system";
-    const std::string startup = general.get("startup_mode").str("normal");
-    preferences_.startup = (startup == "minimized" || startup == "tray")
-        ? fromUtf8(startup) : L"normal";
     preferences_.closeByClickingOutside = general.get("close_by_clicking_outside").boolean(true);
     const auto& position=general.get("window_position");
     if (position.isObject()) {
@@ -541,7 +528,6 @@ bool Model::save() {
     if (!loaded_) return false;
     root_["general"]["language"] = toUtf8(preferences_.locale);
     root_["general"]["appearance"] = toUtf8(preferences_.theme);
-    root_["general"]["startup_mode"] = toUtf8(preferences_.startup);
     root_["general"]["close_by_clicking_outside"] = preferences_.closeByClickingOutside;
     for (const auto& mon : monitors_) {
         auto& profile = root_["screen"]["monitor_profiles"][toUtf8(mon.device)];
@@ -554,7 +540,7 @@ bool Model::save() {
     auto clean=portable::Json::object();
     clean["screen"]["kelvin"]=std::clamp(root_.get("screen").get("kelvin").integer(5000),1000,6500);
     clean["general"]=portable::Json::object();
-    for(const char* key:{"language","appearance","startup_mode","close_by_clicking_outside"})
+    for(const char* key:{"language","appearance","close_by_clicking_outside"})
         clean["general"][key]=root_.get("general").get(key);
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
@@ -866,8 +852,6 @@ void Model::updatePreferences(const Preferences& updated) {
     preferences_.locale = updated.locale == L"pt-PT" ? L"pt-PT" : L"en-US";
     preferences_.theme = updated.theme==L"light"?L"light":
         updated.theme==L"dark"?L"dark":L"system";
-    preferences_.startup = (updated.startup == L"tray" ||
-        updated.startup == L"minimized") ? updated.startup : L"normal";
     preferences_.closeByClickingOutside = updated.closeByClickingOutside;
     save();
 }
@@ -885,8 +869,8 @@ void Model::restoreOriginals() {
 }
 void Model::migrateAutorunEntry() const {
     // Older NightLight builds created a Run key with a hardcoded
-    // --minimized argument. Keep the user's existing autostart preference,
-    // but let the new saved startup_mode determine window behavior.
+    // --minimized/--tray arguments. Strip legacy mode flags from an existing
+    // autorun entry; fresh launches now always start in the tray.
     HKEY key = nullptr;
     constexpr wchar_t subkey[] =
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -900,7 +884,8 @@ void Model::migrateAutorunEntry() const {
         if (RegQueryValueExW(key, L"NightLight", nullptr, &type,
             reinterpret_cast<LPBYTE>(old.data()), &bytes) == ERROR_SUCCESS) {
             const bool legacy = old.find(L"--minimized") != std::wstring::npos ||
-                                old.find(L"--tray") != std::wstring::npos;
+                                old.find(L"--tray") != std::wstring::npos ||
+                                old.find(L"--normal") != std::wstring::npos;
             if (legacy && old.find(L"NightLight") != std::wstring::npos) {
                 const std::wstring exe = (directory_ / L"NightLight.exe").wstring();
                 if (fs::exists(exe)) {
