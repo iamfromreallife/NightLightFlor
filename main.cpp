@@ -458,6 +458,7 @@ private:
     HWND taskbarOwner_ = nullptr;
     struct HardwareRow {
         std::wstring device;
+        std::wstring physicalKey;
         HWND nameButton = nullptr, brightness = nullptr, contrast = nullptr;
         int top = 0;
         nightlight::Motion topMotion;
@@ -473,6 +474,9 @@ private:
     std::vector<RECT> screenDragSlots_;
     HPOWERNOTIFY displayPowerNotification_=nullptr;
     bool displayAwake_=true;
+    bool displayRecoveryActive_=false;
+    bool restoreDdcAfterWake_=false;
+    bool ddcRestoreIssued_=false;
     unsigned recoveryAttempt_=0;
     int hardwareTop_ = 0;
     int hardwareHeight_ = 186;
@@ -1522,12 +1526,16 @@ private:
     void ensureHardwareRows() {
         const auto& monitors=model_.monitors();
         bool same=hardwareRows_.size()==monitors.size();
-        for (size_t i=0;same && i<monitors.size();++i) same=hardwareRows_[i].device==monitors[i].device;
+        for (size_t i=0;same && i<monitors.size();++i)
+            same=hardwareRows_[i].device==monitors[i].device &&
+                hardwareRows_[i].physicalKey==nightlight::monitorProfileKey(monitors[i]);
         if (same) return;
         for (auto& row:hardwareRows_) { DestroyWindow(row.nameButton); DestroyWindow(row.brightness); DestroyWindow(row.contrast); }
         hardwareRows_.clear();
         for (size_t i=0;i<monitors.size();++i) {
-            HardwareRow row; row.device=monitors[i].device;
+            HardwareRow row;
+            row.device=monitors[i].device;
+            row.physicalKey=nightlight::monitorProfileKey(monitors[i]);
             row.nameButton=createButton(ID_DDC_MONITOR_BASE+static_cast<int>(i),L"");
             if (font_) SendMessageW(row.nameButton,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
             auto create=[&](int offset,const std::wstring& name) {
@@ -1561,7 +1569,8 @@ private:
         // Real DDC/CI and WMI readings, not saved profile values, set the
         // displayed brightness/contrast. Keep all slow monitor I/O off the
         // UI thread, and do not query sleeping or hidden displays.
-        if (!ddcVisible_ || !displayAwake_ || screenOffGuard_.guarding() ||
+        if (!ddcVisible_ || !displayAwake_ || displayRecoveryActive_ ||
+            screenOffGuard_.guarding() ||
             !IsWindowVisible(window_) || IsIconic(window_)) return;
         for (const auto& row:hardwareRows_) {
             if (GetCapture()==row.brightness || GetCapture()==row.contrast) continue;
@@ -1569,8 +1578,15 @@ private:
         }
     }
     void scheduleDisplayRecovery() {
-        recoveryAttempt_=0;
-        SetTimer(window_,TIMER_DISPLAYS,500,nullptr);
+        if (!displayRecoveryActive_) {
+            recoveryAttempt_=0;
+            ddcRestoreIssued_=false;
+            // A DISPLAYx identifier may now address another physical panel.
+            // Discard any in-flight DDC observations before re-detection.
+            ddc_.invalidateTopology();
+        }
+        displayRecoveryActive_=true;
+        if (displayAwake_) SetTimer(window_,TIMER_DISPLAYS,750,nullptr);
     }
     void syncHardware() {
         for (auto& row:hardwareRows_) {
@@ -1582,7 +1598,10 @@ private:
                     const int current=static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0));
                     if ((current+50)/100!=value.percent) SendMessageW(slider,TBM_SETPOS,TRUE,value.percent*100);
                 }
-                if (value.managed && !captured && model_.rememberHardwarePercent(row.device,contrast,value.percent))
+                // A display wake may temporarily report default/other-screen
+                // DDC values. Do not overwrite the saved last good targets.
+                if (!displayRecoveryActive_ && value.managed && !captured &&
+                    model_.rememberHardwarePercent(row.device,contrast,value.percent))
                     SetTimer(window_,TIMER_SAVE_DDC,400,nullptr);
                 InvalidateRect(slider,nullptr,FALSE);
             };
@@ -1853,12 +1872,16 @@ private:
     }
     void refreshConnectedDisplays() {
         finishInlineRename(true);commitDrag();endHardwareDrag();
-        const std::wstring selectedDevice=hasMonitor()?selectedMonitor()->device:L"";
+        const std::wstring selectedDevice=hasMonitor()?
+            nightlight::monitorProfileKey(*selectedMonitor()):L"";
         const bool changed=model_.refreshMonitors();
         if(changed) {
             // Keep selection tied to the physical display if discovery reorders tabs.
             const auto& monitors=model_.monitors();
-            const auto previous=std::find_if(monitors.begin(),monitors.end(),[&](const Monitor& monitor){return monitor.device==selectedDevice;});
+            const auto previous=std::find_if(monitors.begin(),monitors.end(),
+                [&](const Monitor& monitor) {
+                    return nightlight::monitorProfileKey(monitor)==selectedDevice;
+                });
             selected_=previous!=monitors.end()?static_cast<size_t>(previous-monitors.begin()):0;
             finishInlineRename(true);
         }
@@ -2479,7 +2502,12 @@ private:
             break;
         case WM_DISPLAYCHANGE:
         case WM_DEVICECHANGE:
-            if (msg==WM_DISPLAYCHANGE) { pageSurface_.reset(); for (auto& item:interactions_) item.second.surface.reset(); }
+            if (msg==WM_DISPLAYCHANGE) {
+                pageSurface_.reset();
+                for (auto& item:interactions_) item.second.surface.reset();
+                // Drivers often reset DDC/CI levels when a panel reconnects.
+                restoreDdcAfterWake_=true;
+            }
             scheduleDisplayRecovery();
             return 0;
         case WM_POWERBROADCAST:
@@ -2487,19 +2515,35 @@ private:
                 const auto* setting=reinterpret_cast<const POWERBROADCAST_SETTING*>(lParam);
                 if (IsEqualGUID(setting->PowerSetting,displayStateGuid) && setting->DataLength==sizeof(DWORD)) {
                     DWORD state=0; CopyMemory(&state,setting->Data,sizeof(state));
+                    const bool wasAwake=displayAwake_;
                     displayAwake_=state!=0;
-                    if (displayAwake_ && screenOffGuard_.guarding()) {
-                        // The guard's worker receives CONSOLE_DISPLAY_STATE,
-                        // and only it is allowed to correct a genuine wake.
-                        // Avoid DDC operations until the guard has expired.
+                    if (!displayAwake_) {
+                        if (wasAwake) {
+                            // Preserve the in-memory/saved last applied levels,
+                            // and discard I/O to the now sleeping screens.
+                            ddc_.invalidateTopology();
+                            restoreDdcAfterWake_=true;
+                        }
                         KillTimer(hwnd,TIMER_DISPLAYS);
-                    } else if (displayAwake_) scheduleDisplayRecovery();
-                    else KillTimer(hwnd,TIMER_DISPLAYS);
+                        displayRecoveryActive_=false;
+                    } else {
+                        scheduleDisplayRecovery();
+                        // The screen-off input guard may still be preventing
+                        // an accidental immediate wake. Defer recovery.
+                        if (screenOffGuard_.guarding())
+                            SetTimer(hwnd,TIMER_DISPLAYS,3500,nullptr);
+                    }
                 }
             } else if (wParam==PBT_APMRESUMEAUTOMATIC || wParam==PBT_APMRESUMESUSPEND) {
-                displayAwake_=true; scheduleDisplayRecovery();
+                displayAwake_=true;
+                restoreDdcAfterWake_=true;
+                scheduleDisplayRecovery();
             } else if (wParam==PBT_APMSUSPEND) {
-                displayAwake_=false; KillTimer(hwnd,TIMER_DISPLAYS);
+                displayAwake_=false;
+                restoreDdcAfterWake_=true;
+                displayRecoveryActive_=false;
+                ddc_.invalidateTopology();
+                KillTimer(hwnd,TIMER_DISPLAYS);
             }
             return TRUE;
         case WM_TIMER:
@@ -2514,7 +2558,8 @@ private:
             }
             if (wParam==TIMER_ANIMATION) { if (animationTimerRunning_) tickAnimations(); return 0; }
             if (wParam==TIMER_VERIFY_COLOR) {
-                if (displayAwake_ && !dragging_) model_.applyAll(nightlight::GammaRefresh::Verify);
+                if (displayAwake_ && !displayRecoveryActive_ && !dragging_)
+                    model_.applyAll(nightlight::GammaRefresh::Verify);
                 return 0;
             }
             if (wParam==TIMER_READ_DDC) {
