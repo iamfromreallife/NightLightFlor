@@ -174,6 +174,12 @@ void DdcController::restore(const std::wstring& device,int brightness,int contra
     jobs_[{device,-1}]={};
     wake_.notify_one();
 }
+void DdcController::invalidateTopology() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++topologyEpoch_;
+    jobs_.clear();
+    states_.clear();
+}
 void DdcController::refresh(const std::wstring& device) {
     if (device.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -220,18 +226,23 @@ void DdcController::run() {
     bool first=true;
     for (;;) {
         std::pair<std::wstring,int> key; Job job;
+        std::uint64_t epoch=0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             wake_.wait(lock,[&]{ return stopping_ || !jobs_.empty(); });
             if (stopping_) return;
             const auto next=nextMonitorJob(jobs_,previous,first);
             key=next->first; job=next->second; jobs_.erase(next);
+            epoch=topologyEpoch_;
             previous=key; first=false;
         }
         Physical monitor(api,key.first);
         if (key.second==-1) {
             const DdcValue brightness=observe(api,monitor,wmi,key.first,0), contrast=observe(api,monitor,wmi,key.first,1);
             std::lock_guard<std::mutex> lock(mutex_);
+            // A display sleep/re-enumeration may have reassigned this GDI
+            // output while the slow DDC read was in progress.
+            if (epoch!=topologyEpoch_ || stopping_) continue;
             auto& state=states_[key.first]; state.loading=false;
             const auto now=GetTickCount64();
             auto publish=[now](DdcValue& value,const DdcValue& observed) {
@@ -247,7 +258,8 @@ void DdcController::run() {
                 const auto& state=states_[key.first];
                 const auto& latest=key.second==0?state.brightness:state.contrast;
                 if (stopping_) return;
-                if (latest.generation!=job.generation) continue;
+                if (epoch!=topologyEpoch_ ||
+                    latest.generation!=job.generation) continue;
             }
             bool usedWmi=false;
             bool ok=writePhysical(api,monitor,key.second,job.percent);
@@ -259,6 +271,7 @@ void DdcController::run() {
                 if (panel && ((panel.readable && panel.percent==job.percent) || wmi.set(panel,job.percent))) { ok=true; usedWmi=true; }
             }
             std::lock_guard<std::mutex> lock(mutex_);
+            if (epoch!=topologyEpoch_ || stopping_) continue;
             auto& state=states_[key.first];
             auto& value=key.second==0?state.brightness:state.contrast;
             if (value.generation==job.generation) {
