@@ -285,6 +285,47 @@ int main() {
               "Disabled filter must restore the captured calibration");
         check(sameRamp(buildAppliedRamp(6500,false,nullptr),neutral),
               "Disabled filter without baseline uses identity");
+        // A Windows wake can swap DISPLAY1/DISPLAY2, but not the real
+        // physical paths. Verify that identity, names and stored targets
+        // follow the panel rather than the transient GDI source number.
+        {
+            Monitor left,right;
+            left.device=L"\\\\.\\DISPLAY1";
+            left.physicalId=L"\\\\?\\DISPLAY#DEL123#PANEL_LEFT#{GUID}";
+            left.windowsName=L"Dell";left.alias=L"Work";
+            left.kelvin=3200;
+            right.device=L"\\\\.\\DISPLAY2";
+            right.physicalId=L"\\\\?\\DISPLAY#DEL123#PANEL_RIGHT#{GUID}";
+            right.windowsName=L"Dell";right.alias=L"Gaming";
+            right.kelvin=4700;
+            Monitor newLeft=left,newRight=right;
+            newLeft.device=right.device;
+            newRight.device=left.device;
+            check(monitorProfileKey(left)==monitorProfileKey(newLeft) &&
+                  monitorProfileKey(right)==monitorProfileKey(newRight) &&
+                  monitorProfileKey(left)!=monitorProfileKey(right),
+                "Physical monitor keys survive swapped GDI names, even for identical models");
+            check(samePhysicalMonitor(left,newLeft) &&
+                  !samePhysicalMonitor(left,newRight),
+                "Recovery matches the physical panel, not a reused DISPLAYx");
+            check(wakeTopologyIsUsable({left,right},{newLeft,newRight}),
+                "Valid two-monitor wake with swapped GDI numbers remains recoverable");
+            check(!wakeTopologyIsUsable({left,right},{newLeft}),
+                "One missing monitor is not accepted as a complete wake topology");
+            Monitor unknown=newRight;
+            unknown.physicalId.clear();
+            check(!samePhysicalMonitor(right,unknown) &&
+                  !wakeTopologyIsUsable({left,right},{newLeft,unknown}),
+                "An unresolved physical identity cannot steal the last display's values");
+            Monitor duplicate=newRight;
+            duplicate.physicalId=newLeft.physicalId;
+            check(!wakeTopologyIsUsable({left,right},{newLeft,duplicate}),
+                "Duplicate physical identities must never share a monitor profile");
+            Monitor moved=newLeft;
+            moved.windowsName=L"Temporary Generic Monitor";
+            check(samePhysicalMonitor(left,moved),
+                "A temporary Windows display label must not change physical identity");
+        }
         Monitor first, second;
         first.windowsName=L"Asus 60HZ"; first.kelvin=1900;
         second.windowsName=L"Dell"; second.alias=L"Portrait"; second.kelvin=1900;
