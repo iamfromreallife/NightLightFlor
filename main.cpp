@@ -47,7 +47,6 @@ constexpr UINT TIMER_VERIFY_COLOR = 14, TIMER_READ_DDC = 15;
 constexpr GUID displayStateGuid{0x2b84c20e,0xad23,0x4ddf,{0x93,0xdb,0x05,0xff,0xbd,0x7e,0xfc,0xa5}};
 constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
-constexpr int ID_TRAY_STARTUP_BASE = 4100;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
@@ -343,8 +342,8 @@ bool isEnterOrSpace(WPARAM key) { return key == VK_RETURN || key == VK_SPACE; }
 
 class NativeApp {
 public:
-    NativeApp(HINSTANCE instance, std::wstring argument)
-        : instance_(instance), argument_(std::move(argument)), model_() {
+    NativeApp(HINSTANCE instance)
+        : instance_(instance), model_() {
         Gdiplus::GdiplusStartupInput input;
         Gdiplus::GdiplusStartup(&drawingToken_,&input,nullptr);
         BufferedPaintInit();
@@ -426,10 +425,11 @@ public:
         // Otherwise a restored narrow window briefly flashes scrollable.
         initializingWindow_=false;
         ensureWindowFitsContents();
-        const std::wstring launch = nightlight::resolveStartup(
-            model_.preferences().startup, argument_, trayReady_);
-        if (trayReady_ && (launch == L"tray" || launch == L"minimized")) {
-            // Start hidden without transferring focus to Explorer.
+        // Every fresh process starts in the notification area, regardless of
+        // saved preferences, shell show commands, or legacy CLI arguments.
+        // Keep a visible fallback if Windows did not register the tray icon:
+        // otherwise the user would have no way to open or exit NightLight.
+        if (trayReady_) {
             SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         } else {
             ShowWindow(window_, show == SW_SHOWDEFAULT ? SW_SHOWNORMAL : show);
@@ -452,7 +452,6 @@ public:
 private:
     ULONG_PTR drawingToken_=0;
     HINSTANCE instance_;
-    std::wstring argument_;
     Model model_;
     nightlight::DdcController ddc_;
     HWND window_ = nullptr;
@@ -1908,12 +1907,6 @@ private:
         if (hasMonitor()) model_.updateKelvin(selected_,selectedMonitor()->kelvin);
         repaint();
     }
-    void populateStartup(int idx) {
-        Preferences pref=model_.preferences();
-        pref.startup=idx==2?L"tray":idx==1?L"minimized":L"normal";
-        model_.updatePreferences(pref);
-        updateLanguage();
-    }
     void populateLanguage(int idx) {
         Preferences pref=model_.preferences();
         pref.locale=idx==0?L"pt-PT":L"en-US";
@@ -2133,12 +2126,6 @@ private:
             ID_TRAY_THEME_BASE+1,tr(L"Dark",L"Escuro").c_str(),nightlight::MenuIcon::Dark);
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(themes),
             tr(L"Theme",L"Tema").c_str(),nightlight::MenuIcon::Theme);
-        HMENU startup=createMenu();
-        const auto& mode=model_.preferences().startup;
-        append(startup,MF_STRING|(mode!=L"tray" && mode!=L"minimized"?MF_CHECKED:0),ID_TRAY_STARTUP_BASE,L"Normal",nightlight::MenuIcon::Window);
-        append(startup,MF_STRING|(mode==L"minimized"?MF_CHECKED:0),ID_TRAY_STARTUP_BASE+1,tr(L"Minimized",L"Minimizado").c_str(),nightlight::MenuIcon::Minimize);
-        append(startup,MF_STRING|(mode==L"tray"?MF_CHECKED:0),ID_TRAY_STARTUP_BASE+2,tr(L"Notification area",L"Área de notificação").c_str(),nightlight::MenuIcon::Tray);
-        append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(startup),tr(L"Start",L"Iniciar").c_str(),nightlight::MenuIcon::Start);
         append(menu,MF_STRING|(model_.preferences().closeByClickingOutside?MF_CHECKED:0),
             ID_TRAY_CLOSE_OUTSIDE,tr(L"Close by clicking outside",L"Fechar ao clicar fora").c_str(),
             nightlight::MenuIcon::Window);
@@ -2182,8 +2169,6 @@ private:
         } else if (cmd>=ID_TRAY_THEME_BASE && cmd<=ID_TRAY_THEME_BASE+2) {
             setTheme(cmd==ID_TRAY_THEME_BASE?L"light":
                 cmd==ID_TRAY_THEME_BASE+1?L"dark":L"system");
-        } else if (cmd>=ID_TRAY_STARTUP_BASE && cmd<=ID_TRAY_STARTUP_BASE+2) {
-            populateStartup(static_cast<int>(cmd-ID_TRAY_STARTUP_BASE));
         } else if (cmd==ID_TRAY_CLOSE_OUTSIDE) {
             Preferences pref=model_.preferences();
             pref.closeByClickingOutside=!pref.closeByClickingOutside;
@@ -2627,17 +2612,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE, PWSTR, int show) {
     }
     int exitCode=1;
     try {
-        int argc=0;
-        LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&argc);
-        std::wstring override;
-        if (args) {
-            for (int i=1;i<argc;++i) {
-                if (wcscmp(args[i],L"--tray")==0 || wcscmp(args[i],L"--normal")==0 ||
-                    wcscmp(args[i],L"--minimized")==0) override=args[i];
-            }
-            LocalFree(args);
-        }
-        NativeApp app(instance,override);
+        NativeApp app(instance);
         exitCode=app.run(show);
     } catch (const std::exception&) {
         MessageBoxW(nullptr,L"NightLight could not initialize.",
