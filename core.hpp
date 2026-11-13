@@ -36,7 +36,6 @@ struct Monitor {
 struct Preferences {
     std::wstring locale = L"en-US";
     std::wstring theme = L"system"; // system, light, dark
-    std::wstring startup = L"normal";
     bool closeByClickingOutside = true;
 };
 
@@ -48,8 +47,6 @@ bool effectiveDarkTheme(const std::wstring& preference,bool systemDark);
 std::wstring fromUtf8(const std::string& input);
 std::string toUtf8(const std::wstring& input);
 std::filesystem::path executableDirectory();
-std::wstring resolveStartup(const std::wstring& preference,
-                            const std::wstring& argument, bool trayAvailable);
 // 6500 K is an identity (neutral D65/sRGB-reference) LUT. Disabled filters
 // and clean shutdown use the original captured monitor ramp instead.
 Ramp buildKelvinRamp(int kelvin);
