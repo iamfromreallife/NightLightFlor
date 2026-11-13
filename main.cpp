@@ -25,6 +25,7 @@
 #include "motion.hpp"
 #include "menu_icons.hpp"
 #include "paint_surface.hpp"
+#include "system_start.hpp"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -41,6 +42,7 @@ constexpr UINT TIMER_STATE = 12;
 constexpr UINT TIMER_SAVE_DDC = 13;
 constexpr UINT TIMER_ANIMATION = 16;
 constexpr UINT TIMER_SAVE_WINDOW = 17;
+constexpr UINT TIMER_SYSTEM_HELPER = 20;
 constexpr UINT TIMER_VERIFY_COLOR = 14, TIMER_READ_DDC = 15;
 // The interactive-session notification also covers display sleep without a
 // topology change (WM_DISPLAYCHANGE alone does not).
@@ -49,46 +51,16 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_STARTUP_BASE = 4100;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
-constexpr int ID_TRAY_UAC_SAME_DESKTOP = 4104;
+constexpr int ID_TRAY_TASK_ALL_USERS = 4104, ID_TRAY_SERVICE_ALL_USERS = 4105;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_SHOW_EXISTING = WM_APP + 38;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
 constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
 constexpr UINT TIMER_DISPLAYS = 10;
-constexpr UINT TIMER_UAC_HELPER = 20;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
 constexpr int ICON_RESOURCE = 101;
 constexpr UINT TRAY_ID = 100;
-
-// The setting is machine-wide, NOT a permission bypass. When this value is
-// zero, Windows shows UAC prompts on the ordinary interactive desktop instead
-// of switching to the protected Winlogon secure desktop. UAC still prompts,
-// but malicious desktop applications can potentially interact with the prompt.
-// Never change this without an explicit warning, user confirmation and UAC.
-constexpr wchar_t UAC_POLICY_PATH[] =
-    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System";
-bool uacUsesSecureDesktop() {
-    HKEY key=nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,UAC_POLICY_PATH,0,KEY_QUERY_VALUE,&key)
-        !=ERROR_SUCCESS) return true; // Prefer the secure default.
-    DWORD value=1,type=0,size=sizeof(value);
-    const LONG status=RegQueryValueExW(key,L"PromptOnSecureDesktop",nullptr,
-        &type,reinterpret_cast<LPBYTE>(&value),&size);
-    RegCloseKey(key);
-    return status!=ERROR_SUCCESS || type!=REG_DWORD || value!=0;
-}
-int updateUacSecureDesktop(bool enableSecureDesktop) {
-    HKEY key=nullptr;
-    const LONG opened=RegOpenKeyExW(HKEY_LOCAL_MACHINE,UAC_POLICY_PATH,0,
-        KEY_SET_VALUE,&key);
-    if (opened!=ERROR_SUCCESS) return static_cast<int>(opened);
-    const DWORD setting=enableSecureDesktop?1:0;
-    const LONG written=RegSetValueExW(key,L"PromptOnSecureDesktop",0,REG_DWORD,
-        reinterpret_cast<const BYTE*>(&setting),sizeof(setting));
-    RegCloseKey(key);
-    return static_cast<int>(written);
-}
 
 // Standalone adaptation of the supplied Windhawk mod's input protection.
 // There is NO BlockInput: physical low-level mouse/key-down events are
@@ -374,8 +346,8 @@ bool isEnterOrSpace(WPARAM key) { return key == VK_RETURN || key == VK_SPACE; }
 
 class NativeApp {
 public:
-    NativeApp(HINSTANCE instance, std::wstring argument)
-        : instance_(instance), argument_(std::move(argument)), model_() {
+    NativeApp(HINSTANCE instance, std::wstring argument, bool managed)
+        : instance_(instance), argument_(std::move(argument)), model_(managed) {
         Gdiplus::GdiplusStartupInput input;
         Gdiplus::GdiplusStartup(&drawingToken_,&input,nullptr);
         BufferedPaintInit();
@@ -462,15 +434,8 @@ public:
         if (trayReady_ && (launch == L"tray" || launch == L"minimized")) {
             // Start hidden without transferring focus to Explorer.
             SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
-        } else if (show==SW_HIDE || show==SW_SHOWMAXIMIZED ||
-                   show==SW_SHOWMINIMIZED || show==SW_MINIMIZE) {
-            ShowWindow(window_,show);
         } else {
-            // Prime GDI, GDI+ and glyph caches before the first displayed
-            // frame. The first ever drawing pass can otherwise stall the
-            // short fade/slide animation for one or more frames.
-            prewarmFirstPaint();
-            openWindow(true);
+            ShowWindow(window_, show == SW_SHOWDEFAULT ? SW_SHOWNORMAL : show);
         }
         UpdateWindow(window_);
         noteWindowPosition();
@@ -533,7 +498,8 @@ private:
     HWND gammaTooltip_ = nullptr;
     std::wstring gammaHelp_, screenOffHelp_;
     HANDLE gammaHelper_ = nullptr;
-    HANDLE uacHelper_ = nullptr;
+    HANDLE systemHelper_=nullptr;
+    bool installingService_=false, installingTask_=false;
 
     HFONT font_ = nullptr, boldFont_ = nullptr, headlineFont_ = nullptr, smallFont_ = nullptr;
     // All three section headings share exactly the same HFONT handle.
@@ -1545,27 +1511,6 @@ private:
         SetViewportOrgEx(mem,0,0,nullptr);
         BitBlt(hdc,0,0,client.right,client.bottom,mem,0,0,SRCCOPY);
     }
-    void prewarmFirstPaint() {
-        if (!window_) return;
-        RECT client{}; GetClientRect(window_,&client);
-        const int w=static_cast<int>(client.right-client.left);
-        const int h=static_cast<int>(client.bottom-client.top);
-        if (w<=0 || h<=0) return;
-        HDC windowDc=GetDC(window_);
-        if (!windowDc) return;
-        HDC warmDc=CreateCompatibleDC(windowDc);
-        if (warmDc) {
-            HBITMAP bmp=CreateCompatibleBitmap(windowDc,w,h);
-            if (bmp) {
-                HGDIOBJ previous=SelectObject(warmDc,bmp);
-                paintClient(warmDc,client);
-                SelectObject(warmDc,previous);
-                DeleteObject(bmp);
-            }
-            DeleteDC(warmDc);
-        }
-        ReleaseDC(window_,windowDc);
-    }
     void paint() {
         PAINTSTRUCT ps{};
         HDC dc=BeginPaint(window_,&ps);
@@ -2202,11 +2147,14 @@ private:
         append(menu,MF_STRING|(model_.preferences().closeByClickingOutside?MF_CHECKED:0),
             ID_TRAY_CLOSE_OUTSIDE,tr(L"Close by clicking outside",L"Fechar ao clicar fora").c_str(),
             nightlight::MenuIcon::Window);
-        append(menu,MF_STRING|(!uacUsesSecureDesktop()?MF_CHECKED:0),
-            ID_TRAY_UAC_SAME_DESKTOP,
-            tr(L"Warm colours during UAC (less secure)",
-               L"Cores quentes no UAC (menos seguro)").c_str(),
-            nightlight::MenuIcon::Window);
+        append(menu,MF_STRING|(nightlight::system_start::taskInstalled()?MF_CHECKED:0),
+            ID_TRAY_TASK_ALL_USERS,
+            tr(L"Start at sign-in (all users)",L"Iniciar sessão (todos os utilizadores)").c_str(),
+            nightlight::MenuIcon::Start);
+        append(menu,MF_STRING|(nightlight::system_start::serviceInstalled()?MF_CHECKED:0),
+            ID_TRAY_SERVICE_ALL_USERS,
+            tr(L"Background boot service (all users)",L"Serviço de arranque (todos os utilizadores)").c_str(),
+            nightlight::MenuIcon::Start);
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         append(menu,MF_STRING|(ddcVisible_?MF_CHECKED:0),ID_DDC,tr(L"DDC/CI Controls",L"Controlos DDC/CI").c_str(),nightlight::MenuIcon::Adjust);
         if (model_.monitors().empty()) {
@@ -2225,40 +2173,48 @@ private:
         append(menu,MF_STRING,ID_TRAY_EXIT,tr(L"Exit",L"Sair").c_str(),nightlight::MenuIcon::Exit);
         return menu;
     }
-    void toggleUacSameDesktop() {
-        if (uacHelper_) return;
-        const bool enable=uacUsesSecureDesktop(); // enable same-desktop prompts
-        if (enable) {
-            const int confirmation=MessageBoxW(window_,tr(
-                L"To keep NightLight's warm colours visible during UAC prompts, Windows must show UAC prompts on the regular desktop instead of the protected Secure Desktop.\n\n"
-                L"This is a SYSTEM-WIDE security reduction, not just a NightLight setting: other applications may be able to interfere with elevation prompts. UAC is NOT turned off.\n\n"
-                L"Do you want to change this Windows security policy?",
-                L"Para manter as cores quentes do NightLight nos pedidos UAC, o Windows terá de mostrar os pedidos no ambiente de trabalho normal, em vez do Ambiente de Trabalho Seguro.\n\n"
-                L"Esta alteração reduz a segurança de TODO O SISTEMA, não apenas do NightLight: outras aplicações poderão interferir com os pedidos de elevação. O UAC NÃO será desativado.\n\n"
-                L"Pretende alterar esta política de segurança do Windows?").c_str(),
-                L"NightLight - UAC",MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING);
-            if (confirmation!=IDYES) return;
+    void changeSystemStartup(bool service) {
+        if (systemHelper_) return;
+        const bool currentlyInstalled=service?
+            nightlight::system_start::serviceInstalled():
+            nightlight::system_start::taskInstalled();
+        const bool enable=!currentlyInstalled;
+        if (enable && service) {
+            if (MessageBoxW(window_,tr(
+                L"This installs an automatic LocalSystem service at boot, which starts a normal user-mode NightLight agent when a user signs in. It does NOT control the protected Windows sign-in screen or UAC Secure Desktop. The executable is copied to the protected Program Files folder. Continue?",
+                L"Isto instala um serviço LocalSystem iniciado com o Windows, que inicia o NightLight normal quando um utilizador entra na sessão. NÃO controla o ecrã protegido de início de sessão nem o Ambiente de Trabalho Seguro do UAC. O executável é copiado para a pasta protegida Program Files. Continuar?"
+            ).c_str(),L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)!=IDYES)
+                return;
         }
-        wchar_t path[32768]{};
-        if (!GetModuleFileNameW(nullptr,path,32768)) return;
+        if (enable && !service) {
+            if (MessageBoxW(window_,tr(
+                L"Install a scheduled task for all users? NightLight will start in each user's session after sign-in. This does not apply to the Windows sign-in or UAC Secure Desktop screens. Continue?",
+                L"Instalar uma tarefa agendada para todos os utilizadores? O NightLight inicia na sessão de cada utilizador após a autenticação. Isto não abrange os ecrãs de início de sessão do Windows ou do Ambiente de Trabalho Seguro do UAC. Continuar?"
+            ).c_str(),L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)!=IDYES)
+                return;
+        }
+        wchar_t exe[MAX_PATH*8]{};
+        if (!GetModuleFileNameW(nullptr,exe,MAX_PATH*8)) return;
         SHELLEXECUTEINFOW info{sizeof(info)};
         info.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_FLAG_NO_UI;
         info.hwnd=window_;
         info.lpVerb=L"runas";
-        info.lpFile=path;
-        info.lpParameters=enable?L"--uac-desktop=regular":L"--uac-desktop=secure";
+        info.lpFile=exe;
+        info.lpParameters=service?
+            (enable?L"--install-service":L"--remove-service"):
+            (enable?L"--install-all-users-task":L"--remove-all-users-task");
         info.nShow=SW_HIDE;
         if (!ShellExecuteExW(&info)) {
             if (GetLastError()!=ERROR_CANCELLED)
-                MessageBoxW(window_,tr(L"Could not start the administrator helper.",
-                    L"Não foi possível iniciar o auxiliar de administrador.").c_str(),
+                MessageBoxW(window_,tr(L"Administrator approval could not be obtained.",
+                    L"Não foi possível obter a autorização de administrador.").c_str(),
                     L"NightLight",MB_OK|MB_ICONERROR);
             return;
         }
-        uacHelper_=info.hProcess;
-        if (!SetTimer(window_,TIMER_UAC_HELPER,150,nullptr)) {
-            CloseHandle(uacHelper_);uacHelper_=nullptr;
-        }
+        systemHelper_=info.hProcess;
+        installingService_=service;
+        installingTask_=enable;
+        SetTimer(window_,TIMER_SYSTEM_HELPER,200,nullptr);
     }
     void popupTray() {
         std::vector<HBITMAP> icons;
@@ -2288,8 +2244,10 @@ private:
             Preferences pref=model_.preferences();
             pref.closeByClickingOutside=!pref.closeByClickingOutside;
             model_.updatePreferences(pref);
-        } else if (cmd==ID_TRAY_UAC_SAME_DESKTOP) {
-            toggleUacSameDesktop();
+        } else if (cmd==ID_TRAY_TASK_ALL_USERS) {
+            changeSystemStartup(false);
+        } else if (cmd==ID_TRAY_SERVICE_ALL_USERS) {
+            changeSystemStartup(true);
         } else if (cmd>=ID_TRAY_DISABLE_BASE &&
                    cmd<ID_TRAY_DISABLE_BASE+model_.monitors().size()) {
             const size_t index=cmd-ID_TRAY_DISABLE_BASE;
@@ -2621,22 +2579,21 @@ private:
             }
             return TRUE;
         case WM_TIMER:
-            if (wParam==TIMER_UAC_HELPER) {
-                if (uacHelper_ &&
-                    WaitForSingleObject(uacHelper_,0)==WAIT_OBJECT_0) {
+            if (wParam==TIMER_SYSTEM_HELPER) {
+                if (systemHelper_ &&
+                    WaitForSingleObject(systemHelper_,0)==WAIT_OBJECT_0) {
                     DWORD code=ERROR_GEN_FAILURE;
-                    GetExitCodeProcess(uacHelper_,&code);
-                    CloseHandle(uacHelper_);
-                    uacHelper_=nullptr;
-                    KillTimer(hwnd,TIMER_UAC_HELPER);
+                    GetExitCodeProcess(systemHelper_,&code);
+                    CloseHandle(systemHelper_);
+                    systemHelper_=nullptr;
+                    KillTimer(hwnd,TIMER_SYSTEM_HELPER);
                     if (code!=ERROR_SUCCESS) {
-                        MessageBoxW(hwnd,tr(
-                            L"Windows did not change the UAC Secure Desktop setting.",
-                            L"O Windows não alterou a definição de Ambiente de Trabalho Seguro do UAC.").c_str(),
-                            L"NightLight",MB_OK|MB_ICONERROR);
+                        wchar_t detail[512]{};
+                        swprintf_s(detail,tr(
+                            L"Windows could not update the startup integration. Error: %lu",
+                            L"O Windows não conseguiu alterar o arranque automático. Erro: %lu").c_str(),code);
+                        MessageBoxW(hwnd,detail,L"NightLight",MB_OK|MB_ICONERROR);
                     }
-                    // A prompt or desktop transition may have reset the LUT.
-                    model_.applyAll(nightlight::GammaRefresh::Restore);
                 }
                 return 0;
             }
@@ -2694,9 +2651,9 @@ private:
             }
             return 0;
         case WM_DESTROY:
+            KillTimer(hwnd,TIMER_SYSTEM_HELPER);
+            if (systemHelper_) { CloseHandle(systemHelper_);systemHelper_=nullptr; }
             KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
-            KillTimer(hwnd,TIMER_UAC_HELPER);
-            if (uacHelper_) {CloseHandle(uacHelper_);uacHelper_=nullptr;}
             screenOffGuard_.stop();
             noteWindowPosition(true);
             shuttingDown_=true;
@@ -2737,21 +2694,40 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE, PWSTR, int show) {
     // The narrow elevated helper must run before singleton/UI/config initialization.
     int helperArgc=0;
     LPWSTR* helperArgs=CommandLineToArgvW(GetCommandLineW(), &helperArgc);
-    bool gammaHelper=false,uacNormalHelper=false,uacSecureHelper=false;
-    if (helperArgs && helperArgc==2) {
-        gammaHelper=wcscmp(helperArgs[1],L"--unlock-gamma")==0;
-        uacNormalHelper=wcscmp(helperArgs[1],L"--uac-desktop=regular")==0;
-        uacSecureHelper=wcscmp(helperArgs[1],L"--uac-desktop=secure")==0;
-    }
+    const bool helper=helperArgs && helperArgc==2 && wcscmp(helperArgs[1], L"--unlock-gamma")==0;
     if (helperArgs) LocalFree(helperArgs);
-    if (gammaHelper) return static_cast<int>(nightlight::unlockGammaRange());
-    if (uacNormalHelper) return updateUacSecureDesktop(false);
-    if (uacSecureHelper) return updateUacSecureDesktop(true);
+    if (helper) return static_cast<int>(nightlight::unlockGammaRange());
+    // These helper modes are launched only with administrator approval.
+    // A service does no gamma manipulation on Session 0.
+    if (helperArgc == 2) {
+        // helperArgs was already freed above. Parse the command line again.
+        int ac=0;
+        LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&ac);
+        DWORD result=ERROR_SUCCESS;
+        bool recognized=false;
+        if (args && ac==2) {
+            const std::wstring mode=args[1];
+            if (mode==L"--nightlight-service") {
+                result=nightlight::system_start::runService();recognized=true;
+            } else if (mode==L"--install-all-users-task") {
+                result=nightlight::system_start::setTaskEnabled(true);recognized=true;
+            } else if (mode==L"--remove-all-users-task") {
+                result=nightlight::system_start::setTaskEnabled(false);recognized=true;
+            } else if (mode==L"--install-service") {
+                result=nightlight::system_start::setServiceEnabled(true);recognized=true;
+            } else if (mode==L"--remove-service") {
+                result=nightlight::system_start::setServiceEnabled(false);recognized=true;
+            }
+        }
+        if (args) LocalFree(args);
+        if (recognized) return static_cast<int>(result);
+    }
     HANDLE mutex=CreateMutexW(nullptr,TRUE,L"NightLight_SingleInstance_Mutex");
     if (!mutex) return 1;
     if (GetLastError()==ERROR_ALREADY_EXISTS) {
+        const bool quiet=wcsstr(GetCommandLineW(),L"--quiet-duplicate")!=nullptr;
         HWND existing=FindWindowW(CLASS_NAME,nullptr);
-        if (existing) PostMessageW(existing,WM_SHOW_EXISTING,0,0);
+        if (existing && !quiet) PostMessageW(existing,WM_SHOW_EXISTING,0,0);
         CloseHandle(mutex);
         return 0;
     }
@@ -2760,14 +2736,16 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE, PWSTR, int show) {
         int argc=0;
         LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&argc);
         std::wstring override;
+        bool managed=false;
         if (args) {
             for (int i=1;i<argc;++i) {
                 if (wcscmp(args[i],L"--tray")==0 || wcscmp(args[i],L"--normal")==0 ||
                     wcscmp(args[i],L"--minimized")==0) override=args[i];
+                if (wcscmp(args[i],L"--managed")==0) managed=true;
             }
             LocalFree(args);
         }
-        NativeApp app(instance,override);
+        NativeApp app(instance,override,managed);
         exitCode=app.run(show);
     } catch (const std::exception&) {
         MessageBoxW(nullptr,L"NightLight could not initialize.",
