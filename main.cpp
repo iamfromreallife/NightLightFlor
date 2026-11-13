@@ -1581,6 +1581,13 @@ private:
         if (!displayRecoveryActive_) {
             recoveryAttempt_=0;
             ddcRestoreIssued_=false;
+            // Commit any active rename/drag while the old device mapping is
+            // still intact. Otherwise an in-flight rename could be saved to
+            // the wrong physical panel after Windows swaps DISPLAYx numbers.
+            finishInlineRename(true);
+            commitDrag();
+            endHardwareDrag();
+            finishScreenDrag();
             // A DISPLAYx identifier may now address another physical panel.
             // Discard any in-flight DDC observations before re-detection.
             ddc_.invalidateTopology();
