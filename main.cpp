@@ -53,6 +53,7 @@ constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
 constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
 constexpr UINT TIMER_DISPLAYS = 10;
+constexpr UINT TIMER_TRAY_RETRY = 21;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
 constexpr int ICON_RESOURCE = 101;
 constexpr UINT TRAY_ID = 100;
@@ -424,15 +425,11 @@ public:
         // Otherwise a restored narrow window briefly flashes scrollable.
         initializingWindow_=false;
         ensureWindowFitsContents();
-        // Every fresh process starts in the notification area, regardless of
-        // saved preferences, shell show commands, or legacy CLI arguments.
-        // Keep a visible fallback if Windows did not register the tray icon:
-        // otherwise the user would have no way to open or exit NightLight.
-        if (trayReady_) {
-            SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
-        } else {
-            ShowWindow(window_, show == SW_SHOWDEFAULT ? SW_SHOWNORMAL : show);
-        }
+        // Never show the main window during startup. When a Scheduled Task
+        // runs early at sign-in, Explorer's notification area may not yet be
+        // available and the initial NIM_ADD can fail. Retrying tray registration
+        // asynchronously (below) is safer than briefly showing the window.
+        SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         UpdateWindow(window_);
         noteWindowPosition();
         MSG msg{};
@@ -949,6 +946,9 @@ private:
         SetTimer(window_,TIMER_READ_DDC,nightlight::kDdcReadbackIntervalMs,nullptr);
         taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
         trayReady_ = addTray();
+        // Explorer can still be starting when a logon task launches this app.
+        // TaskbarCreated is not sufficient if NIM_ADD failed the first time.
+        if (!trayReady_) SetTimer(window_,TIMER_TRAY_RETRY,1000,nullptr);
         SetTimer(window_, TIMER_STATE, 250, nullptr);
         model_.setStatusWindow(window_);
         model_.collectGammaResults();
@@ -2195,7 +2195,8 @@ private:
     LRESULT dispatch(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam) {
         if (taskbarCreated_ && msg==taskbarCreated_) {
             trayReady_=false;
-            addTray();
+            if (addTray()) KillTimer(hwnd,TIMER_TRAY_RETRY);
+            else SetTimer(hwnd,TIMER_TRAY_RETRY,1000,nullptr);
             return 0;
         }
         switch (msg) {
@@ -2502,6 +2503,10 @@ private:
             }
             return TRUE;
         case WM_TIMER:
+            if (wParam==TIMER_TRAY_RETRY) {
+                if (trayReady_ || addTray()) KillTimer(hwnd,TIMER_TRAY_RETRY);
+                return 0;
+            }
             if (wParam==TIMER_SCREEN_OFF_ACTION) {
                 KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
                 dispatchScreenOff();
@@ -2556,6 +2561,7 @@ private:
             }
             return 0;
         case WM_DESTROY:
+            KillTimer(hwnd,TIMER_TRAY_RETRY);
             KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
             screenOffGuard_.stop();
             noteWindowPosition(true);
