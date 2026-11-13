@@ -640,6 +640,13 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
     if (auto saved=std::get_if<portable::Json::Array>(
             &root_.get("screen").get("monitor_order").value))
         for(const auto& value:*saved)order.push_back(fromUtf8(value.str()));
+    // Even without an explicitly customized order, preserve the current
+    // physical tab order across a GDI DISPLAY1/DISPLAY2 reassignment.
+    for (const auto& old:monitors_) {
+        const auto key=monitorProfileKey(old);
+        if (std::find(order.begin(),order.end(),key)==order.end())
+            order.push_back(key);
+    }
     auto orderIndex=[&](const Monitor& monitor) {
         auto pos=std::find(order.begin(),order.end(),monitorProfileKey(monitor));
         if(pos==order.end())
@@ -688,15 +695,15 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
     }
     monitors_=std::move(entries);
     applyAll();
-    // Migrate existing user-defined tab order to physical target keys.
-    // Otherwise a legacy order stored as DISPLAY1/DISPLAY2 would still
-    // reverse the visible tabs after Windows swaps those source numbers.
+    // Persist tab order with physical IDs even when the user never dragged
+    // the tabs. Also migrate legacy GDI-based order entries while preserving
+    // saved order for currently disconnected monitor profiles.
     if (physical.complete && context.complete) {
+        auto migrated=portable::Json::array();
+        auto& values=std::get<portable::Json::Array>(migrated.value);
+        std::set<std::string> seen;
         if (auto saved=std::get_if<portable::Json::Array>(
-                &root_.get("screen").get("monitor_order").value)) {
-            auto migrated=portable::Json::array();
-            auto& values=std::get<portable::Json::Array>(migrated.value);
-            std::set<std::string> seen;
+                &root_.get("screen").get("monitor_order").value))
             for (const auto& item:*saved) {
                 const auto original=fromUtf8(item.str());
                 const auto found=std::find_if(monitors_.begin(),monitors_.end(),
@@ -705,8 +712,11 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
                     toUtf8(monitorProfileKey(*found));
                 if (seen.insert(key).second) values.emplace_back(key);
             }
-            root_["screen"]["monitor_order"]=std::move(migrated);
+        for (const auto& monitor:monitors_) {
+            const auto key=toUtf8(monitorProfileKey(monitor));
+            if (seen.insert(key).second) values.emplace_back(key);
         }
+        root_["screen"]["monitor_order"]=std::move(migrated);
         save();
     }
     return true;
