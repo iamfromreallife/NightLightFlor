@@ -182,7 +182,7 @@ bool updateGammaRamp(const Ramp& target,GammaRefresh refresh,GammaRampState& sta
 
 class Model {
 public:
-    explicit Model(bool managed=false);
+    Model();
     explicit Model(std::filesystem::path directory);
     ~Model();
 

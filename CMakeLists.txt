@@ -24,10 +24,9 @@ if(NOT EXISTS "${ICON_PATH}")
 endif()
 configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
 
-add_executable(NightLight WIN32 main.cpp system_start.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+add_executable(NightLight WIN32 main.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
 target_link_libraries(NightLight PRIVATE nightlight-core
-    user32 gdi32 shell32 ole32 oleaut32 advapi32 comctl32 dwmapi uxtheme gdiplus
-    taskschd wtsapi32 userenv)
+    user32 gdi32 shell32 ole32 advapi32 comctl32 dwmapi uxtheme gdiplus)
 target_compile_definitions(NightLight PRIVATE UNICODE _UNICODE)
 if(MSVC)
     target_compile_options(NightLight PRIVATE /W4 /permissive- /EHsc)

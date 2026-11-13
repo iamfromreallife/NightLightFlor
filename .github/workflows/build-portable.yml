@@ -60,44 +60,6 @@ jobs:
       - name: Run native regression tests
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Smoke test all-user task and boot service registration
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $exe = (Resolve-Path 'build/Release/NightLight.exe').Path
-          function Invoke-Setup([string]$argument) {
-            # NightLight is a Windows GUI executable: '&' does not wait for it.
-            $process = Start-Process -FilePath $exe -ArgumentList $argument -Wait -PassThru
-            if ($process.ExitCode -ne 0) {
-              throw "$argument exited with Windows error $($process.ExitCode)"
-            }
-          }
-          try {
-            Invoke-Setup '--install-all-users-task'
-            $task = Get-ScheduledTask -TaskName 'NightLightAllUsers' -ErrorAction Stop
-            if ([string]::IsNullOrEmpty($task.Principal.GroupId)) {
-              throw 'Task must use an interactive group principal'
-            }
-            if (-not ($task.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' })) {
-              throw 'Task must use a logon trigger'
-            }
-            Invoke-Setup '--remove-all-users-task'
-            if (Get-ScheduledTask -TaskName 'NightLightAllUsers' -ErrorAction SilentlyContinue) {
-              throw 'Task remains after disabling the option'
-            }
-            Invoke-Setup '--install-service'
-            Start-Sleep -Seconds 2
-            $service = Get-CimInstance Win32_Service -Filter "Name='NightLightBackground'"
-            if (-not $service -or $service.StartMode -ne 'Auto' -or
-                $service.State -ne 'Running') {
-              throw 'Boot service did not remain running after installation'
-            }
-            Invoke-Setup '--remove-service'
-          } finally {
-            Start-Process -FilePath $exe -ArgumentList '--remove-all-users-task' -Wait -PassThru | Out-Null
-            Start-Process -FilePath $exe -ArgumentList '--remove-service' -Wait -PassThru | Out-Null
-          }
-
       - name: Prepare standalone EXE
         shell: pwsh
         run: |

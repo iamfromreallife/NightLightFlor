@@ -3,7 +3,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
-#include <shlobj.h>
 #include <dwmapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
@@ -26,7 +25,6 @@
 #include "motion.hpp"
 #include "menu_icons.hpp"
 #include "paint_surface.hpp"
-#include "system_start.hpp"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -43,7 +41,6 @@ constexpr UINT TIMER_STATE = 12;
 constexpr UINT TIMER_SAVE_DDC = 13;
 constexpr UINT TIMER_ANIMATION = 16;
 constexpr UINT TIMER_SAVE_WINDOW = 17;
-constexpr UINT TIMER_SYSTEM_HELPER = 20;
 constexpr UINT TIMER_VERIFY_COLOR = 14, TIMER_READ_DDC = 15;
 // The interactive-session notification also covers display sleep without a
 // topology change (WM_DISPLAYCHANGE alone does not).
@@ -52,7 +49,6 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_STARTUP_BASE = 4100;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
-constexpr int ID_TRAY_TASK_ALL_USERS = 4104, ID_TRAY_SERVICE_ALL_USERS = 4105;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_SHOW_EXISTING = WM_APP + 38;
@@ -347,8 +343,8 @@ bool isEnterOrSpace(WPARAM key) { return key == VK_RETURN || key == VK_SPACE; }
 
 class NativeApp {
 public:
-    NativeApp(HINSTANCE instance, std::wstring argument, bool managed)
-        : instance_(instance), argument_(std::move(argument)), model_(managed) {
+    NativeApp(HINSTANCE instance, std::wstring argument)
+        : instance_(instance), argument_(std::move(argument)), model_() {
         Gdiplus::GdiplusStartupInput input;
         Gdiplus::GdiplusStartup(&drawingToken_,&input,nullptr);
         BufferedPaintInit();
@@ -499,8 +495,6 @@ private:
     HWND gammaTooltip_ = nullptr;
     std::wstring gammaHelp_, screenOffHelp_;
     HANDLE gammaHelper_ = nullptr;
-    HANDLE systemHelper_=nullptr;
-    bool installingService_=false, installingTask_=false;
 
     HFONT font_ = nullptr, boldFont_ = nullptr, headlineFont_ = nullptr, smallFont_ = nullptr;
     // All three section headings share exactly the same HFONT handle.
@@ -2148,14 +2142,6 @@ private:
         append(menu,MF_STRING|(model_.preferences().closeByClickingOutside?MF_CHECKED:0),
             ID_TRAY_CLOSE_OUTSIDE,tr(L"Close by clicking outside",L"Fechar ao clicar fora").c_str(),
             nightlight::MenuIcon::Window);
-        append(menu,MF_STRING|(nightlight::system_start::taskInstalled()?MF_CHECKED:0),
-            ID_TRAY_TASK_ALL_USERS,
-            tr(L"Start at sign-in (all users)",L"Iniciar sessão (todos os utilizadores)").c_str(),
-            nightlight::MenuIcon::Start);
-        append(menu,MF_STRING|(nightlight::system_start::serviceInstalled()?MF_CHECKED:0),
-            ID_TRAY_SERVICE_ALL_USERS,
-            tr(L"Background boot service (all users)",L"Serviço de arranque (todos os utilizadores)").c_str(),
-            nightlight::MenuIcon::Start);
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         append(menu,MF_STRING|(ddcVisible_?MF_CHECKED:0),ID_DDC,tr(L"DDC/CI Controls",L"Controlos DDC/CI").c_str(),nightlight::MenuIcon::Adjust);
         if (model_.monitors().empty()) {
@@ -2173,68 +2159,6 @@ private:
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         append(menu,MF_STRING,ID_TRAY_EXIT,tr(L"Exit",L"Sair").c_str(),nightlight::MenuIcon::Exit);
         return menu;
-    }
-    void prepareManagedProfile() {
-        // The portable build stores config.json alongside the executable,
-        // while the protected Program Files copy uses each user's AppData.
-        // Copy the current user's preferences once, without overwriting an
-        // existing managed profile or touching any other user's files.
-        PWSTR appData=nullptr;
-        if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData,0,nullptr,
-                                        &appData)) || !appData) return;
-        const std::wstring dir=std::wstring(appData)+L"\\NightLight";
-        const std::wstring target=dir+L"\\config.json";
-        if (_wcsicmp(model_.configPath().c_str(),target.c_str())!=0) {
-            if (CreateDirectoryW(dir.c_str(),nullptr) ||
-                GetLastError()==ERROR_ALREADY_EXISTS) {
-                CopyFileW(model_.configPath().c_str(),target.c_str(),TRUE);
-            }
-        }
-        CoTaskMemFree(appData);
-    }
-    void changeSystemStartup(bool service) {
-        if (systemHelper_) return;
-        const bool currentlyInstalled=service?
-            nightlight::system_start::serviceInstalled():
-            nightlight::system_start::taskInstalled();
-        const bool enable=!currentlyInstalled;
-        if (enable) prepareManagedProfile();
-        if (enable && service) {
-            if (MessageBoxW(window_,tr(
-                L"This installs an automatic LocalSystem service at boot, which starts a normal user-mode NightLight agent when a user signs in. It does NOT control the protected Windows sign-in screen or UAC Secure Desktop. The executable is copied to the protected Program Files folder. Continue?",
-                L"Isto instala um serviço LocalSystem iniciado com o Windows, que inicia o NightLight normal quando um utilizador entra na sessão. NÃO controla o ecrã protegido de início de sessão nem o Ambiente de Trabalho Seguro do UAC. O executável é copiado para a pasta protegida Program Files. Continuar?"
-            ).c_str(),L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)!=IDYES)
-                return;
-        }
-        if (enable && !service) {
-            if (MessageBoxW(window_,tr(
-                L"Install a scheduled task for all users? NightLight will start in each user's session after sign-in. This does not apply to the Windows sign-in or UAC Secure Desktop screens. Continue?",
-                L"Instalar uma tarefa agendada para todos os utilizadores? O NightLight inicia na sessão de cada utilizador após a autenticação. Isto não abrange os ecrãs de início de sessão do Windows ou do Ambiente de Trabalho Seguro do UAC. Continuar?"
-            ).c_str(),L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)!=IDYES)
-                return;
-        }
-        wchar_t exe[MAX_PATH*8]{};
-        if (!GetModuleFileNameW(nullptr,exe,MAX_PATH*8)) return;
-        SHELLEXECUTEINFOW info{sizeof(info)};
-        info.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_FLAG_NO_UI;
-        info.hwnd=window_;
-        info.lpVerb=L"runas";
-        info.lpFile=exe;
-        info.lpParameters=service?
-            (enable?L"--install-service":L"--remove-service"):
-            (enable?L"--install-all-users-task":L"--remove-all-users-task");
-        info.nShow=SW_HIDE;
-        if (!ShellExecuteExW(&info)) {
-            if (GetLastError()!=ERROR_CANCELLED)
-                MessageBoxW(window_,tr(L"Administrator approval could not be obtained.",
-                    L"Não foi possível obter a autorização de administrador.").c_str(),
-                    L"NightLight",MB_OK|MB_ICONERROR);
-            return;
-        }
-        systemHelper_=info.hProcess;
-        installingService_=service;
-        installingTask_=enable;
-        SetTimer(window_,TIMER_SYSTEM_HELPER,200,nullptr);
     }
     void popupTray() {
         std::vector<HBITMAP> icons;
@@ -2264,10 +2188,6 @@ private:
             Preferences pref=model_.preferences();
             pref.closeByClickingOutside=!pref.closeByClickingOutside;
             model_.updatePreferences(pref);
-        } else if (cmd==ID_TRAY_TASK_ALL_USERS) {
-            changeSystemStartup(false);
-        } else if (cmd==ID_TRAY_SERVICE_ALL_USERS) {
-            changeSystemStartup(true);
         } else if (cmd>=ID_TRAY_DISABLE_BASE &&
                    cmd<ID_TRAY_DISABLE_BASE+model_.monitors().size()) {
             const size_t index=cmd-ID_TRAY_DISABLE_BASE;
@@ -2599,24 +2519,6 @@ private:
             }
             return TRUE;
         case WM_TIMER:
-            if (wParam==TIMER_SYSTEM_HELPER) {
-                if (systemHelper_ &&
-                    WaitForSingleObject(systemHelper_,0)==WAIT_OBJECT_0) {
-                    DWORD code=ERROR_GEN_FAILURE;
-                    GetExitCodeProcess(systemHelper_,&code);
-                    CloseHandle(systemHelper_);
-                    systemHelper_=nullptr;
-                    KillTimer(hwnd,TIMER_SYSTEM_HELPER);
-                    if (code!=ERROR_SUCCESS) {
-                        wchar_t detail[512]{};
-                        swprintf_s(detail,tr(
-                            L"Windows could not update the startup integration. Error: %lu",
-                            L"O Windows não conseguiu alterar o arranque automático. Erro: %lu").c_str(),code);
-                        MessageBoxW(hwnd,detail,L"NightLight",MB_OK|MB_ICONERROR);
-                    }
-                }
-                return 0;
-            }
             if (wParam==TIMER_SCREEN_OFF_ACTION) {
                 KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
                 dispatchScreenOff();
@@ -2671,8 +2573,6 @@ private:
             }
             return 0;
         case WM_DESTROY:
-            KillTimer(hwnd,TIMER_SYSTEM_HELPER);
-            if (systemHelper_) { CloseHandle(systemHelper_);systemHelper_=nullptr; }
             KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
             screenOffGuard_.stop();
             noteWindowPosition(true);
@@ -2717,37 +2617,11 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE, PWSTR, int show) {
     const bool helper=helperArgs && helperArgc==2 && wcscmp(helperArgs[1], L"--unlock-gamma")==0;
     if (helperArgs) LocalFree(helperArgs);
     if (helper) return static_cast<int>(nightlight::unlockGammaRange());
-    // These helper modes are launched only with administrator approval.
-    // A service does no gamma manipulation on Session 0.
-    if (helperArgc == 2) {
-        // helperArgs was already freed above. Parse the command line again.
-        int ac=0;
-        LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&ac);
-        DWORD result=ERROR_SUCCESS;
-        bool recognized=false;
-        if (args && ac==2) {
-            const std::wstring mode=args[1];
-            if (mode==L"--nightlight-service") {
-                result=nightlight::system_start::runService();recognized=true;
-            } else if (mode==L"--install-all-users-task") {
-                result=nightlight::system_start::setTaskEnabled(true);recognized=true;
-            } else if (mode==L"--remove-all-users-task") {
-                result=nightlight::system_start::setTaskEnabled(false);recognized=true;
-            } else if (mode==L"--install-service") {
-                result=nightlight::system_start::setServiceEnabled(true);recognized=true;
-            } else if (mode==L"--remove-service") {
-                result=nightlight::system_start::setServiceEnabled(false);recognized=true;
-            }
-        }
-        if (args) LocalFree(args);
-        if (recognized) return static_cast<int>(result);
-    }
     HANDLE mutex=CreateMutexW(nullptr,TRUE,L"NightLight_SingleInstance_Mutex");
     if (!mutex) return 1;
     if (GetLastError()==ERROR_ALREADY_EXISTS) {
-        const bool quiet=wcsstr(GetCommandLineW(),L"--quiet-duplicate")!=nullptr;
         HWND existing=FindWindowW(CLASS_NAME,nullptr);
-        if (existing && !quiet) PostMessageW(existing,WM_SHOW_EXISTING,0,0);
+        if (existing) PostMessageW(existing,WM_SHOW_EXISTING,0,0);
         CloseHandle(mutex);
         return 0;
     }
@@ -2756,16 +2630,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE, PWSTR, int show) {
         int argc=0;
         LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&argc);
         std::wstring override;
-        bool managed=false;
         if (args) {
             for (int i=1;i<argc;++i) {
                 if (wcscmp(args[i],L"--tray")==0 || wcscmp(args[i],L"--normal")==0 ||
                     wcscmp(args[i],L"--minimized")==0) override=args[i];
-                if (wcscmp(args[i],L"--managed")==0) managed=true;
             }
             LocalFree(args);
         }
-        NativeApp app(instance,override,managed);
+        NativeApp app(instance,override);
         exitCode=app.run(show);
     } catch (const std::exception&) {
         MessageBoxW(nullptr,L"NightLight could not initialize.",

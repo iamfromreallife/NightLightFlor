@@ -431,14 +431,7 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
     return {width,height,rows};
 }
 
-Model::Model(bool managed) :
-    Model(managed && !roamingConfig().empty()
-        ? roamingConfig().parent_path() : executableDirectory()) {
-    if (managed) {
-        std::error_code error;
-        fs::create_directories(directory_,error);
-    }
-}
+Model::Model() : Model(executableDirectory()) {}
 Model::Model(fs::path directory) :
     directory_(std::move(directory)), configPath_(directory_ / L"config.json") {
     // All potentially slow SetDeviceGammaRamp calls run here, not in the
