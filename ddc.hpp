@@ -64,6 +64,9 @@ public:
     void seed(const std::wstring& device,int brightness,int contrast,bool savedBrightness=false,bool savedContrast=false);
     void restore(const std::wstring& device,int brightness,int contrast,bool savedBrightness,bool savedContrast);
     void refresh(const std::wstring& device);
+    // Discard stale device-specific jobs and cached values when GDI names may
+    // have been reassigned to different physical panels.
+    void invalidateTopology();
     void poll(const std::wstring& device); // silent read; does not disable live sliders
     bool set(const std::wstring& device, DdcFeature feature, int percent);
     DdcState state(const std::wstring& device);
@@ -77,6 +80,7 @@ private:
     std::map<std::pair<std::wstring,int>,Job> jobs_;
     HWND window_ = nullptr;
     bool stopping_ = false;
+    std::uint64_t topologyEpoch_=0;
     std::thread worker_;
 };
 }
