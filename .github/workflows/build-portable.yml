@@ -65,9 +65,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = (Resolve-Path 'build/Release/NightLight.exe').Path
+          function Invoke-Setup([string]$argument) {
+            # NightLight is a Windows GUI executable: '&' does not wait for it.
+            $process = Start-Process -FilePath $exe -ArgumentList $argument -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "$argument exited with Windows error $($process.ExitCode)"
+            }
+          }
           try {
-            & $exe --install-all-users-task
-            if ($LASTEXITCODE -ne 0) { throw "Task installation failed: $LASTEXITCODE" }
+            Invoke-Setup '--install-all-users-task'
             $task = Get-ScheduledTask -TaskName 'NightLightAllUsers' -ErrorAction Stop
             if ([string]::IsNullOrEmpty($task.Principal.GroupId)) {
               throw 'Task must use an interactive group principal'
@@ -75,22 +81,19 @@ jobs:
             if (-not ($task.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' })) {
               throw 'Task must use a logon trigger'
             }
-            & $exe --remove-all-users-task
-            if ($LASTEXITCODE -ne 0) { throw "Task removal failed: $LASTEXITCODE" }
+            Invoke-Setup '--remove-all-users-task'
             if (Get-ScheduledTask -TaskName 'NightLightAllUsers' -ErrorAction SilentlyContinue) {
               throw 'Task remains after disabling the option'
             }
-            & $exe --install-service
-            if ($LASTEXITCODE -ne 0) { throw "Service installation failed: $LASTEXITCODE" }
+            Invoke-Setup '--install-service'
             $service = Get-CimInstance Win32_Service -Filter "Name='NightLightBackground'"
             if (-not $service -or $service.StartMode -ne 'Auto') {
               throw 'Automatic boot service was not registered'
             }
-            & $exe --remove-service
-            if ($LASTEXITCODE -ne 0) { throw "Service removal failed: $LASTEXITCODE" }
+            Invoke-Setup '--remove-service'
           } finally {
-            & $exe --remove-all-users-task | Out-Null
-            & $exe --remove-service | Out-Null
+            Start-Process -FilePath $exe -ArgumentList '--remove-all-users-task' -Wait -PassThru | Out-Null
+            Start-Process -FilePath $exe -ArgumentList '--remove-service' -Wait -PassThru | Out-Null
           }
 
       - name: Prepare standalone EXE
