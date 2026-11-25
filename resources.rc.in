@@ -1,3 +1,4 @@
 #include <windows.h>
 101 ICON "@ICON_PATH@"
 102 ICON "@ICON_DARK_PATH@"
+103 ICON "@ICON_LIGHT_PATH@"

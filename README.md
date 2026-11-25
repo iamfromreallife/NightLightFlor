@@ -61,3 +61,5 @@ The NVIDIA target gamma interface is based on independently documented reverse-e
 
 
 The tray icon automatically switches between light- and dark-taskbar variants using the Windows system theme, independently of NightLight's app theme.
+
+The Fluent-inspired sun icon has dedicated light/dark tray variants rasterized at native small-icon sizes, and a separate full-size executable icon up to 256×256 pixels.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(NightLightNative VERSION 1.0.0 LANGUAGES CXX RC)
+project(NightLightNative VERSION 1.0.2 LANGUAGES CXX RC)
 if(NOT WIN32)
     message(FATAL_ERROR "Native NightLight requires Windows.")
 endif()
@@ -20,8 +20,9 @@ target_link_libraries(nightlight-core PUBLIC user32 gdi32 shell32 ole32 oleaut32
 
 set(ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/icon.ico")
 set(ICON_DARK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/icon-dark.ico")
-if(NOT EXISTS "${ICON_PATH}" OR NOT EXISTS "${ICON_DARK_PATH}")
-    message(FATAL_ERROR "Missing icon.ico or icon-dark.ico, required to build executable resources.")
+set(ICON_LIGHT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/icon-light.ico")
+if(NOT EXISTS "${ICON_PATH}" OR NOT EXISTS "${ICON_DARK_PATH}" OR NOT EXISTS "${ICON_LIGHT_PATH}")
+    message(FATAL_ERROR "Missing application or tray icon resource.")
 endif()
 configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
 

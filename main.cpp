@@ -55,8 +55,9 @@ constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
 constexpr UINT TIMER_DISPLAYS = 10;
 constexpr UINT TIMER_TRAY_RETRY = 21;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
-constexpr int ICON_RESOURCE = 101; // dark outline, default executable icon
-constexpr int ICON_RESOURCE_DARK_TASKBAR = 102; // light outline
+constexpr int ICON_RESOURCE = 101; // full-size Explorer and application icon
+constexpr int ICON_RESOURCE_DARK_TASKBAR = 102; // bright tray artwork
+constexpr int ICON_RESOURCE_LIGHT_TASKBAR = 103; // deeper tray colors
 constexpr UINT TRAY_ID = 100;
 
 // Standalone adaptation of the supplied Windhawk mod's input protection.
@@ -1506,7 +1507,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.1";
+        const std::wstring version=L"NightLight v1.0.2";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -2164,13 +2165,13 @@ private:
             (hc.dwFlags&HCF_HIGHCONTRASTON)) {
             const COLORREF bg=GetSysColor(COLOR_WINDOW);
             const int luminance=299*GetRValue(bg)+587*GetGValue(bg)+114*GetBValue(bg);
-            return luminance<128000?ICON_RESOURCE_DARK_TASKBAR:ICON_RESOURCE;
+            return luminance<128000?ICON_RESOURCE_DARK_TASKBAR:ICON_RESOURCE_LIGHT_TASKBAR;
         }
         DWORD light=1, bytes=sizeof(light);
         const LSTATUS status=RegGetValueW(HKEY_CURRENT_USER,
             L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
             L"SystemUsesLightTheme",RRF_RT_REG_DWORD,nullptr,&light,&bytes);
-        return status==ERROR_SUCCESS && light==0?ICON_RESOURCE_DARK_TASKBAR:ICON_RESOURCE;
+        return status==ERROR_SUCCESS && light==0?ICON_RESOURCE_DARK_TASKBAR:ICON_RESOURCE_LIGHT_TASKBAR;
     }
     void refreshTrayIcon(bool preparingAdd=false) {
         if(!trayReady_ && !preparingAdd) return;
