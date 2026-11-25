@@ -181,6 +181,14 @@ std::wstring monitorTooltip(const std::vector<Monitor>& monitors);
 bool gammaRangeUnlocked();
 DWORD unlockGammaRange();
 
+// Undo the software-cursor setting used by older NightLight cursor tests:
+// MouseTrails=-1 causes Windows to draw the pointer in software on some
+// systems. Clearing that override lets Windows select its hardware cursor
+// plane again, which usually bypasses per-monitor gamma ramps.
+// Other user mouse-trail preferences are deliberately left unchanged.
+bool legacySoftwareCursorOverride(const std::wstring& value);
+bool clearLegacySoftwareCursorOverride();
+
 enum class GammaRefresh { Normal, Verify, Restore };
 struct GammaRampState { Ramp ramp{}; bool valid=false; };
 // Injectable transport keeps reset recovery and no-op suppression testable
