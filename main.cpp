@@ -364,6 +364,11 @@ public:
                         MB_ICONERROR | MB_OK);
             return 2;
         }
+        // Previous NightLight cursor-test scripts set MouseTrails=-1,
+        // deliberately forcing software pointer composition. Undo ONLY that
+        // particular workaround; regular pointer preferences remain intact.
+        // The Windows compositor/GPU ultimately chooses hardware vs software.
+        nightlight::clearLegacySoftwareCursorOverride();
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES};
         InitCommonControlsEx(&common);
