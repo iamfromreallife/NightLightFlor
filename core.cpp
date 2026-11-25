@@ -1,5 +1,9 @@
 #include "core.hpp"
 #include "display_identity.hpp"
+#include "ddc.hpp"
+#include <physicalmonitorenumerationapi.h>
+#include <highlevelmonitorconfigurationapi.h>
+#include <array>
 #include <shlobj.h>
 #include <algorithm>
 #include <chrono>
@@ -82,10 +86,15 @@ ColorGains kelvinGains(int kelvin) {
         (138.5177312231 * std::log(t - 10) - 305.0447927307) / 255.0;
     return {1, std::clamp(green, 0.0, 1.0), std::clamp(blue, 0.0, 1.0)};
 }
+DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor) {
+    if (baseline<=minimum) return minimum;
+    return minimum+static_cast<DWORD>(std::llround((baseline-minimum)*std::clamp(factor,0.0,1.0)));
+}
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors) {
     std::wstring text = L"NightLight";
     for (const auto& m : monitors) {
         text += L"\n" + m.displayName() + L": " + std::to_wstring(m.kelvin) + L" K";
+        if (m.hardwareColor) text += L" [DDC/CI]";
         if (!m.enabled) text += L" (off)";
         else if (m.gammaStatus == 0) text += L" (unavailable)";
     }
@@ -550,6 +559,8 @@ bool Model::save() {
         profile["kelvin"] = mon.kelvin;
         profile["enabled"] = mon.enabled;
         profile["custom_name"] = toUtf8(mon.alias);
+        if (mon.hardwareColor) profile["hardware_color"] = true;
+        else profile["hardware_color"] = false;
     }
     // Persist only settings implemented by this version. Keep profiles for
     // disconnected displays so their current targets survive reconnects.
@@ -570,7 +581,7 @@ bool Model::save() {
     if(auto values=std::get_if<portable::Json::Object>(&root_.get("screen").get("monitor_profiles").value))
         for(const auto& item:*values) {
             auto profile=portable::Json::object();
-            for(const char* key:{"kelvin","enabled","custom_name","ddc_brightness","ddc_contrast"}) {
+            for(const char* key:{"kelvin","enabled","custom_name","ddc_brightness","ddc_contrast","hardware_color"}) {
                 const auto& value=item.second.get(key);
                 if(!std::holds_alternative<std::nullptr_t>(value.value))profile[key]=value;
             }
@@ -609,6 +620,7 @@ void Model::readProfile(Monitor& m) const {
     m.kelvin = std::clamp(
         profile.get("kelvin").integer(profileDefaultKelvin(root_)), 1000, 6500);
     m.alias = fromUtf8(profile.get("custom_name").str());
+    m.hardwareColor = profile.get("hardware_color").boolean(false);
 }
 static bool sameDisplaySnapshot(const std::vector<Monitor>& a,
                                 const std::vector<Monitor>& b) {
@@ -684,6 +696,7 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
             mon.kelvin=old->kelvin;
             mon.enabled=old->enabled;
             mon.alias=old->alias;
+            mon.hardwareColor=old->hardwareColor;
         }
     }
     monitors_=std::move(entries);
@@ -738,15 +751,112 @@ void Model::setStatusWindow(HWND window) {
     statusWindow_ = window;
 }
 
-void Model::queueGamma(const std::wstring& device, const Ramp& ramp, GammaRefresh refresh) {
+void Model::queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh refresh) {
+    const auto& device=monitor.device;
     std::lock_guard<std::mutex> guard(gammaMutex_);
     if (gammaStopping_) return;
     const std::uint64_t generation = ++newestGeneration_[device];
     auto pending=pendingGamma_.find(device);
     if (pending!=pendingGamma_.end() && static_cast<int>(pending->second.refresh)>static_cast<int>(refresh))
         refresh=pending->second.refresh;
-    pendingGamma_[device] = GammaJob{generation, ramp,refresh};
+    pendingGamma_[device] = GammaJob{generation, ramp,refresh,monitor};
+    gammaResults_.erase(device);
     if (gammaEvent_) SetEvent(gammaEvent_); else gammaWake_.notify_one();
+}
+
+// Resolve a fresh, unique physical target before any monitor writes.
+static bool uniquePhysicalTarget(const Monitor& mon) {
+    if (mon.physicalId.empty()) return false;
+    const auto topology=queryPhysicalDisplayTargets();
+    const auto it=topology.bySource.find(normalizedDisplayId(mon.device));
+    return topology.complete && it!=topology.bySource.end() && it->second.size()==1 &&
+        normalizedDisplayId(it->second.front().physicalId)==normalizedDisplayId(mon.physicalId);
+}
+struct HardwareFind { const std::wstring& device; HMONITOR handle=nullptr; };
+static BOOL CALLBACK findHardwareDisplay(HMONITOR monitor,HDC,LPRECT,LPARAM param) {
+    auto& find=*reinterpret_cast<HardwareFind*>(param);
+    MONITORINFOEXW info{}; info.cbSize=sizeof(info);
+    if (GetMonitorInfoW(monitor,&info) && find.device==info.szDevice) {
+        find.handle=monitor; return FALSE;
+    }
+    return TRUE;
+}
+struct PhysicalColorHandle {
+    PHYSICAL_MONITOR value{};
+    bool valid=false;
+    explicit PhysicalColorHandle(const Monitor& mon) {
+        HardwareFind find{mon.device};
+        EnumDisplayMonitors(nullptr,nullptr,findHardwareDisplay,reinterpret_cast<LPARAM>(&find));
+        DWORD count=0;
+        if (find.handle && GetNumberOfPhysicalMonitorsFromHMONITOR(find.handle,&count) && count==1)
+            valid=GetPhysicalMonitorsFromHMONITOR(find.handle,1,&value)!=FALSE;
+    }
+    ~PhysicalColorHandle() { if(valid) DestroyPhysicalMonitors(1,&value); }
+};
+bool Model::applyHardwareColor(const Monitor& mon,bool active) {
+    // Keep the original hardware gains on disk BEFORE modifying any channel.
+    // Monitor firmware can retain its settings after a crash or power loss.
+    // A later disable/exit/restart can restore from this recovery journal.
+    const auto journalPath=directory_/L"hardware-color-backup.json";
+    portable::Json journal=portable::Json::object();
+    std::string document;
+    if (readWholeFile(journalPath,document)) {
+        try { journal=portable::Json::parse(document); }
+        catch (...) { return false; }
+        if (!journal.isObject()) return false;
+    } else {
+        const DWORD attrs=GetFileAttributesW(journalPath.c_str());
+        if (attrs!=INVALID_FILE_ATTRIBUTES || GetLastError()!=ERROR_FILE_NOT_FOUND) return false;
+    }
+    const auto key=toUtf8(monitorProfileKey(mon));
+    const auto& record=journal.get(key);
+    const bool saved=record.isObject();
+    if (!saved && !active) return true; // GPU mode normally does no DDC I/O.
+    if (!uniquePhysicalTarget(mon)) return false;
+    std::lock_guard<std::mutex> io(physicalDdcMutex());
+    PhysicalColorHandle physical(mon);
+    if (!physical.valid || !uniquePhysicalTarget(mon)) return false;
+    const HANDLE handle=physical.value.hPhysicalMonitor;
+    constexpr std::array<MC_GAIN_TYPE,3> channels{MC_RED_GAIN,MC_GREEN_GAIN,MC_BLUE_GAIN};
+    constexpr std::array<const char*,3> keys{"red","green","blue"};
+    std::array<DWORD,3> lo{},current{},hi{},original{},target{};
+    for (size_t i=0;i<3;++i) {
+        if (!GetMonitorRedGreenOrBlueGain(handle,channels[i],&lo[i],&current[i],&hi[i]) ||
+            hi[i]<=lo[i] || current[i]<lo[i] || current[i]>hi[i] || hi[i]>65535) return false;
+        if (saved) {
+            const int previous=record.get(keys[i]).integer(-1);
+            if (previous<0 || static_cast<DWORD>(previous)<lo[i] ||
+                static_cast<DWORD>(previous)>hi[i]) return false;
+            original[i]=static_cast<DWORD>(previous);
+        } else original[i]=current[i];
+    }
+    if (!saved) {
+        for (size_t i=0;i<3;++i) journal[key][keys[i]]=static_cast<int>(original[i]);
+        if (!atomicWrite(journalPath,journal.dump())) return false;
+    }
+    const auto gains=kelvinGains(mon.kelvin);
+    const std::array<double,3> factors{gains.red,gains.green,gains.blue};
+    for (size_t i=0;i<3;++i)
+        target[i]=active?hardwareGainTarget(lo[i],original[i],factors[i]):original[i];
+    if (!uniquePhysicalTarget(mon)) return false;
+    bool ok=true;
+    for (size_t i=0;i<3;++i) {
+        if (current[i]!=target[i] && !SetMonitorRedGreenOrBlueGain(handle,channels[i],target[i])) {
+            ok=false; break;
+        }
+    }
+    if (!ok) {
+        // Roll back to the original calibration, never leave a partially
+        // applied set of RGB values intentionally. Retain the recovery file.
+        for (size_t i=0;i<3;++i)
+            SetMonitorRedGreenOrBlueGain(handle,channels[i],original[i]);
+        return false;
+    }
+    if (!active) {
+        std::get<portable::Json::Object>(journal.value).erase(key);
+        if (!atomicWrite(journalPath,journal.dump())) return false;
+    }
+    return true;
 }
 
 void Model::gammaLoop() {
@@ -785,13 +895,36 @@ void Model::gammaLoop() {
         auto& job=item.second;
         // This call can block for several frames on some graphics drivers;
         // the UI thread is never forced to wait for it.
-        HDC dc = CreateDCW(L"DISPLAY", device.c_str(), nullptr, nullptr);
-        int result = 0;
-        if (dc) {
-            result=updateGammaRamp(job.ramp,job.refresh,appliedRamps[device],
-                [&](Ramp& actual) { return GetDeviceGammaRamp(dc,&actual)!=FALSE; },
-                [&](const Ramp& desired) { return SetDeviceGammaRamp(dc,const_cast<Ramp*>(&desired))!=FALSE; })?1:0;
-            DeleteDC(dc);
+        const auto key=monitorProfileKey(job.monitor);
+        int result=0;
+        {
+            std::lock_guard<std::mutex> guard(gammaMutex_);
+            if (gammaStopping_ || newestGeneration_[device]!=job.generation) continue;
+        }
+        if (job.monitor.hardwareColor) {
+            // Restore the GPU calibration once on transition, but never
+            // apply a warm GPU ramp (including verification) in hardware mode.
+            bool neutral=true;
+            if (gammaTouched_.count(key)) {
+                neutral=uniquePhysicalTarget(job.monitor);
+                HDC dc=neutral?CreateDCW(L"DISPLAY",device.c_str(),nullptr,nullptr):nullptr;
+                neutral=dc && SetDeviceGammaRamp(dc,&job.ramp)!=FALSE;
+                if (dc) DeleteDC(dc);
+                if (neutral) { gammaTouched_.erase(key); appliedRamps.erase(device); }
+            }
+            if (neutral)
+                result=applyHardwareColor(job.monitor,job.monitor.enabled && job.monitor.kelvin<6500)?1:0;
+        } else if (applyHardwareColor(job.monitor,false)) {
+            HDC dc=CreateDCW(L"DISPLAY",device.c_str(),nullptr,nullptr);
+            if (dc) {
+                result=updateGammaRamp(job.ramp,job.refresh,appliedRamps[device],
+                    [&](Ramp& actual) { return GetDeviceGammaRamp(dc,&actual)!=FALSE; },
+                    [&](const Ramp& desired) {
+                        gammaTouched_.insert(key);
+                        return SetDeviceGammaRamp(dc,const_cast<Ramp*>(&desired))!=FALSE;
+                    })?1:0;
+                DeleteDC(dc);
+            }
         }
         HWND notify = nullptr;
         {
@@ -851,9 +984,9 @@ bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
     }
     const auto original = originals_.find(persistent);
     const Ramp* baseline = original != originals_.end() ? &original->second : nullptr;
-    const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled, baseline);
+    const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled && !mon.hardwareColor, baseline);
     mon.gammaStatus = -1;  // Worker publishes real hardware result later.
-    queueGamma(mon.device,ramp,refresh);
+    queueGamma(mon,ramp,refresh);
     return true;
 }
 void Model::applyAll(GammaRefresh refresh) {
@@ -866,6 +999,7 @@ bool Model::persistProfile(size_t index) {
     profile["enabled"] = mon.enabled;
     profile["kelvin"] = mon.kelvin;
     profile["custom_name"] = toUtf8(mon.alias);
+    profile["hardware_color"] = mon.hardwareColor;
     return save();
 }
 bool Model::previewKelvin(size_t index, int kelvin) {
@@ -888,6 +1022,14 @@ bool Model::updateEnabled(size_t index, bool enabled) {
     applyDisplay(monitors_[index],GammaRefresh::Normal);
     return persistProfile(index);
 }
+bool Model::updateColorBackend(size_t index,bool hardware) {
+    if (index>=monitors_.size() || !loaded_) return false;
+    auto& mon=monitors_[index];
+    if (mon.hardwareColor==hardware) return true;
+    mon.hardwareColor=hardware;
+    persistProfile(index);
+    return applyDisplay(mon,GammaRefresh::Restore);
+}
 bool Model::renameMonitor(size_t index, const std::wstring& alias) {
     if (index >= monitors_.size() || !loaded_ || alias.size() > 64) return false;
     for (wchar_t c : alias) if (c < 0x20) return false;
@@ -908,6 +1050,8 @@ void Model::restoreOriginals() {
     // wake. Restore original gamma only to the currently matched physical
     // target, never to whichever panel received an old DISPLAYx number.
     for (const auto& mon:monitors_) {
+        applyHardwareColor(mon,false);
+        if (!gammaTouched_.count(monitorProfileKey(mon))) continue;
         const auto original=originals_.find(monitorProfileKey(mon));
         if (original==originals_.end()) continue;
         HDC dc=CreateDCW(L"DISPLAY",mon.device.c_str(),nullptr,nullptr);
@@ -917,6 +1061,7 @@ void Model::restoreOriginals() {
         }
     }
     originals_.clear();
+    gammaTouched_.clear();
 }
 void Model::migrateAutorunEntry() const {
     // Older NightLight builds created a Run key with a hardcoded

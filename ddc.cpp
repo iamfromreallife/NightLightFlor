@@ -236,6 +236,7 @@ void DdcController::run() {
             epoch=topologyEpoch_;
             previous=key; first=false;
         }
+        std::unique_lock<std::mutex> physicalLock(physicalDdcMutex());
         Physical monitor(api,key.first);
         if (key.second==-1) {
             const DdcValue brightness=observe(api,monitor,wmi,key.first,0), contrast=observe(api,monitor,wmi,key.first,1);
@@ -286,6 +287,7 @@ void DdcController::run() {
             }
             if (window_ && !stopping_) PostMessageW(window_,WM_DDC_COMPLETE,0,0);
         }
+        physicalLock.unlock();
         // Bound DDC/CI traffic; pointer events overwrite pending writes.
         { std::unique_lock<std::mutex> lock(mutex_);
           wake_.wait_for(lock,std::chrono::milliseconds(75),[&]{return stopping_;});

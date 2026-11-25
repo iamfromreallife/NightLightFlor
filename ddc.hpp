@@ -9,6 +9,8 @@
 #include <thread>
 
 namespace nightlight {
+// Serialize physical DDC/CI transactions across brightness and colour workers.
+inline std::mutex& physicalDdcMutex() { static std::mutex mutex; return mutex; }
 constexpr UINT WM_DDC_COMPLETE = WM_APP + 42;
 // Hardware can be changed by monitor OSD controls, other software or hotkeys.
 // Poll only while the controls are visible; all I2C/WMI reads stay on the worker.

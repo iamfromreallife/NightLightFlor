@@ -16,7 +16,7 @@ endif()
 add_library(nightlight-core STATIC core.cpp display_identity.cpp ddc.cpp wmi_brightness.cpp)
 target_include_directories(nightlight-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(nightlight-core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(nightlight-core PUBLIC user32 gdi32 shell32 ole32 oleaut32 wbemuuid advapi32)
+target_link_libraries(nightlight-core PUBLIC user32 gdi32 shell32 ole32 oleaut32 wbemuuid advapi32 dxva2)
 
 set(ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/icon.ico")
 if(NOT EXISTS "${ICON_PATH}")

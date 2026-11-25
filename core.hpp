@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <thread>
 #include "json.hpp"
 
@@ -34,6 +35,7 @@ struct Monitor {
     int kelvin = 5000;
     // -1 unknown, 0 not supported by this display/driver, 1 success
     int gammaStatus = -1;
+    bool hardwareColor = false; // opt-in physical RGB gain control
     std::wstring displayName() const { return alias.empty() ? windowsName : alias; }
 };
 
@@ -177,6 +179,7 @@ int temperatureSliderXFromKelvin(int kelvin, int left, int right);
 // Do not use a fullscreen colour matrix: it can tint the mouse pointer.
 struct ColorGains { double red, green, blue; };
 ColorGains kelvinGains(int kelvin);
+DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor);
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors);
 bool gammaRangeUnlocked();
 DWORD unlockGammaRange();
@@ -204,6 +207,7 @@ public:
     bool previewKelvin(size_t index, int kelvin);
     bool updateKelvin(size_t index, int kelvin);
     bool updateEnabled(size_t index, bool enabled);
+    bool updateColorBackend(size_t index,bool hardware);
     bool renameMonitor(size_t index, const std::wstring& alias);
     void updatePreferences(const Preferences& updated);
     bool hasHardwarePercent(const std::wstring& device,bool contrast) const;
@@ -228,7 +232,9 @@ private:
     std::wstring profileKeyForDevice(const std::wstring& device) const;
     bool applyDisplay(Monitor& monitor,GammaRefresh refresh);
     void adoptOriginal(const std::wstring& device, HDC dc);
-    void queueGamma(const std::wstring& device, const Ramp& ramp, GammaRefresh refresh);
+    void queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh refresh);
+    bool applyHardwareColor(const Monitor& monitor,bool active);
+    std::set<std::wstring> gammaTouched_; // worker only, read after join
     void gammaLoop();
     void stopGamma();
 
@@ -236,6 +242,7 @@ private:
         std::uint64_t generation = 0;
         Ramp ramp{};
         GammaRefresh refresh=GammaRefresh::Normal;
+        Monitor monitor;
     };
     std::mutex gammaMutex_;
     std::condition_variable gammaWake_;

@@ -3,7 +3,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
-#include <tlhelp32.h>
 #include <dwmapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
@@ -50,7 +49,7 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
-constexpr int ID_TRAY_CHROME_COMPAT = 4400, ID_TRAY_BRAVE_COMPAT = 4401;
+constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
 constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
@@ -2121,93 +2120,6 @@ private:
         if (trayReady_) Shell_NotifyIconW(NIM_DELETE,&notify_);
         trayReady_=false; trayVersion4_=false;
     }
-    // Opt-in diagnostic workaround for NVIDIA/DWM colour glitches. This
-    // changes only the browser's presentation path, never the system MPO
-    // registry setting, NightLight gamma engine, or browser configuration.
-    void launchCompatibleBrowser(bool brave) {
-        const wchar_t* exe = brave ? L"brave.exe" : L"chrome.exe";
-        const wchar_t* browser = brave ? L"Brave" : L"Chrome";
-        const auto title = tr(L"Browser compatibility",L"Compatibilidade do navegador");
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
-        if (snapshot == INVALID_HANDLE_VALUE) {
-            MessageBoxW(window_,tr(L"Could not check running browser processes. Close the browser completely and try again.",
-                L"Não foi possível verificar os processos do navegador. Feche-o completamente e tente novamente.").c_str(),title.c_str(),MB_OK|MB_ICONWARNING);
-            return;
-        }
-        PROCESSENTRY32W entry{};
-        entry.dwSize=sizeof(entry);
-        bool running=false;
-        BOOL more=Process32FirstW(snapshot,&entry);
-        if (!more) {
-            CloseHandle(snapshot);
-            MessageBoxW(window_,tr(L"Could not enumerate running processes.",L"Não foi possível enumerar os processos em execução.").c_str(),title.c_str(),MB_OK|MB_ICONWARNING);
-            return;
-        }
-        do {
-            if (_wcsicmp(entry.szExeFile,exe)==0) { running=true; break; }
-            more=Process32NextW(snapshot,&entry);
-        } while(more);
-        const bool complete=running || GetLastError()==ERROR_NO_MORE_FILES;
-        CloseHandle(snapshot);
-        if (!complete) {
-            MessageBoxW(window_,tr(L"Could not complete the browser process check.",L"Não foi possível concluir a verificação dos processos do navegador.").c_str(),title.c_str(),MB_OK|MB_ICONWARNING);
-            return;
-        }
-        if (running) {
-            std::wstring message=std::wstring(browser)+tr(
-                L" is still running. Exit it using its menu and close any remaining background browser processes normally, then try again. NightLight will not terminate any processes.",
-                L" ainda está em execução. Saia através do menu, feche normalmente os processos em segundo plano restantes e tente novamente. O NightLight não termina processos.");
-            MessageBoxW(window_,message.c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);
-            return;
-        }
-        auto validPath=[](const std::wstring& path) {
-            // Require an absolute drive path and an existing regular file.
-            if (path.size()<3 || path[1]!=L':' || path[2]!=L'\\') return false;
-            const DWORD attrs=GetFileAttributesW(path.c_str());
-            return attrs!=INVALID_FILE_ATTRIBUTES && !(attrs&FILE_ATTRIBUTE_DIRECTORY);
-        };
-        std::wstring path;
-        const std::wstring key=std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\")+exe;
-        for (HKEY root : {HKEY_CURRENT_USER,HKEY_LOCAL_MACHINE}) {
-            for (DWORD view : {DWORD(RRF_SUBKEY_WOW6464KEY),DWORD(RRF_SUBKEY_WOW6432KEY)}) {
-                wchar_t candidate[32768]{};
-                DWORD bytes=sizeof(candidate);
-                if (RegGetValueW(root,key.c_str(),nullptr,RRF_RT_REG_SZ|RRF_RT_REG_EXPAND_SZ|view,
-                    nullptr,candidate,&bytes)==ERROR_SUCCESS && validPath(candidate)) {
-                    path=candidate;
-                    break;
-                }
-            }
-            if (!path.empty()) break;
-        }
-        if (path.empty()) {
-            const wchar_t* suffix=brave?L"\\BraveSoftware\\Brave-Browser\\Application\\brave.exe":
-                L"\\Google\\Chrome\\Application\\chrome.exe";
-            for (const wchar_t* variable : {L"LOCALAPPDATA",L"ProgramW6432",L"ProgramFiles",L"ProgramFiles(x86)"}) {
-                wchar_t folder[32768]{};
-                const DWORD length=GetEnvironmentVariableW(variable,folder,static_cast<DWORD>(sizeof(folder)/sizeof(folder[0])));
-                if (!length || length>=sizeof(folder)/sizeof(folder[0])) continue;
-                const std::wstring candidate=std::wstring(folder)+suffix;
-                if (validPath(candidate)) { path=candidate; break; }
-            }
-        }
-        if (path.empty()) {
-            MessageBoxW(window_,tr(L"Browser executable not found. For a portable or nonstandard installation, add --disable-direct-composition to its shortcut manually.",
-                L"Executável não encontrado. Numa instalação portátil ou não convencional, acrescente --disable-direct-composition ao atalho manualmente.").c_str(),title.c_str(),MB_OK|MB_ICONWARNING);
-            return;
-        }
-        const auto prompt=tr(L"Launch the browser with DirectComposition disabled for this session? This is an experimental workaround for dark or flickering menus. Hardware acceleration is not globally disabled. Normal browser launches are unchanged.",
-            L"Iniciar o navegador com DirectComposition desativada nesta sessão? Esta é uma solução experimental para menus escuros ou intermitentes. A aceleração por hardware não é desativada globalmente. Os arranques normais não são alterados.");
-        if (MessageBoxW(window_,prompt.c_str(),title.c_str(),MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES) return;
-        SHELLEXECUTEINFOW info{sizeof(info)};
-        info.hwnd=window_; info.lpVerb=L"open"; info.lpFile=path.c_str();
-        info.lpParameters=L"--disable-direct-composition";
-        info.nShow=SW_SHOWNORMAL;
-        info.fMask=SEE_MASK_FLAG_NO_UI;
-        if (!ShellExecuteExW(&info)) {
-            MessageBoxW(window_,tr(L"Could not launch the browser.",L"Não foi possível iniciar o navegador.").c_str(),title.c_str(),MB_OK|MB_ICONERROR);
-        }
-    }
     HMENU buildTrayMenu(std::vector<HBITMAP>& icons) {
         auto createMenu=[] {
             HMENU result=CreatePopupMenu();
@@ -2249,13 +2161,23 @@ private:
             nightlight::MenuIcon::Window);
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         append(menu,MF_STRING|(ddcVisible_?MF_CHECKED:0),ID_DDC,tr(L"DDC/CI Controls",L"Controlos DDC/CI").c_str(),nightlight::MenuIcon::Adjust);
-        HMENU compatibility=createMenu();
-        append(compatibility,MF_STRING,ID_TRAY_CHROME_COMPAT,
-            tr(L"Launch Chrome (compatibility mode)",L"Abrir Chrome (modo de compatibilidade)").c_str(),nightlight::MenuIcon::Window);
-        append(compatibility,MF_STRING,ID_TRAY_BRAVE_COMPAT,
-            tr(L"Launch Brave (compatibility mode)",L"Abrir Brave (modo de compatibilidade)").c_str(),nightlight::MenuIcon::Window);
-        append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(compatibility),
-            tr(L"Browser compatibility",L"Compatibilidade do navegador").c_str(),nightlight::MenuIcon::Adjust);
+        HMENU engines=createMenu();
+        if (model_.monitors().empty())
+            append(engines,MF_STRING|MF_GRAYED,0,tr(L"No connected displays",L"Nenhum ecrã ligado").c_str(),nightlight::MenuIcon::Monitor);
+        for (size_t i=0;i<model_.monitors().size() && i<1000;++i) {
+            const auto& mon=model_.monitors()[i];
+            HMENU options=createMenu();
+            append(options,MF_STRING|(!mon.hardwareColor?MF_CHECKED:0),ID_TRAY_COLOR_GPU_BASE+i,
+                tr(L"GPU gamma",L"Gama da GPU").c_str(),nightlight::MenuIcon::Adjust);
+            append(options,MF_STRING|(mon.hardwareColor?MF_CHECKED:0),ID_TRAY_COLOR_HW_BASE+i,
+                tr(L"Monitor hardware (DDC/CI)",L"Hardware do ecrã (DDC/CI)").c_str(),nightlight::MenuIcon::Monitor);
+            auto name=mon.displayName();
+            if(mon.hardwareColor && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
+            if(mon.hardwareColor && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
+            append(engines,MF_POPUP,reinterpret_cast<UINT_PTR>(options),name.c_str(),nightlight::MenuIcon::Monitor);
+        }
+        append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(engines),
+            tr(L"Colour correction engine",L"Motor de correção de cor").c_str(),nightlight::MenuIcon::Adjust);
         if (model_.monitors().empty()) {
             append(monitors,MF_STRING|MF_GRAYED,0,
                 tr(L"No connected displays",L"Nenhum ecrã ligado").c_str(),nightlight::MenuIcon::Monitor);
@@ -2287,8 +2209,19 @@ private:
         if (cmd==ID_TRAY_EXIT) {
             shuttingDown_=true;
             DestroyWindow(window_);
-        } else if (cmd==ID_TRAY_CHROME_COMPAT || cmd==ID_TRAY_BRAVE_COMPAT) {
-            launchCompatibleBrowser(cmd==ID_TRAY_BRAVE_COMPAT);
+        } else if ((cmd>=ID_TRAY_COLOR_GPU_BASE && cmd<ID_TRAY_COLOR_GPU_BASE+1000) ||
+                   (cmd>=ID_TRAY_COLOR_HW_BASE && cmd<ID_TRAY_COLOR_HW_BASE+1000)) {
+            const bool hardware=cmd>=ID_TRAY_COLOR_HW_BASE;
+            const size_t index=cmd-(hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
+            if (index<model_.monitors().size()) {
+                bool proceed=true;
+                if(hardware && !model_.monitors()[index].hardwareColor)
+                    proceed=MessageBoxW(window_,tr(
+                        L"Use monitor RGB gain controls instead of GPU gamma? Requires DDC/CI and a compatible monitor. White cursor and all screen pixels will be warmed. Original gains are backed up beside NightLight.exe. Kelvin values are approximate.",
+                        L"Usar os ganhos RGB do ecrã em vez da gama da GPU? Requer DDC/CI e um ecrã compatível. O cursor branco e todos os píxeis ficam mais quentes. Os ganhos originais são guardados junto ao NightLight.exe. Os valores Kelvin são aproximados.").c_str(),
+                        L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
+                if(proceed) {model_.updateColorBackend(index,hardware); updateTrayTooltip(); repaint();}
+            }
         } else if (cmd==ID_DDC) {
             toggleHardware();
         } else if (cmd==ID_TRAY_LANGUAGE_BASE || cmd==ID_TRAY_LANGUAGE_BASE+1) {

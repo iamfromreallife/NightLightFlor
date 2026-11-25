@@ -16,6 +16,9 @@ void check(bool ok,const char* message) {
 }
 int main() {
     try {
+        check(hardwareGainTarget(0,80,1.0)==80,"Hardware neutral retains calibration");
+        check(hardwareGainTarget(10,90,0.5)==50,"Hardware gain uses baseline and minimum");
+        check(hardwareGainTarget(10,90,0.0)==10,"Hardware gain clamps to minimum");
         check(sliderPositionFromX(-1000,10,210,0,10000)==0,"Captured dragging clamps beyond the left edge");
         check(sliderPositionFromX(1000,10,210,0,10000)==10000,"Captured dragging clamps beyond the right edge");
         check(sliderPositionFromX(110,10,210,0,10000)==5000,"Captured dragging maps the pointer continuously");
