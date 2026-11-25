@@ -173,10 +173,10 @@ POINT ddcSliderIconCenter(int iconColumnCenterX, int sliderTop, int sliderHeight
 int kelvinFromTemperatureSliderX(int x, int left, int right);
 int temperatureSliderXFromKelvin(int kelvin, int left, int right);
 
-// Upstream NightLight's RGB factors; shared desktop matrix avoids GDI limits.
+// Kelvin colour gains applied through each monitor's hardware gamma LUT.
+// Do not use a fullscreen colour matrix: it can tint the mouse pointer.
 struct ColorGains { double red, green, blue; };
 ColorGains kelvinGains(int kelvin);
-int sharedMatrixKelvin(const std::vector<Monitor>& monitors);
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors);
 bool gammaRangeUnlocked();
 DWORD unlockGammaRange();
@@ -228,15 +228,13 @@ private:
     std::wstring profileKeyForDevice(const std::wstring& device) const;
     bool applyDisplay(Monitor& monitor,GammaRefresh refresh);
     void adoptOriginal(const std::wstring& device, HDC dc);
-    void queueGamma(const std::wstring& device, const Ramp& ramp, int matrixKelvin, const Ramp& fallback,GammaRefresh refresh);
+    void queueGamma(const std::wstring& device, const Ramp& ramp, GammaRefresh refresh);
     void gammaLoop();
     void stopGamma();
 
     struct GammaJob {
         std::uint64_t generation = 0;
         Ramp ramp{};
-        int matrixKelvin = 0;
-        Ramp fallback{};
         GammaRefresh refresh=GammaRefresh::Normal;
     };
     std::mutex gammaMutex_;
