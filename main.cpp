@@ -49,7 +49,7 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
-constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000;
+constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_NV_BASE=9000;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
 constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
@@ -2167,13 +2167,15 @@ private:
         for (size_t i=0;i<model_.monitors().size() && i<1000;++i) {
             const auto& mon=model_.monitors()[i];
             HMENU options=createMenu();
-            append(options,MF_STRING|(!mon.hardwareColor?MF_CHECKED:0),ID_TRAY_COLOR_GPU_BASE+i,
+            append(options,MF_STRING|(!mon.hardwareColor && !mon.nvidiaColor?MF_CHECKED:0),ID_TRAY_COLOR_GPU_BASE+i,
                 tr(L"GPU gamma",L"Gama da GPU").c_str(),nightlight::MenuIcon::Adjust);
             append(options,MF_STRING|(mon.hardwareColor?MF_CHECKED:0),ID_TRAY_COLOR_HW_BASE+i,
                 tr(L"Monitor hardware (DDC/CI)",L"Hardware do ecrã (DDC/CI)").c_str(),nightlight::MenuIcon::Monitor);
+            append(options,MF_STRING|(mon.nvidiaColor?MF_CHECKED:0),ID_TRAY_COLOR_NV_BASE+i,
+                tr(L"NVIDIA native (experimental)",L"NVIDIA nativo (experimental)").c_str(),nightlight::MenuIcon::Adjust);
             auto name=mon.displayName();
-            if(mon.hardwareColor && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
-            if(mon.hardwareColor && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
+            if((mon.hardwareColor || mon.nvidiaColor) && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
+            if((mon.hardwareColor || mon.nvidiaColor) && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
             append(engines,MF_POPUP,reinterpret_cast<UINT_PTR>(options),name.c_str(),nightlight::MenuIcon::Monitor);
         }
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(engines),
@@ -2210,9 +2212,13 @@ private:
             shuttingDown_=true;
             DestroyWindow(window_);
         } else if ((cmd>=ID_TRAY_COLOR_GPU_BASE && cmd<ID_TRAY_COLOR_GPU_BASE+1000) ||
-                   (cmd>=ID_TRAY_COLOR_HW_BASE && cmd<ID_TRAY_COLOR_HW_BASE+1000)) {
-            const bool hardware=cmd>=ID_TRAY_COLOR_HW_BASE;
-            const size_t index=cmd-(hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
+                   (cmd>=ID_TRAY_COLOR_HW_BASE && cmd<ID_TRAY_COLOR_HW_BASE+1000) ||
+                   (cmd>=ID_TRAY_COLOR_NV_BASE && cmd<ID_TRAY_COLOR_NV_BASE+1000)) {
+            const bool nvidia=cmd>=ID_TRAY_COLOR_NV_BASE;
+            const bool hardware=!nvidia && cmd>=ID_TRAY_COLOR_HW_BASE;
+            const size_t index=cmd-(nvidia?ID_TRAY_COLOR_NV_BASE:hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
+            const auto backend=nvidia?nightlight::ColorBackend::NvidiaCsc:
+                hardware?nightlight::ColorBackend::MonitorHardware:nightlight::ColorBackend::GpuGamma;
             if (index<model_.monitors().size()) {
                 bool proceed=true;
                 if(hardware && !model_.monitors()[index].hardwareColor)
@@ -2220,7 +2226,12 @@ private:
                         L"Use monitor RGB gain controls instead of GPU gamma? Requires DDC/CI and a compatible monitor. White cursor and all screen pixels will be warmed. Original gains are backed up beside NightLight.exe. Kelvin values are approximate.",
                         L"Usar os ganhos RGB do ecrã em vez da gama da GPU? Requer DDC/CI e um ecrã compatível. O cursor branco e todos os píxeis ficam mais quentes. Os ganhos originais são guardados junto ao NightLight.exe. Os valores Kelvin são aproximados.").c_str(),
                         L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
-                if(proceed) {model_.updateColorBackend(index,hardware); updateTrayTooltip(); repaint();}
+                if(nvidia && !model_.monitors()[index].nvidiaColor)
+                    proceed=MessageBoxW(window_,tr(
+                        L"Use experimental NVIDIA native colour conversion? Requires a supported NVIDIA driver and SDR. Browser acceleration and MPO settings are not changed. Existing active driver colour conversion is not overwritten. Cursor colour and rendering depend on the driver.",
+                        L"Usar a conversão de cor nativa experimental da NVIDIA? Requer um controlador NVIDIA compatível e SDR. A aceleração do navegador e o MPO não são alterados. A conversão de cor ativa não é substituída. A cor do cursor e a apresentação dependem do controlador.").c_str(),
+                        L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
+                if(proceed) {model_.updateColorBackend(index,backend); updateTrayTooltip(); repaint();}
             }
         } else if (cmd==ID_DDC) {
             toggleHardware();

@@ -16,6 +16,9 @@ void check(bool ok,const char* message) {
 }
 int main() {
     try {
+        check(nvidiaLinearGain(0.0)==0.0 && nvidiaLinearGain(1.0)==1.0,"CSC neutral endpoints");
+        check(nvidiaLinearGain(0.5)>0.213 && nvidiaLinearGain(0.5)<0.215,"CSC converts encoded gain to linear light");
+        check(nvidiaLinearGain(-1.0)==0.0 && nvidiaLinearGain(2.0)==1.0,"CSC gain clamps safely");
         check(hardwareGainTarget(0,80,1.0)==80,"Hardware neutral retains calibration");
         check(hardwareGainTarget(10,90,0.5)==50,"Hardware gain uses baseline and minimum");
         check(hardwareGainTarget(10,90,0.0)==10,"Hardware gain clamps to minimum");

@@ -36,6 +36,7 @@ struct Monitor {
     // -1 unknown, 0 not supported by this display/driver, 1 success
     int gammaStatus = -1;
     bool hardwareColor = false; // opt-in physical RGB gain control
+    bool nvidiaColor = false; // opt-in NVIDIA native CSC
     std::wstring displayName() const { return alias.empty() ? windowsName : alias; }
 };
 
@@ -180,6 +181,8 @@ int temperatureSliderXFromKelvin(int kelvin, int left, int right);
 struct ColorGains { double red, green, blue; };
 ColorGains kelvinGains(int kelvin);
 DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor);
+double nvidiaLinearGain(double encodedGain);
+enum class ColorBackend { GpuGamma, MonitorHardware, NvidiaCsc };
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors);
 bool gammaRangeUnlocked();
 DWORD unlockGammaRange();
@@ -207,7 +210,7 @@ public:
     bool previewKelvin(size_t index, int kelvin);
     bool updateKelvin(size_t index, int kelvin);
     bool updateEnabled(size_t index, bool enabled);
-    bool updateColorBackend(size_t index,bool hardware);
+    bool updateColorBackend(size_t index,ColorBackend backend);
     bool renameMonitor(size_t index, const std::wstring& alias);
     void updatePreferences(const Preferences& updated);
     bool hasHardwarePercent(const std::wstring& device,bool contrast) const;
@@ -234,6 +237,7 @@ private:
     void adoptOriginal(const std::wstring& device, HDC dc);
     void queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh refresh);
     bool applyHardwareColor(const Monitor& monitor,bool active);
+    bool applyNvidiaColor(const Monitor& monitor,bool active);
     std::set<std::wstring> gammaTouched_; // worker only, read after join
     void gammaLoop();
     void stopGamma();
