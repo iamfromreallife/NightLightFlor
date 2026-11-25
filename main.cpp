@@ -377,7 +377,7 @@ public:
         wc.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(ICON_RESOURCE));
         wc.hIconSm = static_cast<HICON>(
             LoadImageW(instance_, MAKEINTRESOURCEW(ICON_RESOURCE),
-                       IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
+                       IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR|LR_SHARED));
         wc.hbrBackground = nullptr;
         wc.style = CS_HREDRAW | CS_VREDRAW;
         if (!RegisterClassExW(&wc)) return 3;
@@ -1640,7 +1640,8 @@ private:
         for (auto& row:hardwareRows_) {
             const auto state=ddc_.state(row.device);
             auto sync=[&](HWND slider,bool contrast,const nightlight::DdcValue& value) {
-                EnableWindow(slider,ddcVisible_ && !state.loading && value.supported);
+                const bool enabled=ddcVisible_ && !state.loading && value.supported;
+                if((IsWindowEnabled(slider)!=FALSE)!=enabled) EnableWindow(slider,enabled);
                 const bool captured=GetCapture()==slider;
                 if (!captured) {
                     const int current=static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0));
@@ -1914,8 +1915,9 @@ private:
         if (paint) EndBufferedPaint(paint,TRUE);
     }
     void updateTrayTooltip() {
-        if(!trayReady_)return;
-        notify_.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_SHOWTIP;
+        // addTray() installs the static tooltip. Avoid redundant shell IPC.
+        if(!trayReady_ || wcscmp(notify_.szTip,L"NightLight")==0) return;
+        notify_.uFlags=NIF_TIP|NIF_SHOWTIP;
         wcscpy_s(notify_.szTip,L"NightLight");
         Shell_NotifyIconW(NIM_MODIFY,&notify_);
     }
@@ -1934,7 +1936,7 @@ private:
             selected_=previous!=monitors.end()?static_cast<size_t>(previous-monitors.begin()):0;
             finishInlineRename(true);
         }
-        model_.applyAll(nightlight::GammaRefresh::Restore);
+        if(!changed) model_.applyAll(nightlight::GammaRefresh::Restore);
         refreshTabs();refreshHardware();
         syncColorWatchdog();
         updateTrayTooltip();
@@ -1968,6 +1970,7 @@ private:
             x,slider_.left,slider_.right);
         if (save) model_.updateKelvin(selected_,k);
         else if (selectedMonitor()->kelvin != k) model_.previewKelvin(selected_,k);
+        else return;
         // The Kelvin number updates immediately. The graphics
         // driver's gamma call is coalesced on Model's background worker.
         updateTrayTooltip();
@@ -2091,6 +2094,7 @@ private:
             ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
         }
         SetForegroundWindow(window_);
+        if(reveal) repaint();
         if (reveal && ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
             if (!hardwareDiscovered_) refreshHardware();
             else pollHardware();
@@ -2113,6 +2117,10 @@ private:
             if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
             noteWindowPosition();
             SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
+            if(!IsWindowVisible(window_)) {
+                pageSurface_.reset();
+                for(auto& item:interactions_) item.second.surface.reset();
+            }
             syncHardwarePoll();
         }
     }
@@ -2712,9 +2720,10 @@ private:
                     }
                     // Force gamma reapplication because the driver may have
                     // reset its LUT during sleep even without topology changes.
-                    if (!ddcRestoreIssued_ || changed)
-                        model_.applyAll(nightlight::GammaRefresh::Restore);
-                    else model_.retryFailedColors();
+                    if(!changed) {
+                        if (!ddcRestoreIssued_) model_.applyAll(nightlight::GammaRefresh::Restore);
+                        else model_.retryFailedColors();
+                    }
                     if (!ddcRestoreIssued_) {
                         ensureHardwareRows();
                         for (const auto& row:hardwareRows_) {

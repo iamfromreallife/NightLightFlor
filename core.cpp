@@ -715,8 +715,14 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
             mon.nvidiaTargetColor=old->nvidiaTargetColor;
         }
     }
+    {
+        std::lock_guard<std::mutex> guard(gammaMutex_);
+        pendingGamma_.clear();
+        gammaResults_.clear();
+        for(auto& entry:newestGeneration_) ++entry.second;
+    }
     monitors_=std::move(entries);
-    applyAll();
+    applyAll(GammaRefresh::Restore);
     // Persist tab order with physical IDs even when the user never dragged
     // the tabs. Also migrate legacy GDI-based order entries while preserving
     // saved order for currently disconnected monitor profiles.
@@ -1097,7 +1103,7 @@ void Model::gammaLoop() {
                 if (result==WAIT_FAILED) std::this_thread::sleep_for(std::chrono::milliseconds(30));
             } else {
                 std::unique_lock<std::mutex> guard(gammaMutex_);
-                gammaWake_.wait_for(guard,std::chrono::milliseconds(30),[this]{return gammaStopping_ || !pendingGamma_.empty();});
+                gammaWake_.wait(guard,[this]{return gammaStopping_ || !pendingGamma_.empty();});
             }
             continue;
         }
@@ -1152,7 +1158,8 @@ void Model::gammaLoop() {
         HWND notify = nullptr;
         {
             std::lock_guard<std::mutex> guard(gammaMutex_);
-            if (!gammaStopping_ && newestGeneration_[device] == job.generation) {
+            if (!gammaStopping_ && newestGeneration_[device] == job.generation &&
+                result!=job.monitor.gammaStatus) {
                 gammaResults_[device] = result;
                 notify = statusWindow_;
             }
@@ -1216,15 +1223,12 @@ bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
 }
 void Model::applyAll(GammaRefresh refresh) {
     for (auto& monitor : monitors_) {
-        if(refresh==GammaRefresh::Verify && monitor.nvidiaTargetColor &&
-            monitor.gammaStatus!=0) continue;
+        if(refresh==GammaRefresh::Verify && !monitorNeedsColorWatchdog(monitor)) continue;
         applyDisplay(monitor,refresh);
     }
 }
 bool Model::needsColorWatchdog() const {
-    return std::any_of(monitors_.begin(),monitors_.end(),[](const Monitor& m){
-        return !m.nvidiaTargetColor || m.gammaStatus==0;
-    });
+    return std::any_of(monitors_.begin(),monitors_.end(),monitorNeedsColorWatchdog);
 }
 void Model::retryFailedColors() {
     for(auto& monitor:monitors_)
@@ -1243,8 +1247,12 @@ bool Model::persistProfile(size_t index) {
 }
 bool Model::previewKelvin(size_t index, int kelvin) {
     if (index >= monitors_.size() || !loaded_) return false;
-    monitors_[index].kelvin = std::clamp(kelvin, 1000, 6500);
-    root_["screen"]["kelvin"] = monitors_[index].kelvin;
+    auto& monitor=monitors_[index];
+    const int target=std::clamp(kelvin,1000,6500);
+    // Drag release persists the last preview without duplicating the driver call.
+    if(monitor.kelvin==target && monitor.gammaStatus!=0) return true;
+    monitor.kelvin=target;
+    root_["screen"]["kelvin"] = monitor.kelvin;
     // Multi-monitor sessions keep a fixed independent backend. An untouched
     // display does not need DC creation or another queued job on every drag.
     applyDisplay(monitors_[index],GammaRefresh::Normal);

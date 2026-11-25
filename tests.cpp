@@ -18,6 +18,16 @@ void check(bool ok,const char* message) {
 int main() {
     try {
         {
+            Monitor mon;
+            check(monitorNeedsColorWatchdog(mon),"GDI retains its periodic watchdog");
+            mon.nvidiaTargetColor=true;
+            check(!monitorNeedsColorWatchdog(mon),"Pending NVIDIA setter does not poll");
+            mon.gammaStatus=1;
+            check(!monitorNeedsColorWatchdog(mon),"Accepted NVIDIA setter has no polling work");
+            mon.gammaStatus=0;
+            check(monitorNeedsColorWatchdog(mon),"Failed NVIDIA setter remains retryable");
+        }
+        {
             const auto neutral=buildNvidiaTargetRamp(6500);
             const auto warm=buildNvidiaTargetRamp(4000);
             check(neutral.size()==3072 && neutral[0]==0 && neutral[3069]==1 &&

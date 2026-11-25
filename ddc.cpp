@@ -179,6 +179,7 @@ void DdcController::invalidateTopology() {
     ++topologyEpoch_;
     jobs_.clear();
     states_.clear();
+    readingDevice_.clear();
 }
 void DdcController::refresh(const std::wstring& device) {
     if (device.empty()) return;
@@ -195,7 +196,7 @@ void DdcController::poll(const std::wstring& device) {
     // Never disable sliders or pile up read jobs. A drag should not wait
     // behind an unnecessary full-hardware poll, nor be reset by one.
     if (state.loading || state.brightness.pending || state.contrast.pending ||
-        jobs_.find({device,-1})!=jobs_.end()) return;
+        readingDevice_==device || jobs_.find({device,-1})!=jobs_.end()) return;
     jobs_[{device,-1}]={};
     wake_.notify_one();
 }
@@ -220,8 +221,9 @@ void DdcController::stop() {
     wake_.notify_one(); if (worker_.joinable()) worker_.join();
 }
 void DdcController::run() {
-    Api api;
-    WmiBrightness wmi;
+    std::optional<Api> apiStorage;
+    std::optional<WmiBrightness> wmiStorage;
+    std::uint64_t lastEpoch=0;
     std::pair<std::wstring,int> previous;
     bool first=true;
     for (;;) {
@@ -229,11 +231,20 @@ void DdcController::run() {
         std::uint64_t epoch=0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            wake_.wait(lock,[&]{ return stopping_ || !jobs_.empty(); });
+            const auto ready=[&]{return stopping_ || !jobs_.empty();};
+            if(wmiStorage || apiStorage) {
+                if(!wake_.wait_for(lock,std::chrono::seconds(30),ready)) {
+                    lock.unlock();
+                    wmiStorage.reset();
+                    apiStorage.reset();
+                    continue;
+                }
+            } else wake_.wait(lock,ready);
             if (stopping_) return;
             const auto next=nextMonitorJob(jobs_,previous,first);
             key=next->first; job=next->second; jobs_.erase(next);
             epoch=topologyEpoch_;
+            if(key.second==-1) readingDevice_=key.first;
             previous=key; first=false;
         }
         {
@@ -241,6 +252,11 @@ void DdcController::run() {
         { std::lock_guard<std::mutex> lock(mutex_);
           if(stopping_) return;
           if(epoch!=topologyEpoch_) continue; }
+        if(!apiStorage) apiStorage.emplace();
+        if(!wmiStorage) wmiStorage.emplace();
+        if(lastEpoch!=epoch) { wmiStorage->clearCache(); lastEpoch=epoch; }
+        auto& api=*apiStorage;
+        auto& wmi=*wmiStorage;
         Physical monitor(api,key.first);
         if (key.second==-1) {
             const DdcValue brightness=observe(api,monitor,wmi,key.first,0), contrast=observe(api,monitor,wmi,key.first,1);
@@ -248,6 +264,7 @@ void DdcController::run() {
             // A display sleep/re-enumeration may have reassigned this GDI
             // output while the slow DDC read was in progress.
             if (epoch!=topologyEpoch_ || stopping_) continue;
+            readingDevice_.clear();
             auto& state=states_[key.first];
             const bool wasLoading=state.loading;
             const auto beforeBrightness=state.brightness,beforeContrast=state.contrast;

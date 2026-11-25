@@ -64,6 +64,7 @@ BOOL CALLBACK enumerateDisplay(HMONITOR monitor,HDC,LPRECT,LPARAM param) {
 struct WmiBrightness::Impl {
     HRESULT initialized=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     Com<IWbemServices> services;
+    std::map<std::wstring,ULONGLONG> negativeCache;
     ~Impl() {
         // Release proxies before leaving COM on this worker thread.
         if (services.value) { services.value->Release(); services.value=nullptr; }
@@ -98,7 +99,13 @@ struct WmiBrightness::Impl {
 };
 WmiBrightness::WmiBrightness():impl_(std::make_unique<Impl>()) {}
 WmiBrightness::~WmiBrightness()=default;
+void WmiBrightness::clearCache() { impl_->negativeCache.clear(); }
 WmiBrightnessPanel WmiBrightness::find(const std::wstring& device) {
+    // Retry negative WMI discovery after 30 seconds or topology changes.
+    const auto now=GetTickCount64();
+    auto cached=impl_->negativeCache.find(device);
+    if(cached!=impl_->negativeCache.end() && now<cached->second) return {};
+    if(cached!=impl_->negativeCache.end()) impl_->negativeCache.erase(cached);
     DisplayContext display{device};
     EnumDisplayMonitors(nullptr,nullptr,enumerateDisplay,reinterpret_cast<LPARAM>(&display));
     if (!display.found) return {};
@@ -124,7 +131,10 @@ WmiBrightnessPanel WmiBrightness::find(const std::wstring& device) {
     // Upstream broadcasts to all WMI panels. Only use its singleton fallback
     // when the Windows display and WMI panel mapping is unambiguous.
     if (matches.empty() && display.count==1 && panels.size()==1) matches.push_back(panels.front());
-    if (matches.size()!=1) return {};
+    if (matches.size()!=1) {
+        impl_->negativeCache[device]=now+30000;
+        return {};
+    }
     auto selected=matches.front();
     impl_->query(L"SELECT * FROM WmiMonitorBrightness",[&](IWbemClassObject* object) {
         if (!active(object) || normalizeMonitorInstance(stringProperty(object,L"InstanceName"))!=normalizeMonitorInstance(selected.instance)) return;

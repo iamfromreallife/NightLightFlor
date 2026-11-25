@@ -80,6 +80,7 @@ private:
     std::condition_variable wake_;
     std::map<std::wstring,DdcState> states_;
     std::map<std::pair<std::wstring,int>,Job> jobs_;
+    std::wstring readingDevice_;
     HWND window_ = nullptr;
     bool stopping_ = false;
     std::uint64_t topologyEpoch_=0;

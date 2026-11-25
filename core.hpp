@@ -183,6 +183,9 @@ struct ColorGains { double red, green, blue; };
 ColorGains kelvinGains(int kelvin);
 DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor);
 enum class ColorBackend { GpuGamma, MonitorHardware, NvidiaTargetGamma };
+inline bool monitorNeedsColorWatchdog(const Monitor& mon) {
+    return !mon.nvidiaTargetColor || mon.gammaStatus==0;
+}
 using NvidiaTargetRamp=std::array<float,3072>;
 NvidiaTargetRamp buildNvidiaTargetRamp(int kelvin);
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors);

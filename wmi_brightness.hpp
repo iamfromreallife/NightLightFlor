@@ -18,6 +18,7 @@ public:
     WmiBrightness();
     ~WmiBrightness();
     WmiBrightnessPanel find(const std::wstring& device);
+    void clearCache();
     bool set(const WmiBrightnessPanel& panel,int percent);
 private:
     struct Impl;
