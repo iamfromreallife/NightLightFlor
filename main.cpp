@@ -1504,7 +1504,40 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        drawTextAt(mem,L"NightLight v1.0",statusRect,smallFont_,p.muted,
+        const std::wstring version=L"NightLight v1.0";
+        const int versionWidth=textWidth(version,smallFont_)+px(4);
+        RECT backendRect=statusRect;
+        backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
+        if (const auto* mon=selectedMonitor()) {
+            const auto engine=mon->nvidiaColor?L"NVAPI":mon->hardwareColor?L"DDC/CI":L"GDI gamma";
+            std::wstring state=engine;
+            COLORREF indicator=p.muted;
+            const bool dark=nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);
+            if (mon->gammaStatus<0) {
+                state+=tr(L" · Checking",L" · A verificar");
+            } else if (mon->gammaStatus==0) {
+                state+=tr(L" · Failed",L" · Falhou");
+                indicator=dark?RGB(255,142,142):RGB(160,35,35);
+            } else if (!mon->enabled || (mon->nvidiaColor && mon->kelvin>=6500)) {
+                state+=tr(L" · Inactive",L" · Inativo");
+            } else if (mon->nvidiaColor && mon->gammaStatus==nightlight::kNvidiaVerified) {
+                state=tr(L"NVAPI active · Verified",L"NVAPI ativo · Verificado");
+                indicator=dark?RGB(116,205,147):RGB(20,111,53);
+                // Keep a truthful, shorter label when the window is narrow.
+                if(textWidth(state,smallFont_)>backendRect.right-backendRect.left)
+                    state=tr(L"NVAPI · Verified",L"NVAPI · Verificado");
+            } else if (mon->nvidiaColor) {
+                state+=tr(L" · Unverified",L" · Não verificado");
+            } else {
+                state+=tr(L" · Applied",L" · Aplicado");
+            }
+            if(highContrast_) indicator=p.text;
+            if(backendRect.right>backendRect.left)
+                drawTextAt(mem,state,backendRect,smallFont_,indicator,
+                    DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        }
+        statusRect.left=std::max(statusRect.left,statusRect.right-versionWidth);
+        drawTextAt(mem,version,statusRect,smallFont_,p.muted,
             DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         SetViewportOrgEx(mem,0,0,nullptr);
         BitBlt(hdc,0,0,client.right,client.bottom,mem,0,0,SRCCOPY);
@@ -2176,6 +2209,9 @@ private:
             auto name=mon.displayName();
             if((mon.hardwareColor || mon.nvidiaColor) && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
             if((mon.hardwareColor || mon.nvidiaColor) && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
+            if(mon.nvidiaColor && mon.enabled && mon.kelvin<6500 &&
+                mon.gammaStatus==nightlight::kNvidiaVerified)
+                name+=tr(L" (NVAPI verified)",L" (NVAPI verificado)");
             append(engines,MF_POPUP,reinterpret_cast<UINT_PTR>(options),name.c_str(),nightlight::MenuIcon::Monitor);
         }
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(engines),

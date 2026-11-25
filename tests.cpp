@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <chrono>
+#include <limits>
 using namespace nightlight;
 using portable::Json;
 namespace fs=std::filesystem;
@@ -16,6 +17,19 @@ void check(bool ok,const char* message) {
 }
 int main() {
     try {
+        {
+            const float expected[12]={1,0,0,0,0,0.75f,0,0,0,0,0.5f,0};
+            float actual[12]={1,0,0,0,0,0.75f,0,0,0,0,0.5f,0};
+            check(nvidiaCoefficientsMatch(actual,expected),"Exact NVAPI readback verifies");
+            actual[10]=0.5005f;
+            check(nvidiaCoefficientsMatch(actual,expected),"NVAPI quantization tolerance");
+            actual[10]=1.0f;
+            check(!nvidiaCoefficientsMatch(actual,expected),"Ignored blue adjustment fails verification");
+            actual[10]=0.5f; actual[3]=0.01f;
+            check(!nvidiaCoefficientsMatch(actual,expected),"Unexpected offset fails verification");
+            actual[3]=0; actual[5]=std::numeric_limits<float>::quiet_NaN();
+            check(!nvidiaCoefficientsMatch(actual,expected),"Nonfinite driver readback fails verification");
+        }
         check(nvidiaLinearGain(0.0)==0.0 && nvidiaLinearGain(1.0)==1.0,"CSC neutral endpoints");
         check(nvidiaLinearGain(0.5)>0.213 && nvidiaLinearGain(0.5)<0.215,"CSC converts encoded gain to linear light");
         check(nvidiaLinearGain(-1.0)==0.0 && nvidiaLinearGain(2.0)==1.0,"CSC gain clamps safely");

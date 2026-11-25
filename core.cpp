@@ -104,6 +104,7 @@ std::wstring monitorTooltip(const std::vector<Monitor>& monitors) {
         if (m.nvidiaColor) text += L" [NVIDIA CSC]";
         if (!m.enabled) text += L" (off)";
         else if (m.gammaStatus == 0) text += L" (unavailable)";
+        else if (m.nvidiaColor && m.gammaStatus==kNvidiaVerified) text += L" (verified)";
     }
     return text;
 }
@@ -932,10 +933,14 @@ bool nvidiaWrite(NvidiaCscApi& api,std::uint32_t id,NvidiaCscV1 value) {
 bool matchesNvidiaMatrix(const NvidiaCscV1& actual,const NvidiaCscV1& target) {
     if (actual.input!=target.input || actual.output!=target.output ||
         actual.enableA!=target.enableA || actual.enableB!=target.enableB) return false;
-    if (target.enableA) for (size_t i=0;i<12;++i)
-        if (!std::isfinite(actual.a[i]) || std::abs(actual.a[i]-target.a[i])>0.001f) return false;
-    return true;
+    return !target.enableA || nvidiaCoefficientsMatch(actual.a,target.a);
 }
+}
+bool nvidiaCoefficientsMatch(const float (&actual)[12],const float (&target)[12]) {
+    for (size_t i=0;i<12;++i)
+        if (!std::isfinite(actual[i]) || !std::isfinite(target[i]) ||
+            std::abs(actual[i]-target[i])>0.001f) return false;
+    return true;
 }
 bool Model::applyNvidiaColor(const Monitor& mon,bool active) {
     // Only claim an otherwise unused CSC pipeline; do not overwrite an ICC
@@ -1009,6 +1014,19 @@ bool Model::applyNvidiaColor(const Monitor& mon,bool active) {
         // Never fall through to GDI gamma or change compositor settings.
         return false;
     }
+    // A successful setter alone is NOT proof that the driver accepted the
+    // transformation. Read the driver state again after every write, or use
+    // the just-read state when no write was needed. Verify both CSC stages
+    // and all matrix coefficients before reporting active.
+    NvidiaCscV1 confirmed=current;
+    if (!same && !nvidiaRead(api,id,confirmed)) return false;
+    if (!uniquePhysicalTarget(mon)) return false;
+    const bool verified=active?matchesNvidiaMatrix(confirmed,target):
+        (confirmed.output==0 && !confirmed.enableA && !confirmed.enableB);
+    if (!verified) {
+        logNvidiaStatus(L"CSC readback mismatch",-1);
+        return false;
+    }
     if (!active) {
         std::get<portable::Json::Object>(journal.value).erase(key);
         if (!atomicWrite(journalPath,journal.dump())) return false;
@@ -1073,7 +1091,8 @@ void Model::gammaLoop() {
                 const bool active=job.monitor.enabled && job.monitor.kelvin<6500;
                 if (job.monitor.nvidiaColor) {
                     if (applyHardwareColor(job.monitor,false))
-                        result=applyNvidiaColor(job.monitor,active)?1:0;
+                        result=applyNvidiaColor(job.monitor,active)?
+                            (active?kNvidiaVerified:1):0;
                 } else if (applyNvidiaColor(job.monitor,false)) {
                     result=applyHardwareColor(job.monitor,active)?1:0;
                 }
@@ -1149,7 +1168,9 @@ bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
     const auto original = originals_.find(persistent);
     const Ramp* baseline = original != originals_.end() ? &original->second : nullptr;
     const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled && !mon.hardwareColor && !mon.nvidiaColor, baseline);
-    mon.gammaStatus = -1;  // Worker publishes real hardware result later.
+    // Retain the last verified status during an unchanged periodic check.
+    // A new Kelvin/backend/enable request or wake recovery invalidates it.
+    if (refresh!=GammaRefresh::Verify) mon.gammaStatus=-1;
     queueGamma(mon,ramp,refresh);
     return true;
 }

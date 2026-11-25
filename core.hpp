@@ -33,7 +33,7 @@ struct Monitor {
     bool primary = false;
     bool enabled = true;
     int kelvin = 5000;
-    // -1 unknown, 0 not supported by this display/driver, 1 success
+    // -1 pending, 0 failed/unavailable, 1 applied or inactive, 2 NVAPI matrix verified
     int gammaStatus = -1;
     bool hardwareColor = false; // opt-in physical RGB gain control
     bool nvidiaColor = false; // opt-in NVIDIA native CSC
@@ -182,6 +182,9 @@ struct ColorGains { double red, green, blue; };
 ColorGains kelvinGains(int kelvin);
 DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor);
 double nvidiaLinearGain(double encodedGain);
+// Compare every coefficient, including offsets; reject nonfinite readback.
+bool nvidiaCoefficientsMatch(const float (&actual)[12],const float (&target)[12]);
+inline constexpr int kNvidiaVerified=2;
 enum class ColorBackend { GpuGamma, MonitorHardware, NvidiaCsc };
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors);
 bool gammaRangeUnlocked();
