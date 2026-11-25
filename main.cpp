@@ -49,7 +49,7 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
-constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_NV_BASE=9000;
+constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_NV_BASE=9000, ID_TRAY_COLOR_TARGET_BASE=10000;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
 constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
@@ -1509,7 +1509,7 @@ private:
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
         if (const auto* mon=selectedMonitor()) {
-            const auto engine=mon->nvidiaColor?L"NVAPI":mon->hardwareColor?L"DDC/CI":L"GDI gamma";
+            const auto engine=mon->nvidiaTargetColor?L"NV target":mon->nvidiaColor?L"NVAPI":mon->hardwareColor?L"DDC/CI":L"GDI gamma";
             std::wstring state=engine;
             COLORREF indicator=p.muted;
             const bool dark=nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);
@@ -1518,7 +1518,7 @@ private:
             } else if (mon->gammaStatus==0) {
                 state+=tr(L" · Failed",L" · Falhou");
                 indicator=dark?RGB(255,142,142):RGB(160,35,35);
-            } else if (!mon->enabled || (mon->nvidiaColor && mon->kelvin>=6500)) {
+            } else if (!mon->enabled || ((mon->nvidiaColor || mon->nvidiaTargetColor) && mon->kelvin>=6500)) {
                 state+=tr(L" · Inactive",L" · Inativo");
             } else if (mon->nvidiaColor && mon->gammaStatus==nightlight::kNvidiaVerified) {
                 state=tr(L"NVAPI active · Verified",L"NVAPI ativo · Verificado");
@@ -1526,6 +1526,8 @@ private:
                 // Keep a truthful, shorter label when the window is narrow.
                 if(textWidth(state,smallFont_)>backendRect.right-backendRect.left)
                     state=tr(L"NVAPI · Verified",L"NVAPI · Verificado");
+            } else if (mon->nvidiaTargetColor) {
+                state+=tr(L" · Accepted",L" · Aceite");
             } else if (mon->nvidiaColor) {
                 state+=tr(L" · Unverified",L" · Não verificado");
             } else {
@@ -2200,15 +2202,19 @@ private:
         for (size_t i=0;i<model_.monitors().size() && i<1000;++i) {
             const auto& mon=model_.monitors()[i];
             HMENU options=createMenu();
-            append(options,MF_STRING|(!mon.hardwareColor && !mon.nvidiaColor?MF_CHECKED:0),ID_TRAY_COLOR_GPU_BASE+i,
+            append(options,MF_STRING|(!mon.hardwareColor && !mon.nvidiaColor && !mon.nvidiaTargetColor?MF_CHECKED:0),ID_TRAY_COLOR_GPU_BASE+i,
                 tr(L"GPU gamma",L"Gama da GPU").c_str(),nightlight::MenuIcon::Adjust);
             append(options,MF_STRING|(mon.hardwareColor?MF_CHECKED:0),ID_TRAY_COLOR_HW_BASE+i,
                 tr(L"Monitor hardware (DDC/CI)",L"Hardware do ecrã (DDC/CI)").c_str(),nightlight::MenuIcon::Monitor);
             append(options,MF_STRING|(mon.nvidiaColor?MF_CHECKED:0),ID_TRAY_COLOR_NV_BASE+i,
                 tr(L"NVIDIA native (experimental)",L"NVIDIA nativo (experimental)").c_str(),nightlight::MenuIcon::Adjust);
+            append(options,MF_STRING|(mon.nvidiaTargetColor?MF_CHECKED:0),ID_TRAY_COLOR_TARGET_BASE+i,
+                tr(L"NVIDIA target gamma (experimental)",L"Gama alvo NVIDIA (experimental)").c_str(),nightlight::MenuIcon::Adjust);
             auto name=mon.displayName();
-            if((mon.hardwareColor || mon.nvidiaColor) && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
-            if((mon.hardwareColor || mon.nvidiaColor) && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
+            if(mon.nvidiaTargetColor && mon.enabled && mon.kelvin<6500 && mon.gammaStatus==1)
+                name+=tr(L" (driver accepted)",L" (aceite pelo controlador)");
+            if((mon.hardwareColor || mon.nvidiaColor || mon.nvidiaTargetColor) && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
+            if((mon.hardwareColor || mon.nvidiaColor || mon.nvidiaTargetColor) && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
             if(mon.nvidiaColor && mon.enabled && mon.kelvin<6500 &&
                 mon.gammaStatus==nightlight::kNvidiaVerified)
                 name+=tr(L" (NVAPI verified)",L" (NVAPI verificado)");
@@ -2249,11 +2255,14 @@ private:
             DestroyWindow(window_);
         } else if ((cmd>=ID_TRAY_COLOR_GPU_BASE && cmd<ID_TRAY_COLOR_GPU_BASE+1000) ||
                    (cmd>=ID_TRAY_COLOR_HW_BASE && cmd<ID_TRAY_COLOR_HW_BASE+1000) ||
-                   (cmd>=ID_TRAY_COLOR_NV_BASE && cmd<ID_TRAY_COLOR_NV_BASE+1000)) {
-            const bool nvidia=cmd>=ID_TRAY_COLOR_NV_BASE;
-            const bool hardware=!nvidia && cmd>=ID_TRAY_COLOR_HW_BASE;
-            const size_t index=cmd-(nvidia?ID_TRAY_COLOR_NV_BASE:hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
-            const auto backend=nvidia?nightlight::ColorBackend::NvidiaCsc:
+                   (cmd>=ID_TRAY_COLOR_NV_BASE && cmd<ID_TRAY_COLOR_NV_BASE+1000) ||
+                   (cmd>=ID_TRAY_COLOR_TARGET_BASE && cmd<ID_TRAY_COLOR_TARGET_BASE+1000)) {
+            const bool target=cmd>=ID_TRAY_COLOR_TARGET_BASE;
+            const bool nvidia=!target && cmd>=ID_TRAY_COLOR_NV_BASE;
+            const bool hardware=!target && !nvidia && cmd>=ID_TRAY_COLOR_HW_BASE;
+            const size_t index=cmd-(target?ID_TRAY_COLOR_TARGET_BASE:nvidia?ID_TRAY_COLOR_NV_BASE:hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
+            const auto backend=target?nightlight::ColorBackend::NvidiaTargetGamma:
+                nvidia?nightlight::ColorBackend::NvidiaCsc:
                 hardware?nightlight::ColorBackend::MonitorHardware:nightlight::ColorBackend::GpuGamma;
             if (index<model_.monitors().size()) {
                 bool proceed=true;
@@ -2267,6 +2276,11 @@ private:
                         L"Use experimental NVIDIA native colour conversion? Requires a supported NVIDIA driver and SDR. Browser acceleration and MPO settings are not changed. Existing active driver colour conversion is not overwritten. Cursor colour and rendering depend on the driver.",
                         L"Usar a conversão de cor nativa experimental da NVIDIA? Requer um controlador NVIDIA compatível e SDR. A aceleração do navegador e o MPO não são alterados. A conversão de cor ativa não é substituída. A cor do cursor e a apresentação dependem do controlador.").c_str(),
                         L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
+                if(target && !model_.monitors()[index].nvidiaTargetColor)
+                    proceed=MessageBoxW(window_,tr(
+                        L"Experimental NVIDIA target gamma: reset NVIDIA Control Panel desktop colour settings to defaults BEFORE using this mode. Requires SDR with Advanced Color disabled. The API cannot read back the original target LUT; NightLight restores a neutral LUT, not your custom NVIDIA calibration. No browser or MPO settings are changed. Continue?",
+                        L"Gama alvo NVIDIA experimental: restaure as predefinições de cor do ambiente de trabalho no Painel de Controlo NVIDIA ANTES de usar este modo. Requer SDR sem cor avançada. A API não permite ler a LUT original; o NightLight restaura uma LUT neutra, não a calibração personalizada. O navegador e o MPO não são alterados. Continuar?").c_str(),
+                        L"NightLight",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES;
                 if(proceed) {model_.updateColorBackend(index,backend); updateTrayTooltip(); repaint();}
             }
         } else if (cmd==ID_DDC) {

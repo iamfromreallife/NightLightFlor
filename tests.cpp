@@ -30,6 +30,17 @@ int main() {
             actual[3]=0; actual[5]=std::numeric_limits<float>::quiet_NaN();
             check(!nvidiaCoefficientsMatch(actual,expected),"Nonfinite driver readback fails verification");
         }
+        {
+            const auto neutral=buildNvidiaTargetRamp(6500);
+            const auto warm=buildNvidiaTargetRamp(4000);
+            check(neutral.size()==3072 && neutral[0]==0 && neutral[3069]==1 &&
+                neutral[3070]==1 && neutral[3071]==1,"Target gamma identity endpoints");
+            check(warm[3069]==1 && warm[3070]<1 && warm[3071]<warm[3070],"Target gamma warm RGB order");
+            for(size_t i=1;i<1024;++i)
+                for(size_t c=0;c<3;++c)
+                    check(warm[3*i+c]>=warm[3*(i-1)+c] && warm[3*i+c]<=1,
+                          "Target gamma channel monotonicity");
+        }
         check(nvidiaLinearGain(0.0)==0.0 && nvidiaLinearGain(1.0)==1.0,"CSC neutral endpoints");
         check(nvidiaLinearGain(0.5)>0.213 && nvidiaLinearGain(0.5)<0.215,"CSC converts encoded gain to linear light");
         check(nvidiaLinearGain(-1.0)==0.0 && nvidiaLinearGain(2.0)==1.0,"CSC gain clamps safely");

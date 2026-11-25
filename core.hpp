@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <array>
 #include <thread>
 #include "json.hpp"
 
@@ -37,6 +38,7 @@ struct Monitor {
     int gammaStatus = -1;
     bool hardwareColor = false; // opt-in physical RGB gain control
     bool nvidiaColor = false; // opt-in NVIDIA native CSC
+    bool nvidiaTargetColor = false; // opt-in Control Panel-style target gamma
     std::wstring displayName() const { return alias.empty() ? windowsName : alias; }
 };
 
@@ -185,7 +187,9 @@ double nvidiaLinearGain(double encodedGain);
 // Compare every coefficient, including offsets; reject nonfinite readback.
 bool nvidiaCoefficientsMatch(const float (&actual)[12],const float (&target)[12]);
 inline constexpr int kNvidiaVerified=2;
-enum class ColorBackend { GpuGamma, MonitorHardware, NvidiaCsc };
+enum class ColorBackend { GpuGamma, MonitorHardware, NvidiaCsc, NvidiaTargetGamma };
+using NvidiaTargetRamp=std::array<float,3072>;
+NvidiaTargetRamp buildNvidiaTargetRamp(int kelvin);
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors);
 bool gammaRangeUnlocked();
 DWORD unlockGammaRange();
@@ -241,6 +245,8 @@ private:
     void queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh refresh);
     bool applyHardwareColor(const Monitor& monitor,bool active);
     bool applyNvidiaColor(const Monitor& monitor,bool active);
+    bool applyNvidiaTargetColor(const Monitor& monitor,bool active,GammaRefresh refresh);
+    std::map<std::wstring,int> targetGammaAccepted_; // worker-only cache, not readback
     std::set<std::wstring> gammaTouched_; // worker only, read after join
     void gammaLoop();
     void stopGamma();
