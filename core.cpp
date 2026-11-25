@@ -103,6 +103,31 @@ bool gammaRangeUnlocked() {
     RegCloseKey(key);
     return status == ERROR_SUCCESS && type == REG_DWORD && value == 256;
 }
+bool legacySoftwareCursorOverride(const std::wstring& value) {
+    // -1 was installed by the previous NightLight workaround, which asked
+    // Windows to draw the mouse cursor in software. Normal mouse-trail
+    // options (including accessibility preferences) are not changed.
+    const auto first=value.find_first_not_of(L" \t\r\n");
+    if (first==std::wstring::npos) return false;
+    const auto last=value.find_last_not_of(L" \t\r\n");
+    return value.substr(first,last-first+1)==L"-1";
+}
+bool clearLegacySoftwareCursorOverride() {
+    wchar_t trails[64]{};
+    DWORD type=0,bytes=sizeof(trails);
+    // HKCU\\Control Panel\\Mouse is the user-specific mouse scheme.
+    // Read first: do not silently override the user's normal trail setting.
+    if (RegGetValueW(HKEY_CURRENT_USER,L"Control Panel\\Mouse",L"MouseTrails",
+                     RRF_RT_REG_SZ,&type,trails,&bytes)!=ERROR_SUCCESS)
+        return false;
+    trails[std::size(trails)-1]=L'\0';
+    if (!legacySoftwareCursorOverride(trails)) return false;
+    // Disabling pointer trails removes the forced software cursor request.
+    // This ALLOWS hardware rendering, but Windows/GPU decide which plane to
+    // use; there is no documented public API to require a hardware cursor.
+    return SystemParametersInfoW(SPI_SETMOUSETRAILS,0,nullptr,
+               SPIF_UPDATEINIFILE|SPIF_SENDCHANGE)!=FALSE;
+}
 DWORD unlockGammaRange() {
     HKEY key = nullptr;
     DWORD result = RegCreateKeyExW(HKEY_LOCAL_MACHINE, gammaKey, 0, nullptr, 0,
