@@ -1,7 +1,6 @@
 #include "core.hpp"
 #include "display_identity.hpp"
 #include <shlobj.h>
-#include <magnification.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -83,12 +82,6 @@ ColorGains kelvinGains(int kelvin) {
         (138.5177312231 * std::log(t - 10) - 305.0447927307) / 255.0;
     return {1, std::clamp(green, 0.0, 1.0), std::clamp(blue, 0.0, 1.0)};
 }
-int sharedMatrixKelvin(const std::vector<Monitor>& monitors) {
-    // Keep the backend stable throughout multi-monitor drags, including when
-    // two temperatures briefly coincide. A global matrix cannot be independent.
-    return monitors.size()==1 && monitors[0].enabled ? monitors[0].kelvin : 0;
-}
-
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors) {
     std::wstring text = L"NightLight";
     for (const auto& m : monitors) {
@@ -745,55 +738,23 @@ void Model::setStatusWindow(HWND window) {
     statusWindow_ = window;
 }
 
-void Model::queueGamma(const std::wstring& device, const Ramp& ramp, int matrixKelvin, const Ramp& fallback,GammaRefresh refresh) {
+void Model::queueGamma(const std::wstring& device, const Ramp& ramp, GammaRefresh refresh) {
     std::lock_guard<std::mutex> guard(gammaMutex_);
     if (gammaStopping_) return;
     const std::uint64_t generation = ++newestGeneration_[device];
     auto pending=pendingGamma_.find(device);
     if (pending!=pendingGamma_.end() && static_cast<int>(pending->second.refresh)>static_cast<int>(refresh))
         refresh=pending->second.refresh;
-    pendingGamma_[device] = GammaJob{generation, ramp, matrixKelvin, fallback,refresh};
+    pendingGamma_[device] = GammaJob{generation, ramp,refresh};
     if (gammaEvent_) SetEvent(gammaEvent_); else gammaWake_.notify_one();
 }
 
 void Model::gammaLoop() {
-    // Resolve the system DLL explicitly; MinGW lacks these import declarations.
-    HMODULE magLibrary = LoadLibraryExW(L"Magnification.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    using Init = BOOL (WINAPI*)();
-    using GetEffect = BOOL (WINAPI*)(PMAGCOLOREFFECT);
-    const auto initialize = magLibrary ? reinterpret_cast<Init>(GetProcAddress(magLibrary,"MagInitialize")) : nullptr;
-    const auto uninitialize = magLibrary ? reinterpret_cast<Init>(GetProcAddress(magLibrary,"MagUninitialize")) : nullptr;
-    const auto getEffect = magLibrary ? reinterpret_cast<GetEffect>(GetProcAddress(magLibrary,"MagGetFullscreenColorEffect")) : nullptr;
-    const auto setEffect = magLibrary ? reinterpret_cast<GetEffect>(GetProcAddress(magLibrary,"MagSetFullscreenColorEffect")) : nullptr;
-    const bool magReady = initialize && uninitialize && getEffect && setEffect && initialize();
-    MAGCOLOREFFECT original{};
-    const bool captured = magReady && getEffect(&original);
-    int activeMatrix = -1;
-    bool matrixTouched=false;
+    // Apply warm colour through each output's hardware LUT alone. A fullscreen
+    // Magnification colour matrix affects the composited desktop and can tint
+    // the pointer. The hardware cursor usually bypasses gamma ramp changes,
+    // so its white pixels remain white (driver-dependent).
     std::map<std::wstring,GammaRampState> appliedRamps;
-    auto matrix = [&](int k,bool verify=false) {
-        MAGCOLOREFFECT effect{};
-        for (int i=0; i<5; ++i) effect.transform[i][i] = 1.0f;
-        if (k) {
-            const auto gains = kelvinGains(k);
-            effect.transform[0][0] = static_cast<float>(gains.red);
-            effect.transform[1][1] = static_cast<float>(gains.green);
-            effect.transform[2][2] = static_cast<float>(gains.blue);
-        }
-        if (!magReady) return false;
-        if (verify) {
-            MAGCOLOREFFECT actual{};
-            if (getEffect(&actual)) {
-                bool equal=true;
-                for (int i=0;i<5;++i) for (int j=0;j<5;++j)
-                    if (std::abs(actual.transform[i][j]-effect.transform[i][j])>0.0001f) equal=false;
-                if (equal) return true;
-            }
-        }
-        const bool applied=setEffect(&effect)!=FALSE;
-        matrixTouched=matrixTouched || applied;
-        return applied;
-    };
     while (true) {
         MSG message{};
         while (PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
@@ -824,12 +785,6 @@ void Model::gammaLoop() {
         auto& job=item.second;
         // This call can block for several frames on some graphics drivers;
         // the UI thread is never forced to wait for it.
-        bool matrixOK = activeMatrix == job.matrixKelvin;
-        if (!matrixOK || job.refresh!=GammaRefresh::Normal) {
-            matrixOK = matrix(job.matrixKelvin,job.refresh==GammaRefresh::Verify);
-            if (matrixOK) activeMatrix = job.matrixKelvin;
-        }
-        if (job.matrixKelvin && !matrixOK) job.ramp = job.fallback;
         HDC dc = CreateDCW(L"DISPLAY", device.c_str(), nullptr, nullptr);
         int result = 0;
         if (dc) {
@@ -853,14 +808,6 @@ void Model::gammaLoop() {
         // gamma requests. Faster pointer events overwrite queued work.
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
-    if (magReady) {
-        if (matrixTouched) {
-            if (captured) setEffect(&original);
-            else matrix(0);
-        }
-        uninitialize();
-    }
-    if (magLibrary) FreeLibrary(magLibrary);
 }
 
 bool Model::collectGammaResults() {
@@ -906,8 +853,7 @@ bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
     const Ramp* baseline = original != originals_.end() ? &original->second : nullptr;
     const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled, baseline);
     mon.gammaStatus = -1;  // Worker publishes real hardware result later.
-    const int shared = sharedMatrixKelvin(monitors_);
-    queueGamma(mon.device, shared ? buildKelvinRamp(6500) : ramp, shared, ramp,refresh);
+    queueGamma(mon.device,ramp,refresh);
     return true;
 }
 void Model::applyAll(GammaRefresh refresh) {
