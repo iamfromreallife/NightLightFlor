@@ -244,8 +244,7 @@ private:
     void adoptOriginal(const std::wstring& device, HDC dc);
     void queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh refresh);
     bool applyHardwareColor(const Monitor& monitor,bool active);
-    bool restoreLegacyCsc(const Monitor& monitor); // migration only
-    std::set<std::wstring> cleanLegacyCsc_,cleanHardware_,cleanTarget_;
+    std::set<std::wstring> cleanHardware_,cleanTarget_;
     bool applyNvidiaTargetColor(const Monitor& monitor,bool active,GammaRefresh refresh);
     std::map<std::wstring,int> targetGammaAccepted_; // worker-only cache, not readback
     std::set<std::wstring> gammaTouched_; // worker only, read after join

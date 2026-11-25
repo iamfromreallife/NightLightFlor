@@ -2,7 +2,7 @@
 setlocal EnableExtensions DisableDelayedExpansion
 pushd "%~dp0" || exit /b 1
 set "ROOT=%CD%"
-set "BUILD=%ROOT%\build\msvc-x64"
+set "BUILD=%ROOT%\build\target-gamma-only-x64"
 set "CMAKE=cmake.exe"
 set "CTEST=ctest.exe"
 if not exist CMakeLists.txt goto failed
@@ -20,13 +20,13 @@ set "CMAKE_GENERATOR_PLATFORM="
 set "CMAKE_GENERATOR_TOOLSET="
 "%CMAKE%" -S "%ROOT%" -B "%BUILD%" -A x64 -DBUILD_TESTING=ON
 if errorlevel 1 goto failed
-"%CMAKE%" --build "%BUILD%" --config Release --parallel
+"%CMAKE%" --build "%BUILD%" --config Release --clean-first --parallel
 if errorlevel 1 goto failed
 "%CTEST%" --test-dir "%BUILD%" -C Release --output-on-failure
 if errorlevel 1 goto failed
 copy /Y "%BUILD%\Release\NightLight.exe" "%ROOT%\NightLight.exe" >nul
 if errorlevel 1 goto failed
-echo SUCCESS: "%ROOT%\NightLight.exe"
+echo SUCCESS: NightLight v1.0.1 - "%ROOT%\NightLight.exe"
 popd
 pause
 exit /b 0

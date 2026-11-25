@@ -91,7 +91,7 @@ DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor) {
     return minimum+static_cast<DWORD>(std::llround((baseline-minimum)*std::clamp(factor,0.0,1.0)));
 }
 NvidiaTargetRamp buildNvidiaTargetRamp(int kelvin) {
-    // Driver target LUT is sampled in encoded RGB, unlike the linear CSC.
+    // Driver target LUT is sampled in encoded RGB.
     const auto g=kelvinGains(kelvin);
     NvidiaTargetRamp ramp{};
     for (size_t i=0;i<1024;++i) {
@@ -886,17 +886,6 @@ bool Model::applyHardwareColor(const Monitor& mon,bool active) {
 }
 
 namespace {
-// Private NVAPI CSC V1 wire layout, independently declared from the public
-// interface observations at https://github.com/ledoge/novideo_srgb/blob/master/novideo_srgb/Novideo.cs
-// Public NVAPI entry-point IDs: NVIDIA/nvapi, nvapi_interface.h.
-// No NVIDIA SDK, bundled DLL, overlay, or process injection is required.
-struct NvidiaCscV1 {
-    std::uint32_t version=0x1007c, input=0, output=0, reservedA=0, reservedB=0, enableA=0;
-    float a[12]{};
-    std::uint32_t enableB=0;
-    float b[12]{};
-};
-static_assert(sizeof(NvidiaCscV1)==0x7c,"NVAPI CSC V1 ABI size");
 // Target gamma wire ABI documented by independent reverse engineering:
 // https://github.com/pbatard/nvBrightness (src/nvapi.h) and
 // https://github.com/mgcarnevali/NvProfileSwitcher (Nvidia/NvApi.cs).
@@ -907,19 +896,17 @@ struct NvidiaTargetV1 {
     std::uint32_t flags=1;
 };
 static_assert(sizeof(NvidiaTargetV1)==0x3008,"Target gamma V1 ABI");
-struct NvidiaCscApi {
+struct NvidiaTargetApi {
     using Query=void* (__cdecl*)(std::uint32_t);
     using Init=int (__cdecl*)();
     using DisplayId=int (__cdecl*)(const char*,std::uint32_t*);
-    using Csc=int (__cdecl*)(std::uint32_t,NvidiaCscV1*);
     using TargetGamma=int (__cdecl*)(std::uint32_t,NvidiaTargetV1*);
     HMODULE module=nullptr;
     Init unload=nullptr;
     DisplayId displayId=nullptr;
-    Csc get=nullptr,set=nullptr;
     TargetGamma setTarget=nullptr;
     bool initialized=false;
-    NvidiaCscApi() {
+    NvidiaTargetApi() {
 #if defined(_WIN64)
         module=LoadLibraryExW(L"nvapi64.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
 #else
@@ -933,74 +920,19 @@ struct NvidiaCscApi {
         if (!init || init()!=0) return;
         initialized=true;
         displayId=reinterpret_cast<DisplayId>(query(0xae457190));
-        get=reinterpret_cast<Csc>(query(0x8159e87a));
-        set=reinterpret_cast<Csc>(query(0xfcabd23a));
         setTarget=reinterpret_cast<TargetGamma>(query(0x7082a053));
     }
-    ~NvidiaCscApi() {
+    ~NvidiaTargetApi() {
         if (initialized && unload) unload();
         if (module) FreeLibrary(module);
     }
-    bool available() const { return initialized && displayId && get && set; }
+    bool available() const { return initialized && displayId && setTarget; }
 };
 void logNvidiaStatus(const wchar_t* operation,int status) {
     const auto message=std::wstring(L"NightLight NVAPI ")+operation+L": "+std::to_wstring(status)+L"\n";
     OutputDebugStringW(message.c_str());
 }
-bool nvidiaRead(NvidiaCscApi& api,std::uint32_t id,NvidiaCscV1& value) {
-    value=NvidiaCscV1{};
-    const int status=api.get(id,&value);
-    if (status!=0) logNvidiaStatus(L"GetColorSpaceConversion",status);
-    return status==0;
-}
-bool nvidiaWrite(NvidiaCscApi& api,std::uint32_t id,NvidiaCscV1 value) {
-    const int status=api.set(id,&value);
-    if (status!=0) logNvidiaStatus(L"SetColorSpaceConversion",status);
-    return status==0;
-}
-}
-bool Model::restoreLegacyCsc(const Monitor& mon) {
-    // Recovery only: the removed CSC backend can never be activated.
-    const auto key=monitorProfileKey(mon);
-    if(cleanLegacyCsc_.count(key)) return true;
-    const auto path=directory_/L"nvidia-color-backup.json";
-    portable::Json journal=portable::Json::object();
-    std::string document;
-    if(readWholeFile(path,document)) {
-        try { journal=portable::Json::parse(document); } catch(...) { return false; }
-        if(!journal.isObject()) return false;
-    } else {
-        const DWORD attrs=GetFileAttributesW(path.c_str());
-        if(attrs!=INVALID_FILE_ATTRIBUTES || GetLastError()!=ERROR_FILE_NOT_FOUND) return false;
-    }
-    const auto jsonKey=toUtf8(key);
-    const auto& record=journal.get(jsonKey);
-    if(!record.isObject()) { cleanLegacyCsc_.insert(key); return true; }
-    if(!record.get("baseline_disabled").boolean(false) || !uniquePhysicalTarget(mon)) return false;
-    static NvidiaCscApi api;
-    if(!api.available()) return false;
-    std::uint32_t id=0;
-    if(api.displayId(toUtf8(mon.device).c_str(),&id)!=0 || !id) return false;
-    NvidiaCscV1 current;
-    if(!nvidiaRead(api,id,current) || current.input==12 || current.output==12) return false;
-    const auto neutral=[](const NvidiaCscV1& v){return v.output==0 && !v.enableA && !v.enableB;};
-    if(!neutral(current)) {
-        if(current.input!=2 || current.output!=2 || current.enableA!=1 || current.enableB) return false;
-        for(size_t i=0;i<12;++i) {
-            const float x=current.a[i];
-            if(!std::isfinite(x)) return false;
-            if(i==0 || i==5 || i==10) { if(x<0 || x>1.001f) return false; }
-            else if(std::abs(x)>0.001f) return false;
-        }
-        if(std::abs(current.a[0]-1.0f)>0.001f || !uniquePhysicalTarget(mon)) return false;
-        NvidiaCscV1 reset; reset.input=2;
-        if(!nvidiaWrite(api,id,reset) || !nvidiaRead(api,id,current) || !neutral(current)) return false;
-    }
-    std::get<portable::Json::Object>(journal.value).erase(jsonKey);
-    if(!atomicWrite(path,journal.dump())) return false;
-    cleanLegacyCsc_.insert(key);
-    return true;
-}
+} // namespace
 // Conservatively require a uniquely identified SDR output. Advanced Color
 // (HDR or automatic colour management) is not modified by this experiment.
 static bool targetGammaSdr(const Monitor& mon) {
@@ -1050,8 +982,8 @@ bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh r
     cleanTarget_.erase(key);
     if(owned && !journal.get(jsonKey).get("restore_neutral").boolean(false)) return false;
     if(!uniquePhysicalTarget(mon) || !targetGammaSdr(mon)) return false;
-    static NvidiaCscApi api;
-    if(!api.initialized || !api.displayId || !api.setTarget) {
+    static NvidiaTargetApi api;
+    if(!api.available()) {
         logNvidiaStatus(L"target gamma unavailable",-104); return false;
     }
     std::uint32_t id=0;
@@ -1120,9 +1052,7 @@ void Model::gammaLoop() {
             std::lock_guard<std::mutex> guard(gammaMutex_);
             if (gammaStopping_ || newestGeneration_[device]!=job.generation) continue;
         }
-        if (!restoreLegacyCsc(job.monitor)) {
-            result=0;
-        } else if (job.monitor.hardwareColor || job.monitor.nvidiaTargetColor) {
+        if (job.monitor.hardwareColor || job.monitor.nvidiaTargetColor) {
             // Restore the GPU calibration once on transition, but never
             // apply a warm GPU ramp (including verification) in hardware mode.
             bool neutral=true;
@@ -1301,7 +1231,6 @@ void Model::restoreOriginals() {
     // target, never to whichever panel received an old DISPLAYx number.
     for (const auto& mon:monitors_) {
         applyNvidiaTargetColor(mon,false,GammaRefresh::Restore);
-        restoreLegacyCsc(mon);
         applyHardwareColor(mon,false);
         if (!gammaTouched_.count(monitorProfileKey(mon))) continue;
         const auto original=originals_.find(monitorProfileKey(mon));
