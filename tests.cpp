@@ -337,17 +337,26 @@ int main() {
         Monitor first, second;
         first.windowsName=L"Asus 60HZ"; first.kelvin=1900;
         second.windowsName=L"Dell"; second.alias=L"Portrait"; second.kelvin=1900;
-        check(sharedMatrixKelvin({first})==1900,"Single display uses upstream matrix");
-        check(sharedMatrixKelvin({first,second})==0,"Multi-monitor backend stays independent even when temperatures coincide");
+        const Ramp single=buildAppliedRamp(first.kelvin,first.enabled,nullptr);
+        check(sameRamp(single,buildKelvinRamp(1900)),
+            "Single-display warmth uses the per-monitor gamma ramp, not a fullscreen matrix");
+        const Ramp untouched=buildAppliedRamp(second.kelvin,second.enabled,nullptr);
         for (int k=1800;k<=2000;k+=10) {
             first.kelvin=k;
-            check(sharedMatrixKelvin({first,second})==0,"Dragging across another display's temperature must not toggle the global effect");
+            check(sameRamp(buildAppliedRamp(first.kelvin,first.enabled,nullptr),
+                           buildKelvinRamp(k)) &&
+                  sameRamp(buildAppliedRamp(second.kelvin,second.enabled,nullptr),untouched),
+                "One monitor changes its independent gamma LUT without retinting the other");
         }
         first.kelvin=1900;
         second.kelvin=4200;
-        check(sharedMatrixKelvin({first,second})==0,"Different temperatures require independent LUTs");
+        check(sameRamp(buildAppliedRamp(second.kelvin,second.enabled,nullptr),
+                       buildKelvinRamp(4200)),
+            "Different monitor temperatures use their own independent hardware LUTs");
         second.kelvin=1900; second.enabled=false;
-        check(sharedMatrixKelvin({first,second})==0,"Disabled displays must not receive global warmth");
+        check(sameRamp(buildAppliedRamp(second.kelvin,second.enabled,nullptr),
+                       buildKelvinRamp(6500)),
+            "Disabling one display restores neutral gamma without a fullscreen colour matrix");
         const auto tip=monitorTooltip({first,second});
         check(tip.find(L"Asus 60HZ: 1900 K")!=std::wstring::npos &&
               tip.find(L"Portrait: 1900 K (off)")!=std::wstring::npos,
