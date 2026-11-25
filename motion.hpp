@@ -12,7 +12,8 @@ public:
     double value(std::uint64_t now) const {
         if (!duration_ || now>=began_+duration_) return target_;
         const double t=std::clamp(double(now-began_)/duration_,0.0,1.0);
-        const double eased=1.0-std::pow(1.0-t,3.0);
+        const double remaining=1.0-t;
+        const double eased=1.0-remaining*remaining*remaining;
         return from_+(target_-from_)*eased;
     }
     void to(double target,std::uint64_t now,unsigned duration,bool animate) {

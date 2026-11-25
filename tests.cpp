@@ -18,19 +18,6 @@ void check(bool ok,const char* message) {
 int main() {
     try {
         {
-            const float expected[12]={1,0,0,0,0,0.75f,0,0,0,0,0.5f,0};
-            float actual[12]={1,0,0,0,0,0.75f,0,0,0,0,0.5f,0};
-            check(nvidiaCoefficientsMatch(actual,expected),"Exact NVAPI readback verifies");
-            actual[10]=0.5005f;
-            check(nvidiaCoefficientsMatch(actual,expected),"NVAPI quantization tolerance");
-            actual[10]=1.0f;
-            check(!nvidiaCoefficientsMatch(actual,expected),"Ignored blue adjustment fails verification");
-            actual[10]=0.5f; actual[3]=0.01f;
-            check(!nvidiaCoefficientsMatch(actual,expected),"Unexpected offset fails verification");
-            actual[3]=0; actual[5]=std::numeric_limits<float>::quiet_NaN();
-            check(!nvidiaCoefficientsMatch(actual,expected),"Nonfinite driver readback fails verification");
-        }
-        {
             const auto neutral=buildNvidiaTargetRamp(6500);
             const auto warm=buildNvidiaTargetRamp(4000);
             check(neutral.size()==3072 && neutral[0]==0 && neutral[3069]==1 &&
@@ -41,9 +28,6 @@ int main() {
                     check(warm[3*i+c]>=warm[3*(i-1)+c] && warm[3*i+c]<=1,
                           "Target gamma channel monotonicity");
         }
-        check(nvidiaLinearGain(0.0)==0.0 && nvidiaLinearGain(1.0)==1.0,"CSC neutral endpoints");
-        check(nvidiaLinearGain(0.5)>0.213 && nvidiaLinearGain(0.5)<0.215,"CSC converts encoded gain to linear light");
-        check(nvidiaLinearGain(-1.0)==0.0 && nvidiaLinearGain(2.0)==1.0,"CSC gain clamps safely");
         check(hardwareGainTarget(0,80,1.0)==80,"Hardware neutral retains calibration");
         check(hardwareGainTarget(10,90,0.5)==50,"Hardware gain uses baseline and minimum");
         check(hardwareGainTarget(10,90,0.0)==10,"Hardware gain clamps to minimum");

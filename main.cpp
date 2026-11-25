@@ -37,7 +37,6 @@ constexpr int ID_DDC = 1011, ID_DDC_SLIDER_BASE = 5000, ID_DDC_MONITOR_BASE = 60
 constexpr int ID_RENAME_EDIT = 1006;
 constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012, ID_SCREEN_OFF = 1013;
 constexpr UINT TIMER_GAMMA = 11;
-constexpr UINT TIMER_STATE = 12;
 constexpr UINT TIMER_SAVE_DDC = 13;
 constexpr UINT TIMER_ANIMATION = 16;
 constexpr UINT TIMER_SAVE_WINDOW = 17;
@@ -49,7 +48,7 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
-constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_NV_BASE=9000, ID_TRAY_COLOR_TARGET_BASE=10000;
+constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_TARGET_BASE=10000;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
 constexpr UINT WM_GAMMA_COMPLETE = WM_APP + 41;
 constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
@@ -455,6 +454,7 @@ private:
     HWND hardwareDrag_=nullptr;
     int hardwareDragLeft_=0,hardwareDragRight_=1;
     bool animationTimerRunning_=false;
+    bool colorWatchdogRunning_=false,hardwarePollRunning_=false,hardwareDiscovered_=false;
     nightlight::PaintSurface pageSurface_;
     HWND taskbarOwner_ = nullptr;
     struct HardwareRow {
@@ -868,7 +868,7 @@ private:
         return hasMonitor() ? &model_.monitors()[selected_] : nullptr;
     }
     void repaint() {
-        if (window_) InvalidateRect(window_, nullptr, FALSE);
+        if (window_ && IsWindowVisible(window_)) InvalidateRect(window_, nullptr, FALSE);
     }
     void updateFonts() {
         for (HFONT font : fonts_) if (font) DeleteObject(font);
@@ -945,18 +945,16 @@ private:
         layout();
         // Initial DDC/CI readback is authoritative; saved values are used
         // only as UI fallback if the monitor cannot report its settings.
-        refreshHardware();
+        ensureHardwareRows();
         displayPowerNotification_=RegisterPowerSettingNotification(window_,&displayStateGuid,DEVICE_NOTIFY_WINDOW_HANDLE);
-        SetTimer(window_,TIMER_VERIFY_COLOR,3000,nullptr);
-        SetTimer(window_,TIMER_READ_DDC,nightlight::kDdcReadbackIntervalMs,nullptr);
         taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
         trayReady_ = addTray();
         // Explorer can still be starting when a logon task launches this app.
         // TaskbarCreated is not sufficient if NIM_ADD failed the first time.
         if (!trayReady_) SetTimer(window_,TIMER_TRAY_RETRY,1000,nullptr);
-        SetTimer(window_, TIMER_STATE, 250, nullptr);
         model_.setStatusWindow(window_);
         model_.collectGammaResults();
+        syncColorWatchdog();
         updateTrayTooltip();
         // Native window controls render immediately; no WebView runtime.
     }
@@ -1509,7 +1507,7 @@ private:
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
         if (const auto* mon=selectedMonitor()) {
-            const auto engine=mon->nvidiaTargetColor?L"NV target":mon->nvidiaColor?L"NVAPI":mon->hardwareColor?L"DDC/CI":L"GDI gamma";
+            const auto engine=mon->nvidiaTargetColor?L"NV target":mon->hardwareColor?L"DDC/CI":L"GDI gamma";
             std::wstring state=engine;
             COLORREF indicator=p.muted;
             const bool dark=nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);
@@ -1518,18 +1516,10 @@ private:
             } else if (mon->gammaStatus==0) {
                 state+=tr(L" · Failed",L" · Falhou");
                 indicator=dark?RGB(255,142,142):RGB(160,35,35);
-            } else if (!mon->enabled || ((mon->nvidiaColor || mon->nvidiaTargetColor) && mon->kelvin>=6500)) {
+            } else if (!mon->enabled || (mon->nvidiaTargetColor && mon->kelvin>=6500)) {
                 state+=tr(L" · Inactive",L" · Inativo");
-            } else if (mon->nvidiaColor && mon->gammaStatus==nightlight::kNvidiaVerified) {
-                state=tr(L"NVAPI active · Verified",L"NVAPI ativo · Verificado");
-                indicator=dark?RGB(116,205,147):RGB(20,111,53);
-                // Keep a truthful, shorter label when the window is narrow.
-                if(textWidth(state,smallFont_)>backendRect.right-backendRect.left)
-                    state=tr(L"NVAPI · Verified",L"NVAPI · Verificado");
             } else if (mon->nvidiaTargetColor) {
                 state+=tr(L" · Accepted",L" · Aceite");
-            } else if (mon->nvidiaColor) {
-                state+=tr(L" · Unverified",L" · Não verificado");
             } else {
                 state+=tr(L" · Applied",L" · Aplicado");
             }
@@ -1597,9 +1587,23 @@ private:
         }
     }
     void refreshHardware() {
+        hardwareDiscovered_=true;
         ensureHardwareRows();
         for (const auto& row:hardwareRows_) ddc_.refresh(row.device);
         syncHardware();
+    }
+    void syncColorWatchdog() {
+        const bool needed=displayAwake_ && !displayRecoveryActive_ && model_.needsColorWatchdog();
+        if(needed==colorWatchdogRunning_) return;
+        if(needed) colorWatchdogRunning_=SetTimer(window_,TIMER_VERIFY_COLOR,3000,nullptr)!=0;
+        else { KillTimer(window_,TIMER_VERIFY_COLOR); colorWatchdogRunning_=false; }
+    }
+    void syncHardwarePoll() {
+        const bool needed=ddcVisible_ && displayAwake_ && !displayRecoveryActive_ &&
+            IsWindowVisible(window_) && !IsIconic(window_);
+        if(needed==hardwarePollRunning_) return;
+        if(needed) hardwarePollRunning_=SetTimer(window_,TIMER_READ_DDC,nightlight::kDdcReadbackIntervalMs,nullptr)!=0;
+        else { KillTimer(window_,TIMER_READ_DDC); hardwarePollRunning_=false; }
     }
     void pollHardware() {
         // Real DDC/CI and WMI readings, not saved profile values, set the
@@ -1629,6 +1633,7 @@ private:
             ddc_.invalidateTopology();
         }
         displayRecoveryActive_=true;
+        syncColorWatchdog(); syncHardwarePoll();
         if (displayAwake_) SetTimer(window_,TIMER_DISPLAYS,750,nullptr);
     }
     void syncHardware() {
@@ -1654,8 +1659,9 @@ private:
     void toggleHardware() {
         ddcVisible_=!ddcVisible_;
         animate(hardwareReveal_,ddcVisible_?1:0,240);
-        if (ddcVisible_) refreshHardware();
-        else syncHardware();
+        if (ddcVisible_ && IsWindowVisible(window_)) refreshHardware();
+        else { hardwareDiscovered_=false; syncHardware(); }
+        syncHardwarePoll();
         layout();
         repaint();
     }
@@ -1928,7 +1934,9 @@ private:
             selected_=previous!=monitors.end()?static_cast<size_t>(previous-monitors.begin()):0;
             finishInlineRename(true);
         }
+        model_.applyAll(nightlight::GammaRefresh::Restore);
         refreshTabs();refreshHardware();
+        syncColorWatchdog();
         updateTrayTooltip();
     }
     void unlockGamma() {
@@ -2043,10 +2051,8 @@ private:
     void openWindow(bool fromTray=false) {
         // Keep the fast tray-click path free of slow registry checks while
         // restoring the same animated entrance for all show requests.
-        if (!fromTray) {
-            syncGammaButton();
-            updateMotionPreference();
-        }
+        syncGammaButton();
+        if (!fromTray) updateMotionPreference();
         const bool reveal=!IsWindowVisible(window_) || IsIconic(window_);
         if (reveal && animations_) {
             const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
@@ -2085,7 +2091,11 @@ private:
             ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
         }
         SetForegroundWindow(window_);
-        if (reveal) pollHardware(); // Refresh external OSD changes on reopening.
+        if (reveal && ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
+            if (!hardwareDiscovered_) refreshHardware();
+            else pollHardware();
+        }
+        syncHardwarePoll();
     }
     void hideWindowToTray() {
         // Minimize, Close (X) and tray-click dismissal share this path.
@@ -2103,6 +2113,7 @@ private:
             if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
             noteWindowPosition();
             SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
+            syncHardwarePoll();
         }
     }
     bool cursorIsOverTrayIcon() const {
@@ -2202,22 +2213,17 @@ private:
         for (size_t i=0;i<model_.monitors().size() && i<1000;++i) {
             const auto& mon=model_.monitors()[i];
             HMENU options=createMenu();
-            append(options,MF_STRING|(!mon.hardwareColor && !mon.nvidiaColor && !mon.nvidiaTargetColor?MF_CHECKED:0),ID_TRAY_COLOR_GPU_BASE+i,
+            append(options,MF_STRING|(!mon.hardwareColor && !mon.nvidiaTargetColor?MF_CHECKED:0),ID_TRAY_COLOR_GPU_BASE+i,
                 tr(L"GPU gamma",L"Gama da GPU").c_str(),nightlight::MenuIcon::Adjust);
             append(options,MF_STRING|(mon.hardwareColor?MF_CHECKED:0),ID_TRAY_COLOR_HW_BASE+i,
                 tr(L"Monitor hardware (DDC/CI)",L"Hardware do ecrã (DDC/CI)").c_str(),nightlight::MenuIcon::Monitor);
-            append(options,MF_STRING|(mon.nvidiaColor?MF_CHECKED:0),ID_TRAY_COLOR_NV_BASE+i,
-                tr(L"NVIDIA native (experimental)",L"NVIDIA nativo (experimental)").c_str(),nightlight::MenuIcon::Adjust);
             append(options,MF_STRING|(mon.nvidiaTargetColor?MF_CHECKED:0),ID_TRAY_COLOR_TARGET_BASE+i,
-                tr(L"NVIDIA target gamma (experimental)",L"Gama alvo NVIDIA (experimental)").c_str(),nightlight::MenuIcon::Adjust);
+                tr(L"NVIDIA target gamma",L"Gama alvo NVIDIA").c_str(),nightlight::MenuIcon::Adjust);
             auto name=mon.displayName();
             if(mon.nvidiaTargetColor && mon.enabled && mon.kelvin<6500 && mon.gammaStatus==1)
                 name+=tr(L" (driver accepted)",L" (aceite pelo controlador)");
-            if((mon.hardwareColor || mon.nvidiaColor || mon.nvidiaTargetColor) && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
-            if((mon.hardwareColor || mon.nvidiaColor || mon.nvidiaTargetColor) && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
-            if(mon.nvidiaColor && mon.enabled && mon.kelvin<6500 &&
-                mon.gammaStatus==nightlight::kNvidiaVerified)
-                name+=tr(L" (NVAPI verified)",L" (NVAPI verificado)");
+            if((mon.hardwareColor || mon.nvidiaTargetColor) && mon.gammaStatus==0) name+=tr(L" (unavailable)",L" (indisponível)");
+            if((mon.hardwareColor || mon.nvidiaTargetColor) && mon.gammaStatus<0) name+=tr(L" (checking)",L" (a verificar)");
             append(engines,MF_POPUP,reinterpret_cast<UINT_PTR>(options),name.c_str(),nightlight::MenuIcon::Monitor);
         }
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(engines),
@@ -2255,14 +2261,11 @@ private:
             DestroyWindow(window_);
         } else if ((cmd>=ID_TRAY_COLOR_GPU_BASE && cmd<ID_TRAY_COLOR_GPU_BASE+1000) ||
                    (cmd>=ID_TRAY_COLOR_HW_BASE && cmd<ID_TRAY_COLOR_HW_BASE+1000) ||
-                   (cmd>=ID_TRAY_COLOR_NV_BASE && cmd<ID_TRAY_COLOR_NV_BASE+1000) ||
                    (cmd>=ID_TRAY_COLOR_TARGET_BASE && cmd<ID_TRAY_COLOR_TARGET_BASE+1000)) {
             const bool target=cmd>=ID_TRAY_COLOR_TARGET_BASE;
-            const bool nvidia=!target && cmd>=ID_TRAY_COLOR_NV_BASE;
-            const bool hardware=!target && !nvidia && cmd>=ID_TRAY_COLOR_HW_BASE;
-            const size_t index=cmd-(target?ID_TRAY_COLOR_TARGET_BASE:nvidia?ID_TRAY_COLOR_NV_BASE:hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
+            const bool hardware=!target && cmd>=ID_TRAY_COLOR_HW_BASE;
+            const size_t index=cmd-(target?ID_TRAY_COLOR_TARGET_BASE:hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
             const auto backend=target?nightlight::ColorBackend::NvidiaTargetGamma:
-                nvidia?nightlight::ColorBackend::NvidiaCsc:
                 hardware?nightlight::ColorBackend::MonitorHardware:nightlight::ColorBackend::GpuGamma;
             if (index<model_.monitors().size()) {
                 bool proceed=true;
@@ -2271,17 +2274,12 @@ private:
                         L"Use monitor RGB gain controls instead of GPU gamma? Requires DDC/CI and a compatible monitor. White cursor and all screen pixels will be warmed. Original gains are backed up beside NightLight.exe. Kelvin values are approximate.",
                         L"Usar os ganhos RGB do ecrã em vez da gama da GPU? Requer DDC/CI e um ecrã compatível. O cursor branco e todos os píxeis ficam mais quentes. Os ganhos originais são guardados junto ao NightLight.exe. Os valores Kelvin são aproximados.").c_str(),
                         L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
-                if(nvidia && !model_.monitors()[index].nvidiaColor)
-                    proceed=MessageBoxW(window_,tr(
-                        L"Use experimental NVIDIA native colour conversion? Requires a supported NVIDIA driver and SDR. Browser acceleration and MPO settings are not changed. Existing active driver colour conversion is not overwritten. Cursor colour and rendering depend on the driver.",
-                        L"Usar a conversão de cor nativa experimental da NVIDIA? Requer um controlador NVIDIA compatível e SDR. A aceleração do navegador e o MPO não são alterados. A conversão de cor ativa não é substituída. A cor do cursor e a apresentação dependem do controlador.").c_str(),
-                        L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
                 if(target && !model_.monitors()[index].nvidiaTargetColor)
                     proceed=MessageBoxW(window_,tr(
                         L"Experimental NVIDIA target gamma: reset NVIDIA Control Panel desktop colour settings to defaults BEFORE using this mode. Requires SDR with Advanced Color disabled. The API cannot read back the original target LUT; NightLight restores a neutral LUT, not your custom NVIDIA calibration. No browser or MPO settings are changed. Continue?",
                         L"Gama alvo NVIDIA experimental: restaure as predefinições de cor do ambiente de trabalho no Painel de Controlo NVIDIA ANTES de usar este modo. Requer SDR sem cor avançada. A API não permite ler a LUT original; o NightLight restaura uma LUT neutra, não a calibração personalizada. O navegador e o MPO não são alterados. Continuar?").c_str(),
                         L"NightLight",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES;
-                if(proceed) {model_.updateColorBackend(index,backend); updateTrayTooltip(); repaint();}
+                if(proceed) {model_.updateColorBackend(index,backend); syncColorWatchdog(); updateTrayTooltip(); repaint();}
             }
         } else if (cmd==ID_DDC) {
             toggleHardware();
@@ -2415,7 +2413,7 @@ private:
         case WM_DWMCOLORIZATIONCOLORCHANGED:
         case WM_THEMECHANGED:
         case WM_SETTINGCHANGE:
-            updateMotionPreference(); updateTheme();
+            updateMotionPreference(); updateTheme(); syncGammaButton();
             return 0;
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint(); return 0;
@@ -2448,6 +2446,9 @@ private:
                 temperatureHover_=false; temperatureEngagement_.snap(0);
                 for (auto& item:interactions_) { item.second.hover.snap(0); item.second.press.snap(0); }
                 if (dragging_) commitDrag();
+                pageSurface_.reset();
+                for(auto& item:interactions_) item.second.surface.reset();
+                KillTimer(hwnd,TIMER_READ_DDC); hardwarePollRunning_=false;
             }
             break;
         case WM_DRAWITEM: {
@@ -2537,6 +2538,7 @@ private:
             break;
         case WM_GAMMA_COMPLETE:
             if (model_.collectGammaResults()) { updateTrayTooltip(); repaint(); }
+            syncColorWatchdog();
             return 0;
         case WM_SETCURSOR: {
             POINT point{};GetCursorPos(&point);ScreenToClient(hwnd,&point);
@@ -2625,6 +2627,7 @@ private:
                         }
                         KillTimer(hwnd,TIMER_DISPLAYS);
                         displayRecoveryActive_=false;
+                        syncColorWatchdog(); syncHardwarePoll();
                     } else {
                         scheduleDisplayRecovery();
                         // The screen-off input guard may still be preventing
@@ -2643,6 +2646,7 @@ private:
                 displayRecoveryActive_=false;
                 ddc_.invalidateTopology();
                 KillTimer(hwnd,TIMER_DISPLAYS);
+                syncColorWatchdog(); syncHardwarePoll();
             }
             return TRUE;
         case WM_TIMER:
@@ -2659,6 +2663,7 @@ private:
             if (wParam==TIMER_VERIFY_COLOR) {
                 if (displayAwake_ && !displayRecoveryActive_ && !dragging_)
                     model_.applyAll(nightlight::GammaRefresh::Verify);
+                syncColorWatchdog();
                 return 0;
             }
             if (wParam==TIMER_READ_DDC) {
@@ -2667,7 +2672,6 @@ private:
             }
             if (wParam==TIMER_SAVE_DDC) { KillTimer(hwnd,TIMER_SAVE_DDC); model_.save(); return 0; }
             if (wParam==TIMER_SAVE_WINDOW) { KillTimer(hwnd,TIMER_SAVE_WINDOW); model_.save(); return 0; }
-            if (wParam==TIMER_STATE) { syncGammaButton(); return 0; }
             if (wParam==TIMER_GAMMA && gammaHelper_ && WaitForSingleObject(gammaHelper_,0)==WAIT_OBJECT_0) {
                 DWORD code=1; GetExitCodeProcess(gammaHelper_, &code);
                 CloseHandle(gammaHelper_); gammaHelper_=nullptr;
@@ -2708,7 +2712,9 @@ private:
                     }
                     // Force gamma reapplication because the driver may have
                     // reset its LUT during sleep even without topology changes.
-                    model_.applyAll(nightlight::GammaRefresh::Restore);
+                    if (!ddcRestoreIssued_ || changed)
+                        model_.applyAll(nightlight::GammaRefresh::Restore);
+                    else model_.retryFailedColors();
                     if (!ddcRestoreIssued_) {
                         ensureHardwareRows();
                         for (const auto& row:hardwareRows_) {
@@ -2757,6 +2763,7 @@ private:
                     restoreDdcAfterWake_=false;
                     ddcRestoreIssued_=false;
                     syncHardware();
+                    syncColorWatchdog(); syncHardwarePoll();
                 }
             }
             return 0;
@@ -2777,7 +2784,6 @@ private:
             shuttingDown_=true;
             endHardwareDrag();finishScreenDrag();
             finishEntrance(); stopAnimationTimer();
-            KillTimer(hwnd,TIMER_STATE);
             KillTimer(hwnd,TIMER_VERIFY_COLOR); KillTimer(hwnd,TIMER_READ_DDC); KillTimer(hwnd,TIMER_DISPLAYS);
             if (displayPowerNotification_) { UnregisterPowerSettingNotification(displayPowerNotification_); displayPowerNotification_=nullptr; }
             KillTimer(hwnd,TIMER_GAMMA);

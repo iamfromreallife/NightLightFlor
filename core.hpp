@@ -34,10 +34,9 @@ struct Monitor {
     bool primary = false;
     bool enabled = true;
     int kelvin = 5000;
-    // -1 pending, 0 failed/unavailable, 1 applied or inactive, 2 NVAPI matrix verified
+    // -1 pending, 0 failed/unavailable, 1 applied/accepted or inactive
     int gammaStatus = -1;
     bool hardwareColor = false; // opt-in physical RGB gain control
-    bool nvidiaColor = false; // opt-in NVIDIA native CSC
     bool nvidiaTargetColor = false; // opt-in Control Panel-style target gamma
     std::wstring displayName() const { return alias.empty() ? windowsName : alias; }
 };
@@ -183,11 +182,7 @@ int temperatureSliderXFromKelvin(int kelvin, int left, int right);
 struct ColorGains { double red, green, blue; };
 ColorGains kelvinGains(int kelvin);
 DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor);
-double nvidiaLinearGain(double encodedGain);
-// Compare every coefficient, including offsets; reject nonfinite readback.
-bool nvidiaCoefficientsMatch(const float (&actual)[12],const float (&target)[12]);
-inline constexpr int kNvidiaVerified=2;
-enum class ColorBackend { GpuGamma, MonitorHardware, NvidiaCsc, NvidiaTargetGamma };
+enum class ColorBackend { GpuGamma, MonitorHardware, NvidiaTargetGamma };
 using NvidiaTargetRamp=std::array<float,3072>;
 NvidiaTargetRamp buildNvidiaTargetRamp(int kelvin);
 std::wstring monitorTooltip(const std::vector<Monitor>& monitors);
@@ -212,6 +207,8 @@ public:
     bool refreshMonitors(bool afterWake=false,bool* stable=nullptr);
     bool moveMonitor(size_t from,size_t to);
     void applyAll(GammaRefresh refresh=GammaRefresh::Normal);
+    bool needsColorWatchdog() const;
+    void retryFailedColors();
     void setStatusWindow(HWND window);
     bool collectGammaResults();
     bool previewKelvin(size_t index, int kelvin);
@@ -244,7 +241,8 @@ private:
     void adoptOriginal(const std::wstring& device, HDC dc);
     void queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh refresh);
     bool applyHardwareColor(const Monitor& monitor,bool active);
-    bool applyNvidiaColor(const Monitor& monitor,bool active);
+    bool restoreLegacyCsc(const Monitor& monitor); // migration only
+    std::set<std::wstring> cleanLegacyCsc_,cleanHardware_,cleanTarget_;
     bool applyNvidiaTargetColor(const Monitor& monitor,bool active,GammaRefresh refresh);
     std::map<std::wstring,int> targetGammaAccepted_; // worker-only cache, not readback
     std::set<std::wstring> gammaTouched_; // worker only, read after join

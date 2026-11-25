@@ -90,12 +90,6 @@ DWORD hardwareGainTarget(DWORD minimum,DWORD baseline,double factor) {
     if (baseline<=minimum) return minimum;
     return minimum+static_cast<DWORD>(std::llround((baseline-minimum)*std::clamp(factor,0.0,1.0)));
 }
-// CSC works in linear light. Convert the existing encoded white point to
-// linear RGB so the nominal white chromaticity follows the Kelvin slider.
-double nvidiaLinearGain(double encodedGain) {
-    const double x=std::clamp(encodedGain,0.0,1.0);
-    return x<=0.04045?x/12.92:std::pow((x+0.055)/1.055,2.4);
-}
 NvidiaTargetRamp buildNvidiaTargetRamp(int kelvin) {
     // Driver target LUT is sampled in encoded RGB, unlike the linear CSC.
     const auto g=kelvinGains(kelvin);
@@ -113,11 +107,9 @@ std::wstring monitorTooltip(const std::vector<Monitor>& monitors) {
     for (const auto& m : monitors) {
         text += L"\n" + m.displayName() + L": " + std::to_wstring(m.kelvin) + L" K";
         if (m.hardwareColor) text += L" [DDC/CI]";
-        if (m.nvidiaColor) text += L" [NVIDIA CSC]";
         if (m.nvidiaTargetColor) text += L" [NVIDIA target gamma]";
         if (!m.enabled) text += L" (off)";
         else if (m.gammaStatus == 0) text += L" (unavailable)";
-        else if (m.nvidiaColor && m.gammaStatus==kNvidiaVerified) text += L" (verified)";
     }
     return text;
 }
@@ -582,7 +574,6 @@ bool Model::save() {
         profile["custom_name"] = toUtf8(mon.alias);
         if (mon.hardwareColor) profile["hardware_color"] = true;
         else profile["hardware_color"] = false;
-        profile["nvidia_color"] = mon.nvidiaColor;
         profile["nvidia_target_color"] = mon.nvidiaTargetColor;
     }
     // Persist only settings implemented by this version. Keep profiles for
@@ -604,7 +595,7 @@ bool Model::save() {
     if(auto values=std::get_if<portable::Json::Object>(&root_.get("screen").get("monitor_profiles").value))
         for(const auto& item:*values) {
             auto profile=portable::Json::object();
-            for(const char* key:{"kelvin","enabled","custom_name","ddc_brightness","ddc_contrast","hardware_color","nvidia_color","nvidia_target_color"}) {
+            for(const char* key:{"kelvin","enabled","custom_name","ddc_brightness","ddc_contrast","hardware_color","nvidia_target_color"}) {
                 const auto& value=item.second.get(key);
                 if(!std::holds_alternative<std::nullptr_t>(value.value))profile[key]=value;
             }
@@ -644,8 +635,7 @@ void Model::readProfile(Monitor& m) const {
         profile.get("kelvin").integer(profileDefaultKelvin(root_)), 1000, 6500);
     m.alias = fromUtf8(profile.get("custom_name").str());
     m.nvidiaTargetColor=profile.get("nvidia_target_color").boolean(false);
-    m.nvidiaColor = !m.nvidiaTargetColor && profile.get("nvidia_color").boolean(false);
-    m.hardwareColor = !m.nvidiaTargetColor && !m.nvidiaColor && profile.get("hardware_color").boolean(false);
+    m.hardwareColor = !m.nvidiaTargetColor && profile.get("hardware_color").boolean(false);
 }
 static bool sameDisplaySnapshot(const std::vector<Monitor>& a,
                                 const std::vector<Monitor>& b) {
@@ -722,7 +712,6 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
             mon.enabled=old->enabled;
             mon.alias=old->alias;
             mon.hardwareColor=old->hardwareColor;
-            mon.nvidiaColor=old->nvidiaColor;
             mon.nvidiaTargetColor=old->nvidiaTargetColor;
         }
     }
@@ -821,6 +810,8 @@ struct PhysicalColorHandle {
     ~PhysicalColorHandle() { if(valid) DestroyPhysicalMonitors(1,&value); }
 };
 bool Model::applyHardwareColor(const Monitor& mon,bool active) {
+    const auto physicalKey=monitorProfileKey(mon);
+    if(!active && cleanHardware_.count(physicalKey)) return true;
     // Keep the original hardware gains on disk BEFORE modifying any channel.
     // Monitor firmware can retain its settings after a crash or power loss.
     // A later disable/exit/restart can restore from this recovery journal.
@@ -838,7 +829,8 @@ bool Model::applyHardwareColor(const Monitor& mon,bool active) {
     const auto key=toUtf8(monitorProfileKey(mon));
     const auto& record=journal.get(key);
     const bool saved=record.isObject();
-    if (!saved && !active) return true; // GPU mode normally does no DDC I/O.
+    if (!saved && !active) { cleanHardware_.insert(physicalKey); return true; }
+    cleanHardware_.erase(physicalKey);
     if (!uniquePhysicalTarget(mon)) return false;
     std::lock_guard<std::mutex> io(physicalDdcMutex());
     PhysicalColorHandle physical(mon);
@@ -882,6 +874,7 @@ bool Model::applyHardwareColor(const Monitor& mon,bool active) {
     if (!active) {
         std::get<portable::Json::Object>(journal.value).erase(key);
         if (!atomicWrite(journalPath,journal.dump())) return false;
+        cleanHardware_.insert(physicalKey);
     }
     return true;
 }
@@ -959,110 +952,49 @@ bool nvidiaWrite(NvidiaCscApi& api,std::uint32_t id,NvidiaCscV1 value) {
     if (status!=0) logNvidiaStatus(L"SetColorSpaceConversion",status);
     return status==0;
 }
-bool matchesNvidiaMatrix(const NvidiaCscV1& actual,const NvidiaCscV1& target) {
-    if (actual.input!=target.input || actual.output!=target.output ||
-        actual.enableA!=target.enableA || actual.enableB!=target.enableB) return false;
-    return !target.enableA || nvidiaCoefficientsMatch(actual.a,target.a);
 }
-}
-bool nvidiaCoefficientsMatch(const float (&actual)[12],const float (&target)[12]) {
-    for (size_t i=0;i<12;++i)
-        if (!std::isfinite(actual[i]) || !std::isfinite(target[i]) ||
-            std::abs(actual[i]-target[i])>0.001f) return false;
-    return true;
-}
-bool Model::applyNvidiaColor(const Monitor& mon,bool active) {
-    // Only claim an otherwise unused CSC pipeline; do not overwrite an ICC
-    // calibration, HDR transformation, or another application's active CSC.
-    // Persist ownership before writing so crash recovery can disable our CSC.
-    const auto journalPath=directory_/L"nvidia-color-backup.json";
+bool Model::restoreLegacyCsc(const Monitor& mon) {
+    // Recovery only: the removed CSC backend can never be activated.
+    const auto key=monitorProfileKey(mon);
+    if(cleanLegacyCsc_.count(key)) return true;
+    const auto path=directory_/L"nvidia-color-backup.json";
     portable::Json journal=portable::Json::object();
     std::string document;
-    if (readWholeFile(journalPath,document)) {
-        try { journal=portable::Json::parse(document); }
-        catch (...) { return false; }
-        if (!journal.isObject()) return false;
+    if(readWholeFile(path,document)) {
+        try { journal=portable::Json::parse(document); } catch(...) { return false; }
+        if(!journal.isObject()) return false;
     } else {
-        const DWORD attrs=GetFileAttributesW(journalPath.c_str());
-        if (attrs!=INVALID_FILE_ATTRIBUTES || GetLastError()!=ERROR_FILE_NOT_FOUND) return false;
+        const DWORD attrs=GetFileAttributesW(path.c_str());
+        if(attrs!=INVALID_FILE_ATTRIBUTES || GetLastError()!=ERROR_FILE_NOT_FOUND) return false;
     }
-    const auto key=toUtf8(monitorProfileKey(mon));
-    const auto& record=journal.get(key);
-    const bool owned=record.isObject();
-    if (!owned && !active) return true;
-    if (!uniquePhysicalTarget(mon)) return false;
+    const auto jsonKey=toUtf8(key);
+    const auto& record=journal.get(jsonKey);
+    if(!record.isObject()) { cleanLegacyCsc_.insert(key); return true; }
+    if(!record.get("baseline_disabled").boolean(false) || !uniquePhysicalTarget(mon)) return false;
     static NvidiaCscApi api;
-    if (!api.available()) { logNvidiaStatus(L"API unavailable",-104); return false; }
+    if(!api.available()) return false;
     std::uint32_t id=0;
-    const auto name=toUtf8(mon.device);
-    const int idStatus=api.displayId(name.c_str(),&id);
-    if (idStatus!=0 || !id) { logNvidiaStatus(L"GetDisplayIdByDisplayName",idStatus); return false; }
+    if(api.displayId(toUtf8(mon.device).c_str(),&id)!=0 || !id) return false;
     NvidiaCscV1 current;
-    if (!nvidiaRead(api,id,current)) return false;
-    // HDR uses color-space 12 in this private API. Never modify that mode.
-    if (current.input==12 || current.output==12) return false;
-    if (!owned && (current.output!=0 || current.enableA || current.enableB ||
-        (current.input!=0 && current.input!=2))) {
-        logNvidiaStatus(L"existing colour conversion; leaving unchanged",-104);
-        return false;
-    }
-    // The only supported baseline is disabled CSC. Refuse a corrupt journal.
-    if (owned && record.get("baseline_disabled").boolean(false)!=true) return false;
-    // Refuse to overwrite an obviously foreign conversion even with an old
-    // recovery marker. Our matrix is diagonal with zero offsets, input 2.
-    if (owned && current.output!=0) {
-        if (current.input!=2 || current.output!=2 || current.enableA!=1 || current.enableB) return false;
-        for (size_t i=0;i<12;++i) {
+    if(!nvidiaRead(api,id,current) || current.input==12 || current.output==12) return false;
+    const auto neutral=[](const NvidiaCscV1& v){return v.output==0 && !v.enableA && !v.enableB;};
+    if(!neutral(current)) {
+        if(current.input!=2 || current.output!=2 || current.enableA!=1 || current.enableB) return false;
+        for(size_t i=0;i<12;++i) {
             const float x=current.a[i];
-            if (!std::isfinite(x)) return false;
-            if (i==0 || i==5 || i==10) {
-                if (x<0 || x>1.001f) return false;
-            } else if (std::abs(x)>0.001f) return false;
+            if(!std::isfinite(x)) return false;
+            if(i==0 || i==5 || i==10) { if(x<0 || x>1.001f) return false; }
+            else if(std::abs(x)>0.001f) return false;
         }
-        if (std::abs(current.a[0]-1.0f)>0.001f) return false;
+        if(std::abs(current.a[0]-1.0f)>0.001f || !uniquePhysicalTarget(mon)) return false;
+        NvidiaCscV1 reset; reset.input=2;
+        if(!nvidiaWrite(api,id,reset) || !nvidiaRead(api,id,current) || !neutral(current)) return false;
     }
-    if (!owned) {
-        journal[key]["baseline_disabled"]=true;
-        if (!atomicWrite(journalPath,journal.dump())) return false;
-    }
-    NvidiaCscV1 target;
-    target.input=2; // sRGB degamma
-    if (active) {
-        target.output=2; // sRGB regamma
-        target.enableA=1;
-        const auto gains=kelvinGains(mon.kelvin);
-        target.a[0]=static_cast<float>(nvidiaLinearGain(gains.red));
-        target.a[5]=static_cast<float>(nvidiaLinearGain(gains.green));
-        target.a[10]=static_cast<float>(nvidiaLinearGain(gains.blue));
-    }
-    if (!uniquePhysicalTarget(mon)) return false;
-    const bool same=active?matchesNvidiaMatrix(current,target):
-        (current.output==0 && !current.enableA && !current.enableB);
-    if (!same && !nvidiaWrite(api,id,target)) {
-        // If the attempted activation failed, retain the recovery marker.
-        // Never fall through to GDI gamma or change compositor settings.
-        return false;
-    }
-    // A successful setter alone is NOT proof that the driver accepted the
-    // transformation. Read the driver state again after every write, or use
-    // the just-read state when no write was needed. Verify both CSC stages
-    // and all matrix coefficients before reporting active.
-    NvidiaCscV1 confirmed=current;
-    if (!same && !nvidiaRead(api,id,confirmed)) return false;
-    if (!uniquePhysicalTarget(mon)) return false;
-    const bool verified=active?matchesNvidiaMatrix(confirmed,target):
-        (confirmed.output==0 && !confirmed.enableA && !confirmed.enableB);
-    if (!verified) {
-        logNvidiaStatus(L"CSC readback mismatch",-1);
-        return false;
-    }
-    if (!active) {
-        std::get<portable::Json::Object>(journal.value).erase(key);
-        if (!atomicWrite(journalPath,journal.dump())) return false;
-    }
+    std::get<portable::Json::Object>(journal.value).erase(jsonKey);
+    if(!atomicWrite(path,journal.dump())) return false;
+    cleanLegacyCsc_.insert(key);
     return true;
 }
-
 // Conservatively require a uniquely identified SDR output. Advanced Color
 // (HDR or automatic colour management) is not modified by this experiment.
 static bool targetGammaSdr(const Monitor& mon) {
@@ -1090,6 +1022,12 @@ bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh r
     // No reliable target-gamma getter has been established. Only opt in
     // from user-confirmed default NVIDIA colour settings; restore identity
     // rather than claiming to capture an arbitrary existing calibration.
+    const auto key=monitorProfileKey(mon);
+    const int kelvin=active?mon.kelvin:6500;
+    const auto last=targetGammaAccepted_.find(key);
+    if(!active && cleanTarget_.count(key)) return true;
+    if(active && refresh!=GammaRefresh::Restore &&
+        last!=targetGammaAccepted_.end() && last->second==kelvin) return true;
     const auto path=directory_/L"nvidia-target-backup.json";
     portable::Json journal=portable::Json::object();
     std::string document;
@@ -1100,10 +1038,10 @@ bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh r
         const DWORD attrs=GetFileAttributesW(path.c_str());
         if(attrs!=INVALID_FILE_ATTRIBUTES || GetLastError()!=ERROR_FILE_NOT_FOUND) return false;
     }
-    const auto key=monitorProfileKey(mon);
     const auto jsonKey=toUtf8(key);
     const bool owned=journal.get(jsonKey).isObject();
-    if(!owned && !active) return true;
+    if(!owned && !active) { cleanTarget_.insert(key); return true; }
+    cleanTarget_.erase(key);
     if(owned && !journal.get(jsonKey).get("restore_neutral").boolean(false)) return false;
     if(!uniquePhysicalTarget(mon) || !targetGammaSdr(mon)) return false;
     static NvidiaCscApi api;
@@ -1114,13 +1052,6 @@ bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh r
     const auto name=toUtf8(mon.device);
     const int idStatus=api.displayId(name.c_str(),&id);
     if(idStatus!=0 || !id) { logNvidiaStatus(L"target gamma display ID",idStatus); return false; }
-    const int kelvin=active?mon.kelvin:6500;
-    const auto last=targetGammaAccepted_.find(key);
-    // Never poll by repeatedly writing the driver LUT. A successful call
-    // is cached until the requested temperature changes or wake/refresh
-    // explicitly requests a restore. This is not live verification.
-    if(active && owned && refresh!=GammaRefresh::Restore &&
-        last!=targetGammaAccepted_.end() && last->second==kelvin) return true;
     if(!owned) {
         journal[jsonKey]["restore_neutral"]=true;
         if(!atomicWrite(path,journal.dump())) return false;
@@ -1136,6 +1067,7 @@ bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh r
         targetGammaAccepted_.erase(key);
         std::get<portable::Json::Object>(journal.value).erase(jsonKey);
         if(!atomicWrite(path,journal.dump())) return false;
+        cleanTarget_.insert(key);
     }
     return true;
 }
@@ -1182,7 +1114,9 @@ void Model::gammaLoop() {
             std::lock_guard<std::mutex> guard(gammaMutex_);
             if (gammaStopping_ || newestGeneration_[device]!=job.generation) continue;
         }
-        if (job.monitor.hardwareColor || job.monitor.nvidiaColor || job.monitor.nvidiaTargetColor) {
+        if (!restoreLegacyCsc(job.monitor)) {
+            result=0;
+        } else if (job.monitor.hardwareColor || job.monitor.nvidiaTargetColor) {
             // Restore the GPU calibration once on transition, but never
             // apply a warm GPU ramp (including verification) in hardware mode.
             bool neutral=true;
@@ -1196,20 +1130,14 @@ void Model::gammaLoop() {
             if (neutral) {
                 const bool active=job.monitor.enabled && job.monitor.kelvin<6500;
                 if (job.monitor.nvidiaTargetColor) {
-                    if (applyHardwareColor(job.monitor,false) && applyNvidiaColor(job.monitor,false))
+                    if (applyHardwareColor(job.monitor,false))
                         result=applyNvidiaTargetColor(job.monitor,active,job.refresh)?1:0;
                 } else if (applyNvidiaTargetColor(job.monitor,false,job.refresh)) {
-                    if (job.monitor.nvidiaColor) {
-                        if (applyHardwareColor(job.monitor,false))
-                            result=applyNvidiaColor(job.monitor,active)?
-                                (active?kNvidiaVerified:1):0;
-                    } else if (applyNvidiaColor(job.monitor,false)) {
-                        result=applyHardwareColor(job.monitor,active)?1:0;
-                    }
+                    result=applyHardwareColor(job.monitor,active)?1:0;
                 }
             }
         } else if (applyNvidiaTargetColor(job.monitor,false,job.refresh) &&
-                   applyNvidiaColor(job.monitor,false) && applyHardwareColor(job.monitor,false)) {
+                   applyHardwareColor(job.monitor,false)) {
             HDC dc=CreateDCW(L"DISPLAY",device.c_str(),nullptr,nullptr);
             if (dc) {
                 result=updateGammaRamp(job.ramp,job.refresh,appliedRamps[device],
@@ -1279,7 +1207,7 @@ bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
     }
     const auto original = originals_.find(persistent);
     const Ramp* baseline = original != originals_.end() ? &original->second : nullptr;
-    const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled && !mon.hardwareColor && !mon.nvidiaColor && !mon.nvidiaTargetColor, baseline);
+    const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled && !mon.hardwareColor && !mon.nvidiaTargetColor, baseline);
     // Retain the last verified status during an unchanged periodic check.
     // A new Kelvin/backend/enable request or wake recovery invalidates it.
     if (refresh!=GammaRefresh::Verify) mon.gammaStatus=-1;
@@ -1287,7 +1215,20 @@ bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
     return true;
 }
 void Model::applyAll(GammaRefresh refresh) {
-    for (auto& monitor : monitors_) applyDisplay(monitor,refresh);
+    for (auto& monitor : monitors_) {
+        if(refresh==GammaRefresh::Verify && monitor.nvidiaTargetColor &&
+            monitor.gammaStatus!=0) continue;
+        applyDisplay(monitor,refresh);
+    }
+}
+bool Model::needsColorWatchdog() const {
+    return std::any_of(monitors_.begin(),monitors_.end(),[](const Monitor& m){
+        return !m.nvidiaTargetColor || m.gammaStatus==0;
+    });
+}
+void Model::retryFailedColors() {
+    for(auto& monitor:monitors_)
+        if(monitor.gammaStatus==0) applyDisplay(monitor,GammaRefresh::Restore);
 }
 bool Model::persistProfile(size_t index) {
     if (index >= monitors_.size() || !loaded_) return false;
@@ -1297,7 +1238,6 @@ bool Model::persistProfile(size_t index) {
     profile["kelvin"] = mon.kelvin;
     profile["custom_name"] = toUtf8(mon.alias);
     profile["hardware_color"] = mon.hardwareColor;
-    profile["nvidia_color"] = mon.nvidiaColor;
     profile["nvidia_target_color"] = mon.nvidiaTargetColor;
     return save();
 }
@@ -1325,11 +1265,9 @@ bool Model::updateColorBackend(size_t index,ColorBackend backend) {
     if (index>=monitors_.size() || !loaded_) return false;
     auto& mon=monitors_[index];
     const bool hardware=backend==ColorBackend::MonitorHardware;
-    const bool nvidia=backend==ColorBackend::NvidiaCsc;
     const bool target=backend==ColorBackend::NvidiaTargetGamma;
-    if (mon.hardwareColor==hardware && mon.nvidiaColor==nvidia && mon.nvidiaTargetColor==target) return true;
+    if (mon.hardwareColor==hardware && mon.nvidiaTargetColor==target) return true;
     mon.hardwareColor=hardware;
-    mon.nvidiaColor=nvidia;
     mon.nvidiaTargetColor=target;
     persistProfile(index);
     return applyDisplay(mon,GammaRefresh::Restore);
@@ -1355,7 +1293,7 @@ void Model::restoreOriginals() {
     // target, never to whichever panel received an old DISPLAYx number.
     for (const auto& mon:monitors_) {
         applyNvidiaTargetColor(mon,false,GammaRefresh::Restore);
-        applyNvidiaColor(mon,false);
+        restoreLegacyCsc(mon);
         applyHardwareColor(mon,false);
         if (!gammaTouched_.count(monitorProfileKey(mon))) continue;
         const auto original=originals_.find(monitorProfileKey(mon));

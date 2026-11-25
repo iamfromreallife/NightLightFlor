@@ -236,7 +236,11 @@ void DdcController::run() {
             epoch=topologyEpoch_;
             previous=key; first=false;
         }
+        {
         std::unique_lock<std::mutex> physicalLock(physicalDdcMutex());
+        { std::lock_guard<std::mutex> lock(mutex_);
+          if(stopping_) return;
+          if(epoch!=topologyEpoch_) continue; }
         Physical monitor(api,key.first);
         if (key.second==-1) {
             const DdcValue brightness=observe(api,monitor,wmi,key.first,0), contrast=observe(api,monitor,wmi,key.first,1);
@@ -244,7 +248,10 @@ void DdcController::run() {
             // A display sleep/re-enumeration may have reassigned this GDI
             // output while the slow DDC read was in progress.
             if (epoch!=topologyEpoch_ || stopping_) continue;
-            auto& state=states_[key.first]; state.loading=false;
+            auto& state=states_[key.first];
+            const bool wasLoading=state.loading;
+            const auto beforeBrightness=state.brightness,beforeContrast=state.contrast;
+            state.loading=false;
             const auto now=GetTickCount64();
             auto publish=[now](DdcValue& value,const DdcValue& observed) {
                 const bool protect=value.pending || now<value.protectUntilTickMs;
@@ -252,15 +259,24 @@ void DdcController::run() {
             };
             publish(state.brightness,brightness);
             publish(state.contrast,contrast);
-            if (window_ && !stopping_) PostMessageW(window_,WM_DDC_COMPLETE,0,0);
+            const auto changed=[](const DdcValue& a,const DdcValue& b){
+                return a.supported!=b.supported || a.readable!=b.readable ||
+                    a.hasValue!=b.hasValue || a.managed!=b.managed || a.failed!=b.failed ||
+                    a.percent!=b.percent || a.backend!=b.backend;
+            };
+            if (window_ && !stopping_ && (wasLoading ||
+                changed(beforeBrightness,state.brightness) || changed(beforeContrast,state.contrast)))
+                PostMessageW(window_,WM_DDC_COMPLETE,0,0);
         } else {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                const auto& state=states_[key.first];
-                const auto& latest=key.second==0?state.brightness:state.contrast;
                 if (stopping_) return;
-                if (epoch!=topologyEpoch_ ||
-                    latest.generation!=job.generation) continue;
+                if (epoch!=topologyEpoch_) continue;
+                const auto found=states_.find(key.first);
+                if(found==states_.end()) continue;
+                const auto& state=found->second;
+                const auto& latest=key.second==0?state.brightness:state.contrast;
+                if (latest.generation!=job.generation) continue;
             }
             bool usedWmi=false;
             bool ok=writePhysical(api,monitor,key.second,job.percent);
@@ -287,7 +303,7 @@ void DdcController::run() {
             }
             if (window_ && !stopping_) PostMessageW(window_,WM_DDC_COMPLETE,0,0);
         }
-        physicalLock.unlock();
+        } // Destroy physical monitor handles before releasing DDC lock.
         // Bound DDC/CI traffic; pointer events overwrite pending writes.
         { std::unique_lock<std::mutex> lock(mutex_);
           wake_.wait_for(lock,std::chrono::milliseconds(75),[&]{return stopping_;});
