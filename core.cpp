@@ -768,8 +768,8 @@ void Model::gammaLoop() {
         }
         if (batch.empty()) {
             if (gammaEvent_) {
-                // Magnification owns a message queue on this worker. Sleep
-                // until work, shutdown or a Windows message actually arrives.
+                // Keep the existing message-aware worker wait so colour
+                // updates never block the UI thread while idle.
                 const DWORD result=MsgWaitForMultipleObjectsEx(1,&gammaEvent_,INFINITE,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
                 if (result==WAIT_FAILED) std::this_thread::sleep_for(std::chrono::milliseconds(30));
             } else {
