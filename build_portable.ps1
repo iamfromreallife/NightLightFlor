@@ -15,10 +15,11 @@ if (-not (Test-Path -LiteralPath $compiler)) { throw 'Pass -Toolchain with the p
 $output = Join-Path $projectRoot 'build/native-llvm'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 $icon = (Join-Path $PSScriptRoot 'icon.ico').Replace('\','/')
-if (-not (Test-Path -LiteralPath $icon)) { throw 'Missing icon.ico, required to build executable resources.' }
+$iconDark = (Join-Path $PSScriptRoot 'icon-dark.ico').Replace('\','/')
+if (-not (Test-Path -LiteralPath $icon) -or -not (Test-Path -LiteralPath $iconDark)) { throw 'Missing icon.ico or icon-dark.ico, required to build executable resources.' }
 $manifest = (Join-Path $PSScriptRoot 'app.manifest').Replace('\','/')
 $resource = Join-Path $output 'app.rc'
-@("101 ICON `"$icon`"", "1 24 `"$manifest`"") | Set-Content -LiteralPath $resource
+@("101 ICON `"$icon`"", "102 ICON `"$iconDark`"", "1 24 `"$manifest`"") | Set-Content -LiteralPath $resource
 & $windres -i $resource -o "$output/app.res"
 if ($LASTEXITCODE) { throw 'Resource compilation failed' }
 $common = @('-std=c++17','-O2','-static','-DUNICODE','-D_UNICODE','-D_WIN32_WINNT=0x0A00','-DNTDDI_VERSION=0x0A00000C')

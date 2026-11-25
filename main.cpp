@@ -55,7 +55,8 @@ constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
 constexpr UINT TIMER_DISPLAYS = 10;
 constexpr UINT TIMER_TRAY_RETRY = 21;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
-constexpr int ICON_RESOURCE = 101;
+constexpr int ICON_RESOURCE = 101; // dark outline, default executable icon
+constexpr int ICON_RESOURCE_DARK_TASKBAR = 102; // light outline
 constexpr UINT TRAY_ID = 100;
 
 // Standalone adaptation of the supplied Windhawk mod's input protection.
@@ -349,7 +350,7 @@ public:
         BufferedPaintInit();
     }
     ~NativeApp() {
-        if (trayReady_) removeTray();
+        removeTray();
         if (taskbarOwner_) DestroyWindow(taskbarOwner_);
         for (HFONT font : fonts_) if (font) DeleteObject(font);
         if (drawingToken_) Gdiplus::GdiplusShutdown(drawingToken_);
@@ -516,6 +517,8 @@ private:
     nightlight::TrayClickFilter trayClickFilter_;
     UINT taskbarCreated_ = 0;
     NOTIFYICONDATAW notify_ = {};
+    HICON trayIcon_=nullptr;
+    int trayIconResource_=0, trayIconWidth_=0, trayIconHeight_=0;
 
     struct Interaction {
         nightlight::Motion hover{0},press{0},position;
@@ -962,6 +965,7 @@ private:
         // Refresh only on startup, explicit menu changes or Windows theme
         // notifications, not on each slider/painting frame.
         systemDark_=nightlight::systemAppsUseDarkTheme();
+        refreshTrayIcon();
         const BOOL dark=nightlight::effectiveDarkTheme(
             model_.preferences().theme,systemDark_)?TRUE:FALSE;
         const Palette p = palette();
@@ -2152,6 +2156,47 @@ private:
         // prevents duplicate legacy/v4 notifications, with no time throttle.
         toggleTrayWindow();
     }
+    // The shell's theme may differ from the application's selected theme.
+    // Read it only on startup/theme notifications, never on a polling timer.
+    int trayIconResource() const {
+        HIGHCONTRASTW hc{sizeof(hc)};
+        if (SystemParametersInfoW(SPI_GETHIGHCONTRAST,sizeof(hc),&hc,0) &&
+            (hc.dwFlags&HCF_HIGHCONTRASTON)) {
+            const COLORREF bg=GetSysColor(COLOR_WINDOW);
+            const int luminance=299*GetRValue(bg)+587*GetGValue(bg)+114*GetBValue(bg);
+            return luminance<128000?ICON_RESOURCE_DARK_TASKBAR:ICON_RESOURCE;
+        }
+        DWORD light=1, bytes=sizeof(light);
+        const LSTATUS status=RegGetValueW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            L"SystemUsesLightTheme",RRF_RT_REG_DWORD,nullptr,&light,&bytes);
+        return status==ERROR_SUCCESS && light==0?ICON_RESOURCE_DARK_TASKBAR:ICON_RESOURCE;
+    }
+    void refreshTrayIcon(bool preparingAdd=false) {
+        if(!trayReady_ && !preparingAdd) return;
+        const int resource=trayIconResource();
+        const HWND taskbar=FindWindowW(L"Shell_TrayWnd",nullptr);
+        UINT dpi=taskbar?GetDpiForWindow(taskbar):GetDpiForSystem();
+        if(!dpi) dpi=96;
+        const int w=GetSystemMetricsForDpi(SM_CXSMICON,dpi);
+        const int h=GetSystemMetricsForDpi(SM_CYSMICON,dpi);
+        if(trayIcon_ && resource==trayIconResource_ &&
+            w==trayIconWidth_ && h==trayIconHeight_) return;
+        HICON next=static_cast<HICON>(LoadImageW(instance_,MAKEINTRESOURCEW(resource),
+            IMAGE_ICON,w,h,LR_DEFAULTCOLOR));
+        if(!next) return;
+        if(trayReady_ && !preparingAdd) {
+            NOTIFYICONDATAW update{};
+            update.cbSize=sizeof(update);
+            update.hWnd=window_; update.uID=TRAY_ID;
+            update.uFlags=NIF_ICON; update.hIcon=next;
+            if(!Shell_NotifyIconW(NIM_MODIFY,&update)) { DestroyIcon(next); return; }
+            notify_.hIcon=next;
+        }
+        if(trayIcon_) DestroyIcon(trayIcon_);
+        trayIcon_=next; trayIconResource_=resource;
+        trayIconWidth_=w; trayIconHeight_=h;
+    }
     bool addTray() {
         ZeroMemory(&notify_,sizeof(notify_));
         notify_.cbSize=sizeof(notify_);
@@ -2159,7 +2204,8 @@ private:
         notify_.uID=TRAY_ID;
         notify_.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_SHOWTIP;
         notify_.uCallbackMessage=WM_TRAY_ICON;
-        notify_.hIcon=LoadIconW(instance_,MAKEINTRESOURCEW(ICON_RESOURCE));
+        refreshTrayIcon(true);
+        notify_.hIcon=trayIcon_?trayIcon_:LoadIconW(instance_,MAKEINTRESOURCEW(ICON_RESOURCE));
         wcscpy_s(notify_.szTip,L"NightLight");
         if (!Shell_NotifyIconW(NIM_ADD,&notify_)) return false;
         notify_.uVersion=NOTIFYICON_VERSION_4;
@@ -2173,6 +2219,9 @@ private:
     void removeTray() {
         if (trayReady_) Shell_NotifyIconW(NIM_DELETE,&notify_);
         trayReady_=false; trayVersion4_=false;
+        if(trayIcon_) { DestroyIcon(trayIcon_); trayIcon_=nullptr; }
+        notify_.hIcon=nullptr;
+        trayIconResource_=trayIconWidth_=trayIconHeight_=0;
     }
     HMENU buildTrayMenu(std::vector<HBITMAP>& icons) {
         auto createMenu=[] {
@@ -2416,7 +2465,7 @@ private:
             SetWindowPos(hwnd,nullptr,suggested->left,suggested->top,
                 suggested->right-suggested->left,suggested->bottom-suggested->top,
                 SWP_NOZORDER|SWP_NOACTIVATE);
-            updateFonts(); layout(); return 0;
+            updateFonts(); layout(); refreshTrayIcon(); return 0;
         }
         case WM_DWMCOLORIZATIONCOLORCHANGED:
         case WM_THEMECHANGED:

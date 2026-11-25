@@ -59,3 +59,5 @@ The NVIDIA target gamma interface is based on independently documented reverse-e
 
 <img width="709" height="721" alt="image" src="https://github.com/user-attachments/assets/27c4af10-1ee6-450f-a667-87a7a706ede3" />
 
+
+The tray icon automatically switches between light- and dark-taskbar variants using the Windows system theme, independently of NightLight's app theme.

@@ -19,8 +19,9 @@ target_compile_definitions(nightlight-core PUBLIC UNICODE _UNICODE WIN32_LEAN_AN
 target_link_libraries(nightlight-core PUBLIC user32 gdi32 shell32 ole32 oleaut32 wbemuuid advapi32 dxva2)
 
 set(ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/icon.ico")
-if(NOT EXISTS "${ICON_PATH}")
-    message(FATAL_ERROR "Missing native/icon.ico, required to build executable resources.")
+set(ICON_DARK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/icon-dark.ico")
+if(NOT EXISTS "${ICON_PATH}" OR NOT EXISTS "${ICON_DARK_PATH}")
+    message(FATAL_ERROR "Missing icon.ico or icon-dark.ico, required to build executable resources.")
 endif()
 configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
 
