@@ -2,6 +2,7 @@
 #include "display_identity.hpp"
 #include "ddc.hpp"
 #include "motion.hpp"
+#include "update_version.hpp"
 #include "wmi_brightness.hpp"
 #include <windows.h>
 #include <filesystem>
@@ -18,6 +19,12 @@ void check(bool ok,const char* message) {
 }
 int main() {
     try {
+        {
+            check(newerRelease("v1.0.20") && newerRelease("2.0.0") && !newerRelease("v1.0.19") && !newerRelease("v1.0.4"),"Numeric release comparison");
+            check(!newerRelease("v1.0.20","1.0.20") && newerRelease("v1.0.21","1.0.20"),"Ignore exactly one release version");
+            check(!parseReleaseVersion("v1.0.20-beta") && !parseReleaseVersion("../2.0.0") && !parseReleaseVersion("1.2"),"Reject prerelease and unsafe tag syntax");
+            check(updateDue(2000,560) && !updateDue(1999,560) && updateDue(2000,0) && updateDue(100,200),"Daily check scheduling and backwards clock");
+        }
         {
             check(dimOverlayAlpha(0)==0 && dimOverlayAlpha(50)==128 &&
                   dimOverlayAlpha(90)==230 && dimOverlayAlpha(99)==252 &&

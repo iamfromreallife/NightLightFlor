@@ -53,6 +53,9 @@ struct Preferences {
     std::wstring locale = L"en-US";
     std::wstring theme = L"system"; // system, light, dark
     bool closeByClickingOutside = true;
+    bool autoUpdates=false;
+    int updateLastCheck=0;
+    std::string ignoredUpdate,availableUpdate,updateNotes;
     bool dimInactive=false;
     int dimAmount=90; // black overlay opacity percentage
     int dimMinutes=5;

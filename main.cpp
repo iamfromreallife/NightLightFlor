@@ -30,6 +30,8 @@
 #include "paint_surface.hpp"
 #include "startup_task.hpp"
 #include "inactive_media.hpp"
+#include "update_checker.hpp"
+#include "update_badge.hpp"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -53,6 +55,8 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103, ID_TRAY_STARTUP = 4104;
 constexpr int ID_DIM_SETTINGS=12000;
+constexpr int ID_UPDATE_MANUAL=12001,ID_UPDATE_AUTO=12002,ID_UPDATE_AVAILABLE=12003;
+constexpr UINT TIMER_UPDATE=25;
 constexpr UINT TIMER_INACTIVE_DIM=22, TIMER_DIM_FADE=23, TIMER_STARTUP_COLOR=24;
 constexpr UINT WM_DIM_POINTER_ACTIVITY=WM_APP+45;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
@@ -633,6 +637,7 @@ void applyNightLightFrame(HWND window,const Palette& p,bool dark,bool highContra
 
 // The settings frame uses the same palette and primitive painters as the main UI.
 #include "inactive_dialog.hpp"
+#include "update_dialog.hpp"
 
 class NativeApp {
 public:
@@ -646,6 +651,8 @@ public:
         shuttingDown_=true;
         if(dimSettings_) dimSettings_->close();
         dimSettings_.reset();
+        updateWindow_.reset();
+        updateRequest_.reset();
         removeTray();
         if (taskbarOwner_) DestroyWindow(taskbarOwner_);
         for (HFONT font : fonts_) if (font) DeleteObject(font);
@@ -748,10 +755,12 @@ public:
         SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         UpdateWindow(window_);
         noteWindowPosition();
+        initializeUpdates();
         MSG msg{};
         BOOL messageResult=0;
         while ((messageResult=GetMessageW(&msg, nullptr, 0, 0)) > 0) {
             if(dimSettings_ && dimSettings_->pretranslate(msg)) continue;
+            if(updateWindow_ && updateWindow_->pretranslate(msg)) continue;
             const bool inlineKey=msg.hwnd==editName_ && msg.message==WM_KEYDOWN &&
                 (msg.wParam==VK_RETURN || msg.wParam==VK_ESCAPE);
             if (inlineKey || !IsDialogMessageW(window_, &msg)) {
@@ -775,6 +784,9 @@ private:
     ULONGLONG lastDimTopology_=0;
     bool dimTopologyDirty_=true,dimDialogOpen_=false;
     std::unique_ptr<InactiveSettingsWindow> dimSettings_;
+    std::unique_ptr<UpdateWindow> updateWindow_;
+    std::shared_ptr<nightlight::UpdateRequest> updateRequest_;
+    bool updateManual_=false,updatePromptPending_=false,trayIconBadged_=false;
     DWORD lastDimInput_=0,lastDimKeyboardInput_=0;
     POINT lastDimCursor_{};
     ULONGLONG dimResetAt_=0;
@@ -1318,6 +1330,7 @@ private:
         const bool dark=nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);
         applyNightLightFrame(window_,palette(),dark,highContrast_);
         if(dimSettings_ && dimSettings_->hwnd()) dimSettings_->refreshTheme();
+        if(updateWindow_ && updateWindow_->hwnd())updateWindow_->refreshTheme();
         // Repaint the native non-client caption as well as app contents;
         // the standard title bar must retain the matching text colour.
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME);
@@ -1856,7 +1869,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.18";
+        const std::wstring version=std::wstring(L"NightLight v")+nightlight::kAppVersionWide;
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -2860,6 +2873,98 @@ private:
             L"SystemUsesLightTheme",RRF_RT_REG_DWORD,nullptr,&light,&bytes);
         return status==ERROR_SUCCESS && light==0?ICON_RESOURCE_DARK_TASKBAR:ICON_RESOURCE_LIGHT_TASKBAR;
     }
+    bool updateAvailable() const {
+        const auto& p=model_.preferences();
+        return nightlight::newerRelease(p.availableUpdate,p.ignoredUpdate);
+    }
+    void initializeUpdates() {
+        if(!updateAvailable()) {
+            auto p=model_.preferences();
+            if(!p.availableUpdate.empty() || !p.updateNotes.empty()){
+                p.availableUpdate.clear();p.updateNotes.clear();model_.updatePreferences(p);
+            }
+        }
+        refreshTrayIcon();
+        scheduleUpdate();
+    }
+    void scheduleUpdate() {
+        if(!taskbarOwner_ || shuttingDown_)return;
+        KillTimer(taskbarOwner_,TIMER_UPDATE);
+        if(updateRequest_ || updatePromptPending_)SetTimer(taskbarOwner_,TIMER_UPDATE,250,nullptr);
+        else if(model_.preferences().autoUpdates){
+            const int now=nightlight::updateMinute(),last=model_.preferences().updateLastCheck;
+            const int minutes=nightlight::updateDue(now,last)?0:1440-(now-last);
+            // Bound clock/resume correction to an hour without polling the network.
+            SetTimer(taskbarOwner_,TIMER_UPDATE,minutes<=0?1000:static_cast<UINT>(std::min(60,minutes)*60000),nullptr);
+        }
+    }
+    void showUpdateWindow() {
+        if(!updateAvailable() || shuttingDown_)return;
+        if(updateWindow_ && updateWindow_->hwnd()){updateWindow_->activate();return;}
+        updateWindow_.reset();
+        const auto& p=model_.preferences();
+        const auto tag=p.availableUpdate;
+        updateWindow_=std::make_unique<UpdateWindow>(instance_,taskbarOwner_,pt(),
+            nightlight::fromUtf8(tag),nightlight::fromUtf8(p.updateNotes),
+            [this]{return palette();},
+            [this]{return nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);},
+            [this]{return highContrast_;},
+            [this,tag](int action){
+                if(action==2){
+                    auto pref=model_.preferences();
+                    pref.ignoredUpdate=tag;
+                    if(pref.availableUpdate==tag){pref.availableUpdate.clear();pref.updateNotes.clear();}
+                    model_.updatePreferences(pref);refreshTrayIcon();
+                } else if(action==3){
+                    // The tag was validated as three numeric components. Only
+                    // open the official release in the user's default browser.
+                    const auto url=std::wstring(L"https://github.com/iamfromreallife/NightLightFlor/releases/tag/")+nightlight::fromUtf8(tag);
+                    if(reinterpret_cast<INT_PTR>(ShellExecuteW(taskbarOwner_,L"open",url.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+                        MessageBoxW(taskbarOwner_,tr(L"Could not open the release page.",L"Não foi possível abrir a página da versão.").c_str(),L"NightLight",MB_OK|MB_ICONWARNING);
+                }
+            });
+        if(!updateWindow_->open())updateWindow_.reset();
+    }
+    void startUpdate(bool manual) {
+        if(shuttingDown_)return;
+        if(updateRequest_){updateManual_=updateManual_||manual;return;}
+        if(!manual && (!model_.preferences().autoUpdates ||
+            !nightlight::updateDue(nightlight::updateMinute(),model_.preferences().updateLastCheck)))return;
+        auto p=model_.preferences();p.updateLastCheck=nightlight::updateMinute();model_.updatePreferences(p);
+        updateManual_=manual;updateRequest_=nightlight::beginUpdateRequest();
+        if(!updateRequest_ && manual)
+            MessageBoxW(taskbarOwner_,tr(L"Update check failed.",L"Falha ao procurar atualizações.").c_str(),L"NightLight",MB_OK|MB_ICONWARNING);
+        scheduleUpdate();
+    }
+    void tickUpdate() {
+        if(updateRequest_ && updateRequest_->done.load(std::memory_order_acquire)){
+            // Avoid opening a window inside TrackPopupMenu's nested loop.
+            if(trayMenuOpen_)return;
+            auto result=std::move(updateRequest_->result);updateRequest_.reset();
+            const bool manual=updateManual_;updateManual_=false;
+            if(result.ok){
+                auto p=model_.preferences();
+                const bool available=nightlight::newerRelease(result.tag,p.ignoredUpdate);
+                const bool changed=available && p.availableUpdate!=result.tag;
+                if(available){p.availableUpdate=result.tag;p.updateNotes=result.notes;}
+                else {p.availableUpdate.clear();p.updateNotes.clear();}
+                model_.updatePreferences(p);refreshTrayIcon();
+                if(available && (changed || manual)){
+                    if(changed && updateWindow_ && updateWindow_->hwnd())updateWindow_->close();
+                    updatePromptPending_=true;
+                } else if(manual && !available) {
+                    const bool ignored=nightlight::newerRelease(result.tag);
+                    MessageBoxW(taskbarOwner_,ignored?
+                        tr(L"The latest version is ignored.",L"A versão mais recente foi ignorada.").c_str():
+                        tr(L"NightLight is up to date.",L"O NightLight está atualizado.").c_str(),L"NightLight",MB_OK|MB_ICONINFORMATION);
+                }
+            } else if(manual)MessageBoxW(taskbarOwner_,tr(L"Could not check GitHub for updates. Please try again later.",L"Não foi possível procurar atualizações no GitHub. Tente novamente mais tarde.").c_str(),L"NightLight",MB_OK|MB_ICONWARNING);
+        }
+        if(updatePromptPending_ && !trayMenuOpen_){updatePromptPending_=false;showUpdateWindow();}
+        if(!updateRequest_ && model_.preferences().autoUpdates &&
+            nightlight::updateDue(nightlight::updateMinute(),model_.preferences().updateLastCheck))startUpdate(false);
+        scheduleUpdate();
+    }
     void refreshTrayIcon(bool preparingAdd=false) {
         if(!trayReady_ && !preparingAdd) return;
         const int resource=trayIconResource();
@@ -2868,11 +2973,14 @@ private:
         if(!dpi) dpi=96;
         const int w=GetSystemMetricsForDpi(SM_CXSMICON,dpi);
         const int h=GetSystemMetricsForDpi(SM_CYSMICON,dpi);
+        const bool badge=updateAvailable();
         if(trayIcon_ && resource==trayIconResource_ &&
-            w==trayIconWidth_ && h==trayIconHeight_) return;
+            w==trayIconWidth_ && h==trayIconHeight_ && badge==trayIconBadged_) return;
         HICON next=static_cast<HICON>(LoadImageW(instance_,MAKEINTRESOURCEW(resource),
             IMAGE_ICON,w,h,LR_DEFAULTCOLOR));
         if(!next) return;
+        bool renderedBadge=false;
+        if(badge)if(HICON marked=withUpdateBadge(next,w,h)){DestroyIcon(next);next=marked;renderedBadge=true;}
         if(trayReady_ && !preparingAdd) {
             NOTIFYICONDATAW update{};
             update.cbSize=sizeof(update);
@@ -2883,7 +2991,7 @@ private:
         }
         if(trayIcon_) DestroyIcon(trayIcon_);
         trayIcon_=next; trayIconResource_=resource;
-        trayIconWidth_=w; trayIconHeight_=h;
+        trayIconWidth_=w; trayIconHeight_=h;trayIconBadged_=renderedBadge;
     }
     bool addTray() {
         ZeroMemory(&notify_,sizeof(notify_));
@@ -3002,6 +3110,16 @@ private:
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(monitors),
                     tr(L"Disable for:",L"Desativar para:").c_str(),nightlight::MenuIcon::Disable);
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
+        if(updateAvailable()) {
+            append(menu,MF_STRING,ID_UPDATE_AVAILABLE,tr(L"Update available",L"Atualização disponível").c_str(),nightlight::MenuIcon::Start);
+        } else {
+            HMENU updates=createMenu();
+            append(updates,MF_STRING|(updateRequest_?MF_GRAYED:0),ID_UPDATE_MANUAL,
+                (updateRequest_?tr(L"Checking...",L"A procurar..."):tr(L"Manually",L"Manualmente")).c_str(),nightlight::MenuIcon::Start);
+            append(updates,MF_STRING|(model_.preferences().autoUpdates?MF_CHECKED:0),ID_UPDATE_AUTO,
+                tr(L"Automatically (once a day)",L"Automaticamente (uma vez por dia)").c_str(),nightlight::MenuIcon::Start);
+            append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(updates),tr(L"Check for updates",L"Procurar atualizações").c_str(),nightlight::MenuIcon::Start);
+        }
         append(menu,MF_STRING,ID_TRAY_EXIT,tr(L"Exit",L"Sair").c_str(),nightlight::MenuIcon::Exit);
         return menu;
     }
@@ -3023,6 +3141,13 @@ private:
         if (cmd==ID_TRAY_EXIT) {
             shuttingDown_=true;
             DestroyWindow(window_);
+        } else if(cmd==ID_UPDATE_MANUAL) {
+            startUpdate(true);
+        } else if(cmd==ID_UPDATE_AUTO) {
+            auto p=model_.preferences();p.autoUpdates=!p.autoUpdates;model_.updatePreferences(p);
+            scheduleUpdate();
+        } else if(cmd==ID_UPDATE_AVAILABLE) {
+            showUpdateWindow();
         } else if ((cmd>=ID_TRAY_COLOR_GPU_BASE && cmd<ID_TRAY_COLOR_GPU_BASE+1000) ||
                    (cmd>=ID_TRAY_COLOR_HW_BASE && cmd<ID_TRAY_COLOR_HW_BASE+1000) ||
                    (cmd>=ID_TRAY_COLOR_TARGET_BASE && cmd<ID_TRAY_COLOR_TARGET_BASE+1000)) {
@@ -3438,6 +3563,7 @@ private:
             }
             return TRUE;
         case WM_TIMER:
+            if(wParam==TIMER_UPDATE){tickUpdate();return 0;}
             if(wParam==TIMER_INACTIVE_DIM) { if(dimTimerRunning_) tickInactiveDimming(); return 0; }
             if(wParam==TIMER_DIM_FADE) {dimOverlays_.tickFade();syncInactiveDimming();return 0;}
             if(wParam==TIMER_STARTUP_COLOR) {
@@ -3615,6 +3741,8 @@ private:
             return 0;
         case WM_DESTROY:
             shuttingDown_=true;
+            if(updateWindow_)updateWindow_->close();
+            KillTimer(taskbarOwner_,TIMER_UPDATE);updateRequest_.reset();
             if(dimSettings_) dimSettings_->close();
             KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM);
             KillTimer(taskbarOwner_,TIMER_STARTUP_COLOR);

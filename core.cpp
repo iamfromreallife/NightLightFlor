@@ -529,6 +529,14 @@ bool Model::load() {
     preferences_.theme=appearance=="light"?L"light":
         appearance=="dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = general.get("close_by_clicking_outside").boolean(true);
+    preferences_.autoUpdates=general.get("auto_updates").boolean(false);
+    preferences_.updateLastCheck=std::max(0,general.get("update_last_check").integer(0));
+    preferences_.ignoredUpdate=general.get("ignored_update").str();
+    preferences_.availableUpdate=general.get("available_update").str();
+    preferences_.updateNotes=general.get("update_notes").str();
+    if(preferences_.ignoredUpdate.size()>32)preferences_.ignoredUpdate.clear();
+    if(preferences_.availableUpdate.size()>32)preferences_.availableUpdate.clear();
+    if(preferences_.updateNotes.size()>262144)preferences_.updateNotes.clear();
     preferences_.dimInactive=general.get("dim_inactive").boolean(false);
     preferences_.dimAmount=std::clamp(general.get("dim_amount").integer(90),1,99);
     preferences_.dimMinutes=std::clamp(general.get("dim_minutes").integer(5),1,1440);
@@ -621,6 +629,11 @@ bool Model::save() {
     root_["general"]["language"] = toUtf8(preferences_.locale);
     root_["general"]["appearance"] = toUtf8(preferences_.theme);
     root_["general"]["close_by_clicking_outside"] = preferences_.closeByClickingOutside;
+    root_["general"]["auto_updates"]=preferences_.autoUpdates;
+    root_["general"]["update_last_check"]=preferences_.updateLastCheck;
+    root_["general"]["ignored_update"]=preferences_.ignoredUpdate;
+    root_["general"]["available_update"]=preferences_.availableUpdate;
+    root_["general"]["update_notes"]=preferences_.updateNotes;
     root_["general"]["dim_inactive"]=preferences_.dimInactive;
     root_["general"]["dim_amount"]=preferences_.dimAmount;
     root_["general"]["dim_minutes"]=preferences_.dimMinutes;
@@ -642,7 +655,7 @@ bool Model::save() {
     auto clean=portable::Json::object();
     clean["screen"]["kelvin"]=std::clamp(root_.get("screen").get("kelvin").integer(5000),1000,6500);
     clean["general"]=portable::Json::object();
-    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_all","dim_displays"})
+    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_all","dim_displays","auto_updates","update_last_check","ignored_update","available_update","update_notes"})
         clean["general"][key]=root_.get("general").get(key);
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
@@ -1358,6 +1371,11 @@ void Model::updatePreferences(const Preferences& updated) {
     preferences_.theme = updated.theme==L"light"?L"light":
         updated.theme==L"dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = updated.closeByClickingOutside;
+    preferences_.autoUpdates=updated.autoUpdates;
+    preferences_.updateLastCheck=updated.updateLastCheck;
+    preferences_.ignoredUpdate=updated.ignoredUpdate;
+    preferences_.availableUpdate=updated.availableUpdate;
+    preferences_.updateNotes=updated.updateNotes;
     preferences_.dimInactive=updated.dimInactive;
     preferences_.dimAmount=std::clamp(updated.dimAmount,1,99);
     preferences_.dimMinutes=std::clamp(updated.dimMinutes,1,1440);
