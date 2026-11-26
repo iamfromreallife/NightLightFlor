@@ -56,7 +56,7 @@ copy /b /y "%BUILD%\Release\NightLight.exe" "%ROOT%\NightLight.exe" >nul
 if errorlevel 1 goto failed
 rmdir /s /q "%STAGE%"
 echo.
-echo SUCCESS: NightLight v1.0.14 - "%ROOT%\NightLight.exe"
+echo SUCCESS: NightLight v1.0.15 - "%ROOT%\NightLight.exe"
 popd
 pause
 exit /b 0

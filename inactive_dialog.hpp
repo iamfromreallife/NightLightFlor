@@ -215,8 +215,10 @@ class InactiveSettingsWindow {
         if(selected) {
             Gdiplus::Graphics g(item.hDC);g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             Gdiplus::Pen pen(drawingColor(RGB(255,255,255)),static_cast<float>(px(2)));
-            g.DrawLine(&pen,box.left+px(3),box.top+px(7),box.left+px(6),box.top+px(10));
-            g.DrawLine(&pen,box.left+px(6),box.top+px(10),box.left+px(11),box.top+px(4));
+            g.DrawLine(&pen,static_cast<INT>(box.left+px(3)),static_cast<INT>(box.top+px(7)),
+                static_cast<INT>(box.left+px(6)),static_cast<INT>(box.top+px(10)));
+            g.DrawLine(&pen,static_cast<INT>(box.left+px(6)),static_cast<INT>(box.top+px(10)),
+                static_cast<INT>(box.left+px(11)),static_cast<INT>(box.top+px(4)));
         }
         rc.left=box.right+px(9);rc.right-=px(8);
         text(item.hDC,monitors_[item.itemID].displayName(),rc,selected?bold_:font_,disabled?p.muted:p.text);

@@ -70,6 +70,19 @@ inline constexpr std::array<int,6> kDimMinutePresets{2,5,10,15,30,60};
 inline constexpr BYTE dimOverlayAlpha(int amount) {
     return static_cast<BYTE>(((std::max)(0,(std::min)(99,amount))*255+50)/100);
 }
+inline constexpr std::uint64_t kDimFadeMs=200;
+// LASTINPUTINFO uses the 32-bit tick clock even on 64-bit Windows.
+// Unsigned subtraction handles rollover; a very large backwards jump is
+// treated as a recent input instead of spuriously dimming the desktop.
+inline constexpr std::uint64_t sessionInputAge(DWORD clock,DWORD input) {
+    const DWORD elapsed=clock-input;
+    return elapsed>0x7fffffffu?0:elapsed;
+}
+inline constexpr BYTE dimFadeAlpha(BYTE from,BYTE to,std::uint64_t elapsed) {
+    if(elapsed>=kDimFadeMs) return to;
+    const auto remaining=kDimFadeMs-elapsed;
+    return static_cast<BYTE>((from*remaining+to*elapsed+kDimFadeMs/2)/kDimFadeMs);
+}
 inline bool confirmedForegroundMedia(bool playing,std::uint64_t sampled,std::uint64_t now) {
     return playing && sampled!=0 && now>=sampled && now-sampled<=8000;
 }

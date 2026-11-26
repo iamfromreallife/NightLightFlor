@@ -24,6 +24,20 @@ int main() {
                   dimOverlayAlpha(100)==252,"Black overlay opacity is bounded and never completely opaque");
             check(!displayIdleLongEnough(119999,0,2) && displayIdleLongEnough(120000,0,2) &&
                   !displayIdleLongEnough(1,100,2),"Timeout boundaries and monotonic activity");
+            check(sessionInputAge(0x20u,0xfffffff0u)==48 &&
+                  sessionInputAge(1000u,900u)==100 &&
+                  sessionInputAge(1000u,1001u)==0,
+                  "Windows session input clock handles 32-bit rollover and backwards samples");
+            check(dimFadeAlpha(0,230,0)==0 && dimFadeAlpha(0,230,100)==115 &&
+                  dimFadeAlpha(0,230,200)==230 && dimFadeAlpha(230,0,100)==115 &&
+                  dimFadeAlpha(230,0,200)==0 && dimFadeAlpha(230,0,999)==0,
+                  "Black overlay fades in and out over exactly 200 ms of elapsed time");
+            // A stationary pointer on a single monitor does not continually
+            // renew last input. The system idle time reaches the timeout.
+            const auto now=120000ull;
+            const auto last=now-sessionInputAge(120000u,0u);
+            check(displayIdleLongEnough(now,last,2),
+                "A parked mouse does not prevent screen-saver-style inactivity");
             Monitor fallback;fallback.device=L"DISPLAY-FALLBACK";
             Preferences dim;
             check(dim.dims(fallback),"All-display overlay does not require hardware identity");

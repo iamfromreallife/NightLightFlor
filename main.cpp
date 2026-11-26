@@ -53,7 +53,8 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103, ID_TRAY_STARTUP = 4104;
 constexpr int ID_DIM_SETTINGS=12000;
-constexpr UINT TIMER_INACTIVE_DIM=22;
+constexpr UINT TIMER_INACTIVE_DIM=22, TIMER_DIM_FADE=23;
+constexpr UINT WM_DIM_POINTER_ACTIVITY=WM_APP+45;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_TARGET_BASE=10000;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
@@ -365,16 +366,42 @@ bool isEnterOrSpace(WPARAM key) { return key == VK_RETURN || key == VK_SPACE; }
 // One static, non-interactive layered window per currently dimmed monitor.
 // No full-screen buffer in our process, animation timer, or per-frame paint.
 class InactiveOverlays {
-    struct Entry { HWND window=nullptr; BYTE alpha=0; };
+    struct Entry {
+        HWND window=nullptr;
+        RECT bounds{};
+        BYTE alpha=0,from=0,target=0;
+        ULONGLONG started=0;
+        bool animating=false;
+    };
     HINSTANCE instance_=nullptr;
+    HWND host_=nullptr,foreground_=nullptr,masked_=nullptr;
     std::map<std::wstring,Entry> windows_;
-    bool registered_=false;
-    HWND foreground_=nullptr;
+    bool registered_=false,fadeTimer_=false,cursorWanted_=false;
     static constexpr wchar_t className_[]=L"NightLight.InactiveBlackOverlay";
     static LRESULT CALLBACK proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         switch(msg) {
-        case WM_NCHITTEST: return HTTRANSPARENT;
+        case WM_NCCREATE: {
+            const auto* create=reinterpret_cast<const CREATESTRUCTW*>(lp);
+            SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+            break;
+        }
+        case WM_NCHITTEST:
+            // Normally click-through. Only the screen-local cursor mask
+            // owns mouse hit-testing while the pointer is resting on it.
+            return (GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_TRANSPARENT)?HTTRANSPARENT:HTCLIENT;
         case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+        case WM_SETCURSOR:
+            if(!(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_TRANSPARENT)) {
+                SetCursor(nullptr);return TRUE;
+            }
+            break;
+        case WM_MOUSEMOVE:case WM_LBUTTONDOWN:case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:case WM_XBUTTONDOWN:case WM_MOUSEWHEEL:case WM_MOUSEHWHEEL:
+            // A screen-saver-style first input can wake the shade. The
+            // normal idle clock also detects input over other processes.
+            if(HWND host=reinterpret_cast<HWND>(GetWindowLongPtrW(hwnd,GWLP_USERDATA)))
+                PostMessageW(host,WM_DIM_POINTER_ACTIVITY,0,0);
+            return 0;
         case WM_ERASEBKGND: {
             RECT rect{}; GetClientRect(hwnd,&rect);
             FillRect(reinterpret_cast<HDC>(wp),&rect,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
@@ -408,61 +435,164 @@ class InactiveOverlays {
         }
         return TRUE;
     }
+    static bool transparent(HWND hwnd,bool enable) {
+        const auto old=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
+        const auto wanted=enable?(old|WS_EX_TRANSPARENT):(old&~static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
+        if(wanted==old) return true;
+        SetLastError(ERROR_SUCCESS);
+        if(!SetWindowLongPtrW(hwnd,GWL_EXSTYLE,wanted) && GetLastError()!=ERROR_SUCCESS) return false;
+        return SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|
+            SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED)!=FALSE;
+    }
+    void releaseCursor() {
+        if(!masked_) return;
+        const HWND old=masked_;masked_=nullptr;
+        if(IsWindow(old)) {
+            RECT rect{};POINT point{};
+            const bool inside=GetWindowRect(old,&rect) && GetCursorPos(&point) && PtInRect(&rect,point);
+            transparent(old,true);
+            // Do not change global cursor visibility counters or the user's
+            // cursor scheme. The underlying application owns the next
+            // cursor update. An arrow restores visibility in the meantime.
+            if(inside) SetCursor(LoadCursorW(nullptr,IDC_ARROW));
+        }
+    }
+    void updateCursor() {
+        HWND desired=nullptr;
+        POINT point{};
+        if(cursorWanted_ && GetCursorPos(&point)) {
+            for(const auto& item:windows_) {
+                const auto& entry=item.second;
+                if(entry.target && entry.alpha && PtInRect(&entry.bounds,point)) {
+                    desired=entry.window;break;
+                }
+            }
+        }
+        if(desired==masked_) return;
+        releaseCursor();
+        if(desired) {
+            if(transparent(desired,false)) {
+                masked_=desired;
+                SetCursor(nullptr);
+            } else transparent(desired,true);
+        }
+    }
+    bool apply(Entry& entry,BYTE alpha) {
+        if(entry.alpha==alpha) return true;
+        if(!SetLayeredWindowAttributes(entry.window,0,alpha,LWA_ALPHA)) return false;
+        entry.alpha=alpha;return true;
+    }
+    bool advance(Entry& entry,ULONGLONG now) {
+        if(!entry.animating) return true;
+        const auto elapsed=now>=entry.started?now-entry.started:0;
+        if(!apply(entry,nightlight::dimFadeAlpha(entry.from,entry.target,elapsed))) return false;
+        if(elapsed>=nightlight::kDimFadeMs) entry.animating=false;
+        return true;
+    }
+    bool transition(Entry& entry,BYTE target,ULONGLONG now) {
+        if(entry.target==target) return true; // never restart a running fade
+        if(!advance(entry,now)) return false;
+        entry.from=entry.alpha;entry.target=target;entry.started=now;
+        entry.animating=entry.alpha!=target;
+        if(!target && masked_==entry.window) releaseCursor();
+        return true;
+    }
+    auto destroy(std::map<std::wstring,Entry>::iterator it) {
+        if(masked_==it->second.window) releaseCursor();
+        DestroyWindow(it->second.window);
+        return windows_.erase(it);
+    }
+    void syncFadeTimer() {
+        const bool active=std::any_of(windows_.begin(),windows_.end(),
+            [](const auto& pair){return pair.second.animating;});
+        if(active && !fadeTimer_) {
+            fadeTimer_=host_ && SetTimer(host_,TIMER_DIM_FADE,16,nullptr)!=0;
+            if(!fadeTimer_) {
+                // Allocation/timer failure must not leave a half-faded
+                // or stuck overlay. Complete the intended state once.
+                for(auto it=windows_.begin();it!=windows_.end();) {
+                    auto& entry=it->second;
+                    if(!entry.target || !apply(entry,entry.target)) it=destroy(it);
+                    else {entry.animating=false;++it;}
+                }
+            }
+        } else if(!active && fadeTimer_) {
+            KillTimer(host_,TIMER_DIM_FADE);fadeTimer_=false;
+        }
+    }
 public:
     explicit InactiveOverlays(HINSTANCE instance):instance_(instance){}
     ~InactiveOverlays(){clear(); if(registered_) UnregisterClassW(className_,instance_);}
     InactiveOverlays(const InactiveOverlays&)=delete;
     InactiveOverlays& operator=(const InactiveOverlays&)=delete;
+    void setHost(HWND host) {host_=host;}
     void clear() {
+        cursorWanted_=false;releaseCursor();
+        if(fadeTimer_) {KillTimer(host_,TIMER_DIM_FADE);fadeTimer_=false;}
         for(auto& item:windows_) DestroyWindow(item.second.window);
         windows_.clear(); foreground_=nullptr;
     }
     bool empty() const { return windows_.empty(); }
+    void cursorMask(bool wanted) {cursorWanted_=wanted;updateCursor();}
+    void fadeOutAll() {
+        cursorMask(false);
+        const auto now=GetTickCount64();
+        for(auto it=windows_.begin();it!=windows_.end();) {
+            if(!transition(it->second,0,now) || !it->second.animating) it=destroy(it);
+            else ++it;
+        }
+        syncFadeTimer();
+    }
     void remove(const std::wstring& device) {
         const auto it=windows_.find(device);
         if(it==windows_.end()) return;
-        DestroyWindow(it->second.window);
-        windows_.erase(it);
+        if(!transition(it->second,0,GetTickCount64()) || !it->second.animating) destroy(it);
+        syncFadeTimer();
     }
     bool set(const std::wstring& device,int amount) {
         if(amount<=0) {remove(device);return true;}
         const BYTE alpha=nightlight::dimOverlayAlpha(amount);
         if(auto it=windows_.find(device);it!=windows_.end()) {
-            if(it->second.alpha!=alpha) {
-                if(SetLayeredWindowAttributes(it->second.window,0,alpha,LWA_ALPHA))
-                    it->second.alpha=alpha;
-                else { remove(device); return false; }
+            if(!transition(it->second,alpha,GetTickCount64())) {
+                destroy(it);syncFadeTimer();return false;
             }
-            return true;
+            syncFadeTimer();return windows_.count(device)!=0;
         }
         Find f{device};
         EnumDisplayMonitors(nullptr,nullptr,findMonitor,reinterpret_cast<LPARAM>(&f));
         if(!f.found || !registerClass()) return false;
-        // WS_EX_TRANSPARENT on a layered window passes mouse events through
-        // to other processes. Never enter Alt+Tab or take keyboard focus.
         const HWND hwnd=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|
             WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,
             className_,L"",WS_POPUP,f.rect.left,f.rect.top,
             f.rect.right-f.rect.left,f.rect.bottom-f.rect.top,
-            nullptr,nullptr,instance_,nullptr);
+            nullptr,nullptr,instance_,host_);
         if(!hwnd) return false;
         const BOOL disableTransitions=TRUE;
         DwmSetWindowAttribute(hwnd,DWMWA_TRANSITIONS_FORCEDISABLED,
             &disableTransitions,sizeof(disableTransitions));
-        if(!SetLayeredWindowAttributes(hwnd,0,alpha,LWA_ALPHA) ||
+        if(!SetLayeredWindowAttributes(hwnd,0,0,LWA_ALPHA) ||
             !SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,
                 SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)) {
             DestroyWindow(hwnd);return false;
         }
-        windows_.emplace(device,Entry{hwnd,alpha});
+        auto it=windows_.emplace(device,Entry{hwnd,f.rect,0,0,alpha,GetTickCount64(),true}).first;
         RedrawWindow(hwnd,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_UPDATENOW);
-        return IsWindowVisible(hwnd)!=FALSE;
+        syncFadeTimer();
+        return windows_.count(device)!=0 && IsWindowVisible(hwnd)!=FALSE;
+    }
+    void tickFade() {
+        const auto now=GetTickCount64();
+        for(auto it=windows_.begin();it!=windows_.end();) {
+            auto& entry=it->second;
+            if(!advance(entry,now) || (!entry.animating && !entry.target)) it=destroy(it);
+            else ++it;
+        }
+        updateCursor();
+        syncFadeTimer();
     }
     void foregroundChanged(HWND foreground) {
         if(foreground==foreground_) return;
         foreground_=foreground;
-        // Reassert only when another foreground window is activated, not
-        // on every idle tick. Never activate the overlay itself.
         for(const auto& item:windows_)
             SetWindowPos(item.second.window,HWND_TOPMOST,0,0,0,0,
                 SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
@@ -599,6 +729,7 @@ public:
         taskbarOwner_ = CreateWindowExW(WS_EX_TOOLWINDOW, SERVICE_CLASS_NAME, L"NightLight Service",
             WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, this);
         if (!taskbarOwner_) return 4;
+        dimOverlays_.setHost(taskbarOwner_);
         window_ = CreateWindowExW(0, CLASS_NAME, L"NightLight",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x, y, windowWidth, windowHeight,
@@ -643,9 +774,11 @@ private:
     ULONGLONG lastDimTopology_=0;
     bool dimTopologyDirty_=true,dimDialogOpen_=false;
     std::unique_ptr<InactiveSettingsWindow> dimSettings_;
-    DWORD lastDimInput_=0;
+    DWORD lastDimInput_=0,lastDimKeyboardInput_=0;
     POINT lastDimCursor_{};
-    bool haveDimInput_=false;
+    ULONGLONG dimResetAt_=0;
+    bool haveDimInput_=false,dimTestActive_=false;
+    UINT dimTimerInterval_=0;
     HWND lastMediaWindow_=nullptr;
     DWORD lastMediaPid_=0;
     ULONGLONG lastMediaRequest_=0;
@@ -1721,7 +1854,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.14";
+        const std::wstring version=L"NightLight v1.0.15";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1909,12 +2042,15 @@ private:
         if(identityChanged) {
             dimOverlays_.clear();
             lastDisplayActivity_.clear();
+            dimResetAt_=now;
+            haveDimInput_=false;
         }
         dimDisplays_=std::move(live);
     }
-    void resetDimActivity() {
-        dimOverlays_.clear();
+    void resetDimActivity(bool fade=false) {
+        if(fade) dimOverlays_.fadeOutAll(); else dimOverlays_.clear();
         lastDisplayActivity_.clear();
+        dimResetAt_=GetTickCount64();
         haveDimInput_=false;
         if(lastMediaWindow_) foregroundMedia_.clear();
         lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
@@ -1929,64 +2065,101 @@ private:
     void syncInactiveDimming() {
         const auto& pref=model_.preferences();
         const bool selected=pref.dimInactive && (pref.dimAll || !pref.dimDisplays.empty());
-        const bool needed=selected && displayAwake_ && !dimDialogOpen_;
-        if(!selected && !dimDialogOpen_) dimOverlays_.clear();
-        setKeyboardActivity(needed);
-        if(needed && !dimTimerRunning_)
-            dimTimerRunning_=SetTimer(taskbarOwner_,TIMER_INACTIVE_DIM,250,nullptr)!=0;
-        else if(!needed && dimTimerRunning_) {
-            KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM); dimTimerRunning_=false;
+        const bool needed=displayAwake_ && (selected || dimTestActive_);
+        if(!selected && !dimTestActive_ && !dimOverlays_.empty()) dimOverlays_.fadeOutAll();
+        setKeyboardActivity(needed && selected && !dimTestActive_);
+        // The slow idle timer is independent of the short compositor fade
+        // timer. Faster checks only while a shade actually exists.
+        const UINT interval=dimOverlays_.empty()?250:50;
+        if(needed && (!dimTimerRunning_ || dimTimerInterval_!=interval)) {
+            if(SetTimer(taskbarOwner_,TIMER_INACTIVE_DIM,interval,nullptr)) {
+                dimTimerRunning_=true;dimTimerInterval_=interval;
+            }
+        } else if(!needed && dimTimerRunning_) {
+            KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM);dimTimerRunning_=false;dimTimerInterval_=0;
         }
         if(!needed && lastMediaWindow_) {
             foregroundMedia_.clear();lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
         }
     }
-    void keyboardDisplayActivity() {
-        if(!model_.preferences().dimInactive || !displayAwake_ || dimDialogOpen_) return;
-        HWND foreground=GetForegroundWindow();
-        const auto device=displayDevice(foreground?MonitorFromWindow(foreground,MONITOR_DEFAULTTONULL):nullptr);
+    void noteDimActivity(const std::wstring& device,ULONGLONG at) {
+        if(device.empty()) return;
         for(const auto& entry:dimDisplays_) {
             const auto& mon=entry.monitor;
             if(mon.device==device && model_.preferences().dims(mon)) {
-                lastDisplayActivity_[nightlight::monitorProfileKey(mon)]=GetTickCount64();
+                auto& last=lastDisplayActivity_[nightlight::monitorProfileKey(mon)];
+                last=std::max(last,at);
                 dimOverlays_.remove(mon.device);
-                break;
+                return;
             }
         }
     }
+    void keyboardDisplayActivity() {
+        if(!model_.preferences().dimInactive || !displayAwake_ || dimTestActive_) return;
+        LASTINPUTINFO input{sizeof(input)};
+        if(GetLastInputInfo(&input)) lastDimKeyboardInput_=input.dwTime;
+        HWND foreground=GetForegroundWindow();
+        const auto device=displayDevice(foreground?MonitorFromWindow(foreground,MONITOR_DEFAULTTONULL):nullptr);
+        noteDimActivity(device,GetTickCount64());
+        dimOverlays_.cursorMask(false);
+        syncInactiveDimming();
+    }
     void tickInactiveDimming() {
         const auto& pref=model_.preferences();
-        if(dimDialogOpen_) return; // the dialog's explicit test owns overlays
-        if(!displayAwake_ || screenOffGuard_.guarding() || !pref.dimInactive) {
+        if(!displayAwake_ || screenOffGuard_.guarding()) {
             if(!lastDisplayActivity_.empty() || lastMediaWindow_ || !dimOverlays_.empty()) resetDimActivity();
             return;
         }
-        // Visual overlays need only a live desktop topology. A delayed or
-        // unsuccessful hardware recovery must never reset/stop this timer.
-        refreshDimDisplays();
         const auto now=GetTickCount64();
+        LASTINPUTINFO input{sizeof(input)};
+        const bool inputKnown=GetLastInputInfo(&input)!=FALSE;
+        const auto age=inputKnown?nightlight::sessionInputAge(GetTickCount(),input.dwTime):0;
+        const ULONGLONG inputAt=now>=age?now-age:0;
+        if(dimTestActive_) {
+            // The test intentionally ignores activity for its three-second
+            // duration, but a moving pointer remains visible and usable.
+            dimOverlays_.cursorMask(inputKnown && age>=250);
+            syncInactiveDimming();
+            return;
+        }
+        if(!pref.dimInactive || (!pref.dimAll && pref.dimDisplays.empty())) {
+            dimOverlays_.fadeOutAll();syncInactiveDimming();return;
+        }
+        refreshDimDisplays();
         POINT cursor{};
-        if(!GetCursorPos(&cursor)) { resetDimActivity(); return; }
+        if(!GetCursorPos(&cursor)) {resetDimActivity();return;}
         const auto hoverDevice=displayDevice(MonitorFromPoint(cursor,MONITOR_DEFAULTTONULL));
         HWND foreground=GetForegroundWindow();
         const auto foregroundDevice=displayDevice(foreground?
             MonitorFromWindow(foreground,MONITOR_DEFAULTTONULL):nullptr);
-        // Fallback when another registration or driver blocks raw input:
-        // use actual input-time changes, not perpetual foreground activity.
-        LASTINPUTINFO input{sizeof(input)};
-        if(GetLastInputInfo(&input)) {
-            if(!keyboardActivityRegistered_ && haveDimInput_ && input.dwTime!=lastDimInput_ &&
-               cursor.x==lastDimCursor_.x && cursor.y==lastDimCursor_.y)
-                keyboardDisplayActivity();
-            lastDimInput_=input.dwTime;lastDimCursor_=cursor;haveDimInput_=true;
+        // GetLastInputInfo is the documented session idle clock. Unlike
+        // cursor presence it advances only when Windows receives input.
+        // Attribute movement to both ends of a monitor crossing; keyboard
+        // notifications are attributed to the foreground monitor. A
+        // stationary click/scroll or unavailable raw input has a fallback.
+        if(haveDimInput_) {
+            const bool moved=cursor.x!=lastDimCursor_.x || cursor.y!=lastDimCursor_.y;
+            const bool freshInput=inputKnown && input.dwTime!=lastDimInput_;
+            if(moved) {
+                noteDimActivity(hoverDevice,now);
+                noteDimActivity(displayDevice(MonitorFromPoint(lastDimCursor_,MONITOR_DEFAULTTONULL)),now);
+            } else if(freshInput) {
+                const bool keyboard=keyboardActivityRegistered_ && input.dwTime==lastDimKeyboardInput_;
+                if(!keyboard) {
+                    noteDimActivity(hoverDevice,inputAt);
+                    if(!keyboardActivityRegistered_) noteDimActivity(foregroundDevice,inputAt);
+                }
+            }
         }
+        if(inputKnown) lastDimInput_=input.dwTime;
+        lastDimCursor_=cursor;haveDimInput_=true;
+
         DWORD foregroundPid=0;
         if(foreground) GetWindowThreadProcessId(foreground,&foregroundPid);
         bool probeForeground=false;
         for(const auto& entry:dimDisplays_) {
             const auto& mon=entry.monitor;
-            if(pref.dims(mon) && mon.device==foregroundDevice && mon.device!=hoverDevice)
-                probeForeground=true;
+            if(pref.dims(mon) && mon.device==foregroundDevice) probeForeground=true;
         }
         bool foregroundPlaying=false;
         if(probeForeground && foreground && foregroundPid) {
@@ -2005,15 +2178,22 @@ private:
             const auto& mon=entry.monitor;
             if(!pref.dims(mon)) {dimOverlays_.remove(mon.device);continue;}
             const auto key=nightlight::monitorProfileKey(mon);
-            auto it=lastDisplayActivity_.try_emplace(key,now).first;
-            const bool active=mon.device==hoverDevice ||
-                (mon.device==foregroundDevice && foregroundPlaying);
-            if(active) it->second=now;
-            if(active || !nightlight::displayIdleLongEnough(now,it->second,pref.dimMinutes))
+            const auto initial=std::max(dimResetAt_,inputKnown?inputAt:now);
+            auto it=lastDisplayActivity_.try_emplace(key,initial).first;
+            // IMPORTANT: a parked cursor is not activity. Actual session
+            // input, attributed above, is the only input that renews this
+            // clock. Confirmed foreground playback is the sole exemption.
+            const bool playing=mon.device==foregroundDevice && foregroundPlaying;
+            if(playing) it->second=now;
+            if(playing || !nightlight::displayIdleLongEnough(now,it->second,pref.dimMinutes))
                 dimOverlays_.remove(mon.device);
             else dimOverlays_.set(mon.device,pref.dimAmount);
         }
         dimOverlays_.foregroundChanged(foreground);
+        // Hide only the cursor over a shaded output. Never change the
+        // user's desktop cursor scheme or global ShowCursor counter.
+        dimOverlays_.cursorMask(!inputKnown || age>=250);
+        syncInactiveDimming();
     }
     void openInactiveSettings() {
         if(dimSettings_ && dimSettings_->hwnd()) {
@@ -2024,22 +2204,32 @@ private:
         // same first-show transition that the main window uses.
         dimSettings_.reset();
         dimDialogOpen_=true;
-        resetDimActivity();
+        // Saved settings remain active while this window is open. Only
+        // the explicit preview temporarily owns the dimming overlays.
+        resetDimActivity(true);
         syncInactiveDimming();
         refreshDimDisplays(true);
         std::vector<Monitor> choices;
         for(const auto& entry:dimDisplays_) choices.push_back(entry.monitor);
         const auto test=[this](const Preferences* preview) {
-            dimOverlays_.clear();
-            if(!preview || !displayAwake_ || shuttingDown_) return false;
+            if(!preview || !displayAwake_ || shuttingDown_) {
+                dimTestActive_=false;
+                resetDimActivity(true);
+                if(!shuttingDown_) syncInactiveDimming();
+                return false;
+            }
+            dimTestActive_=true;
+            dimOverlays_.fadeOutAll();
             refreshDimDisplays(true);
             bool shown=false;
             for(const auto& entry:dimDisplays_) if(preview->dims(entry.monitor))
                 shown=dimOverlays_.set(entry.monitor.device,preview->dimAmount) || shown;
+            if(!shown) dimTestActive_=false;
+            syncInactiveDimming();
             return shown;
         };
         const auto closed=[this](const std::optional<Preferences>& updated) {
-            dimOverlays_.clear();
+            dimTestActive_=false;
             dimDialogOpen_=false;
             if(shuttingDown_) return;
             if(updated) {
@@ -2053,7 +2243,7 @@ private:
                 merged.dimDisplays=updated->dimDisplays;
                 model_.updatePreferences(merged);
             }
-            resetDimActivity();
+            resetDimActivity(true);
             syncInactiveDimming();
             tickInactiveDimming();
         };
@@ -3237,6 +3427,7 @@ private:
             return TRUE;
         case WM_TIMER:
             if(wParam==TIMER_INACTIVE_DIM) { if(dimTimerRunning_) tickInactiveDimming(); return 0; }
+            if(wParam==TIMER_DIM_FADE) {dimOverlays_.tickFade();syncInactiveDimming();return 0;}
             if (wParam==TIMER_TRAY_RETRY) {
                 if (trayReady_ || addTray()) KillTimer(taskbarOwner_,TIMER_TRAY_RETRY);
                 return 0;
@@ -3454,6 +3645,10 @@ private:
             const auto* create=reinterpret_cast<const CREATESTRUCTW*>(lp);
             app=static_cast<NativeApp*>(create->lpCreateParams);
             SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));
+        }
+        if(app && msg==WM_DIM_POINTER_ACTIVITY && !app->shuttingDown_) {
+            app->tickInactiveDimming();
+            return 0;
         }
         if(app && msg==WM_INPUT && !app->shuttingDown_) {
             // Only keyboard TLC was registered. Do not fetch raw keystrokes.
