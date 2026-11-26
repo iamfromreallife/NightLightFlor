@@ -22,6 +22,7 @@
 #include <tuple>
 #include <vector>
 #include "core.hpp"
+#include "display_identity.hpp"
 #include "ddc.hpp"
 #include "motion.hpp"
 #include "menu_icons.hpp"
@@ -51,8 +52,7 @@ constexpr GUID displayStateGuid{0x2b84c20e,0xad23,0x4ddf,{0x93,0xdb,0x05,0xff,0x
 constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103, ID_TRAY_STARTUP = 4104;
-constexpr int ID_DIM_ENABLE=12000, ID_DIM_AMOUNT=12001, ID_DIM_ALL=12002,
-    ID_DIM_CUSTOM=12003, ID_DIM_PRESET_BASE=12010, ID_DIM_MONITOR_BASE=12100;
+constexpr int ID_DIM_SETTINGS=12000;
 constexpr UINT TIMER_INACTIVE_DIM=22;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_TARGET_BASE=10000;
@@ -375,7 +375,11 @@ class InactiveOverlays {
         switch(msg) {
         case WM_NCHITTEST: return HTTRANSPARENT;
         case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-        case WM_ERASEBKGND: return 1;
+        case WM_ERASEBKGND: {
+            RECT rect{}; GetClientRect(hwnd,&rect);
+            FillRect(reinterpret_cast<HDC>(wp),&rect,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            return 1;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC dc=BeginPaint(hwnd,&ps);
@@ -420,20 +424,20 @@ public:
         DestroyWindow(it->second.window);
         windows_.erase(it);
     }
-    void set(const std::wstring& device,int amount) {
-        if(amount<=0) {remove(device);return;}
+    bool set(const std::wstring& device,int amount) {
+        if(amount<=0) {remove(device);return true;}
         const BYTE alpha=nightlight::dimOverlayAlpha(amount);
         if(auto it=windows_.find(device);it!=windows_.end()) {
             if(it->second.alpha!=alpha) {
                 if(SetLayeredWindowAttributes(it->second.window,0,alpha,LWA_ALPHA))
                     it->second.alpha=alpha;
-                else remove(device); // fail open rather than leave a stuck shade
+                else { remove(device); return false; }
             }
-            return;
+            return true;
         }
         Find f{device};
         EnumDisplayMonitors(nullptr,nullptr,findMonitor,reinterpret_cast<LPARAM>(&f));
-        if(!f.found || !registerClass()) return;
+        if(!f.found || !registerClass()) return false;
         // WS_EX_TRANSPARENT on a layered window passes mouse events through
         // to other processes. Never enter Alt+Tab or take keyboard focus.
         const HWND hwnd=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|
@@ -441,18 +445,18 @@ public:
             className_,L"",WS_POPUP,f.rect.left,f.rect.top,
             f.rect.right-f.rect.left,f.rect.bottom-f.rect.top,
             nullptr,nullptr,instance_,nullptr);
-        if(!hwnd) return;
+        if(!hwnd) return false;
         const BOOL disableTransitions=TRUE;
         DwmSetWindowAttribute(hwnd,DWMWA_TRANSITIONS_FORCEDISABLED,
             &disableTransitions,sizeof(disableTransitions));
         if(!SetLayeredWindowAttributes(hwnd,0,alpha,LWA_ALPHA) ||
             !SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,
                 SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)) {
-            DestroyWindow(hwnd);return;
+            DestroyWindow(hwnd);return false;
         }
         windows_.emplace(device,Entry{hwnd,alpha});
-        InvalidateRect(hwnd,nullptr,FALSE);
-        UpdateWindow(hwnd);
+        RedrawWindow(hwnd,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_UPDATENOW);
+        return IsWindowVisible(hwnd)!=FALSE;
     }
     void foregroundChanged(HWND foreground) {
         if(foreground==foreground_) return;
@@ -595,6 +599,13 @@ private:
     nightlight::ForegroundMedia foregroundMedia_;
     InactiveOverlays dimOverlays_;
     std::map<std::wstring,ULONGLONG> lastDisplayActivity_;
+    struct DimDisplay { Monitor monitor; RECT bounds{}; };
+    std::vector<DimDisplay> dimDisplays_;
+    ULONGLONG lastDimTopology_=0;
+    bool dimTopologyDirty_=true,dimDialogOpen_=false;
+    DWORD lastDimInput_=0;
+    POINT lastDimCursor_{};
+    bool haveDimInput_=false;
     HWND lastMediaWindow_=nullptr;
     DWORD lastMediaPid_=0;
     ULONGLONG lastMediaRequest_=0;
@@ -1696,7 +1707,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.12";
+        const std::wstring version=L"NightLight v1.0.13";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1819,9 +1830,78 @@ private:
         info.cbSize=sizeof(info);
         return monitor && GetMonitorInfoW(monitor,&info)?std::wstring(info.szDevice):L"";
     }
+    static BOOL CALLBACK collectDimDisplay(HMONITOR handle,HDC,LPRECT,LPARAM data) {
+        auto& displays=*reinterpret_cast<std::vector<DimDisplay>*>(data);
+        MONITORINFOEXW info{}; info.cbSize=sizeof(info);
+        if(GetMonitorInfoW(handle,&info)) {
+            DimDisplay entry;
+            entry.monitor.device=info.szDevice;
+            entry.monitor.windowsName=info.szDevice;
+            entry.monitor.primary=(info.dwFlags&MONITORINFOF_PRIMARY)!=0;
+            entry.bounds=info.rcMonitor;
+            displays.push_back(std::move(entry));
+        }
+        return TRUE;
+    }
+    void refreshDimDisplays(bool force=false) {
+        const auto now=GetTickCount64();
+        if(!force && !dimTopologyDirty_ && lastDimTopology_ && now-lastDimTopology_<5000) return;
+        lastDimTopology_=now;
+        std::vector<DimDisplay> live;
+        if(!EnumDisplayMonitors(nullptr,nullptr,collectDimDisplay,reinterpret_cast<LPARAM>(&live))) return;
+        std::sort(live.begin(),live.end(),[](const DimDisplay& a,const DimDisplay& b){
+            return a.monitor.device<b.monitor.device;
+        });
+        bool geometryChanged=live.size()!=dimDisplays_.size();
+        if(!geometryChanged) for(size_t i=0;i<live.size();++i)
+            if(live[i].monitor.device!=dimDisplays_[i].monitor.device ||
+               !EqualRect(&live[i].bounds,&dimDisplays_[i].bounds)) {geometryChanged=true;break;}
+        if(force || dimTopologyDirty_ || geometryChanged) {
+            const auto physical=nightlight::queryPhysicalDisplayTargets();
+            for(auto& entry:live) {
+                auto& mon=entry.monitor;
+                const auto found=physical.bySource.find(nightlight::normalizedDisplayId(mon.device));
+                if(found!=physical.bySource.end() && found->second.size()==1) {
+                    mon.physicalId=found->second.front().physicalId;
+                    if(!found->second.front().friendlyName.empty())
+                        mon.windowsName=found->second.front().friendlyName;
+                }
+                // During a temporary incomplete CCD snapshot, keep the
+                // previous known identity only if the geometry is unchanged.
+                if(mon.physicalId.empty() && !geometryChanged && !physical.complete) {
+                    const auto previous=std::find_if(dimDisplays_.begin(),dimDisplays_.end(),
+                        [&](const DimDisplay& old){return old.monitor.device==mon.device;});
+                    if(previous!=dimDisplays_.end()) {
+                        mon.physicalId=previous->monitor.physicalId;
+                        mon.windowsName=previous->monitor.windowsName;
+                    }
+                }
+            }
+            dimTopologyDirty_=false;
+        } else {
+            for(size_t i=0;i<live.size();++i) live[i].monitor=dimDisplays_[i].monitor;
+        }
+        bool identityChanged=geometryChanged;
+        for(auto& entry:live) {
+            auto& mon=entry.monitor;
+            const auto old=std::find_if(model_.monitors().begin(),model_.monitors().end(),
+                [&](const Monitor& other){return nightlight::samePhysicalMonitor(other,mon);});
+            if(old!=model_.monitors().end()) mon.alias=old->alias;
+        }
+        if(!identityChanged) for(size_t i=0;i<live.size();++i)
+            if(nightlight::monitorProfileKey(live[i].monitor)!=nightlight::monitorProfileKey(dimDisplays_[i].monitor)) {
+                identityChanged=true;break;
+            }
+        if(identityChanged) {
+            dimOverlays_.clear();
+            lastDisplayActivity_.clear();
+        }
+        dimDisplays_=std::move(live);
+    }
     void resetDimActivity() {
         dimOverlays_.clear();
         lastDisplayActivity_.clear();
+        haveDimInput_=false;
         if(lastMediaWindow_) foregroundMedia_.clear();
         lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
     }
@@ -1835,52 +1915,65 @@ private:
     void syncInactiveDimming() {
         const auto& pref=model_.preferences();
         const bool selected=pref.dimInactive && (pref.dimAll || !pref.dimDisplays.empty());
-        const bool needed=selected;
-        if(!selected) dimOverlays_.clear();
-        setKeyboardActivity(selected);
+        const bool needed=selected && displayAwake_ && !dimDialogOpen_;
+        if(!selected && !dimDialogOpen_) dimOverlays_.clear();
+        setKeyboardActivity(needed);
         if(needed && !dimTimerRunning_)
             dimTimerRunning_=SetTimer(taskbarOwner_,TIMER_INACTIVE_DIM,250,nullptr)!=0;
         else if(!needed && dimTimerRunning_) {
             KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM); dimTimerRunning_=false;
         }
-        if(!selected && lastMediaWindow_) {
+        if(!needed && lastMediaWindow_) {
             foregroundMedia_.clear();lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
         }
     }
     void keyboardDisplayActivity() {
-        if(!model_.preferences().dimInactive || !displayAwake_ || displayRecoveryActive_) return;
+        if(!model_.preferences().dimInactive || !displayAwake_ || dimDialogOpen_) return;
         HWND foreground=GetForegroundWindow();
         const auto device=displayDevice(foreground?MonitorFromWindow(foreground,MONITOR_DEFAULTTONULL):nullptr);
-        for(const auto& mon:model_.monitors()) if(mon.device==device && model_.preferences().dims(mon)) {
-            lastDisplayActivity_[nightlight::monitorProfileKey(mon)]=GetTickCount64();
-            dimOverlays_.remove(mon.device);
-            break;
+        for(const auto& entry:dimDisplays_) {
+            const auto& mon=entry.monitor;
+            if(mon.device==device && model_.preferences().dims(mon)) {
+                lastDisplayActivity_[nightlight::monitorProfileKey(mon)]=GetTickCount64();
+                dimOverlays_.remove(mon.device);
+                break;
+            }
         }
     }
     void tickInactiveDimming() {
         const auto& pref=model_.preferences();
-        if(!displayAwake_ || displayRecoveryActive_ || screenOffGuard_.guarding()) {
+        if(dimDialogOpen_) return; // the dialog's explicit test owns overlays
+        if(!displayAwake_ || screenOffGuard_.guarding() || !pref.dimInactive) {
             if(!lastDisplayActivity_.empty() || lastMediaWindow_ || !dimOverlays_.empty()) resetDimActivity();
             return;
         }
+        // Visual overlays need only a live desktop topology. A delayed or
+        // unsuccessful hardware recovery must never reset/stop this timer.
+        refreshDimDisplays();
         const auto now=GetTickCount64();
         POINT cursor{};
-        // On the lock/secure desktop, activity cannot be reliably attributed.
-        if(pref.dimInactive && !GetCursorPos(&cursor)) {
-            resetDimActivity();
-            return;
-        }
-        const auto hoverDevice=pref.dimInactive?
-            displayDevice(MonitorFromPoint(cursor,MONITOR_DEFAULTTONULL)):std::wstring{};
-        HWND foreground=pref.dimInactive?GetForegroundWindow():nullptr;
+        if(!GetCursorPos(&cursor)) { resetDimActivity(); return; }
+        const auto hoverDevice=displayDevice(MonitorFromPoint(cursor,MONITOR_DEFAULTTONULL));
+        HWND foreground=GetForegroundWindow();
         const auto foregroundDevice=displayDevice(foreground?
             MonitorFromWindow(foreground,MONITOR_DEFAULTTONULL):nullptr);
+        // Fallback when another registration or driver blocks raw input:
+        // use actual input-time changes, not perpetual foreground activity.
+        LASTINPUTINFO input{sizeof(input)};
+        if(GetLastInputInfo(&input)) {
+            if(!keyboardActivityRegistered_ && haveDimInput_ && input.dwTime!=lastDimInput_ &&
+               cursor.x==lastDimCursor_.x && cursor.y==lastDimCursor_.y)
+                keyboardDisplayActivity();
+            lastDimInput_=input.dwTime;lastDimCursor_=cursor;haveDimInput_=true;
+        }
         DWORD foregroundPid=0;
         if(foreground) GetWindowThreadProcessId(foreground,&foregroundPid);
         bool probeForeground=false;
-        for(const auto& mon:model_.monitors())
-            if(pref.dimInactive && pref.dims(mon) && mon.device==foregroundDevice && mon.device!=hoverDevice)
+        for(const auto& entry:dimDisplays_) {
+            const auto& mon=entry.monitor;
+            if(pref.dims(mon) && mon.device==foregroundDevice && mon.device!=hoverDevice)
                 probeForeground=true;
+        }
         bool foregroundPlaying=false;
         if(probeForeground && foreground && foregroundPid) {
             if(lastMediaWindow_!=foreground || lastMediaPid_!=foregroundPid ||
@@ -1889,39 +1982,56 @@ private:
                 lastMediaWindow_=foreground;lastMediaPid_=foregroundPid;lastMediaRequest_=now;
             }
             const auto media=foregroundMedia_.result();
-            foregroundPlaying=media.window!=foreground || media.pid!=foregroundPid ||
-                !media.sampled || now-media.sampled>6000 || media.playing;
+            foregroundPlaying=media.window==foreground && media.pid==foregroundPid &&
+                nightlight::confirmedForegroundMedia(media.playing,media.sampled,now);
         } else if(lastMediaWindow_) {
             foregroundMedia_.clear();lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
         }
-        for(const auto& mon:model_.monitors()) {
-            if(!pref.dimInactive || !pref.dims(mon)) {
-                dimOverlays_.remove(mon.device);
-                continue;
-            }
+        for(const auto& entry:dimDisplays_) {
+            const auto& mon=entry.monitor;
+            if(!pref.dims(mon)) {dimOverlays_.remove(mon.device);continue;}
             const auto key=nightlight::monitorProfileKey(mon);
             auto it=lastDisplayActivity_.try_emplace(key,now).first;
             const bool active=mon.device==hoverDevice ||
-                (mon.device==foregroundDevice && (foregroundPlaying || !keyboardActivityRegistered_));
+                (mon.device==foregroundDevice && foregroundPlaying);
             if(active) it->second=now;
-            if(active || !nightlight::displayIdleLongEnough(now,it->second,pref.dimMinutes)) {
+            if(active || !nightlight::displayIdleLongEnough(now,it->second,pref.dimMinutes))
                 dimOverlays_.remove(mon.device);
-                continue;
-            }
-            dimOverlays_.set(mon.device,pref.dimAmount);
+            else dimOverlays_.set(mon.device,pref.dimAmount);
         }
         dimOverlays_.foregroundChanged(foreground);
-        syncInactiveDimming();
     }
-    void updateDimSettings(const Preferences& pref,bool resetTimeout) {
-        model_.updatePreferences(pref);
-        if(resetTimeout) resetDimActivity();
+    void openInactiveSettings() {
+        if(dimDialogOpen_) return;
+        dimDialogOpen_=true;
+        trayMenuOpen_=true;
+        resetDimActivity();
+        syncInactiveDimming();
+        refreshDimDisplays(true);
+        std::vector<Monitor> choices;
+        for(const auto& entry:dimDisplays_) choices.push_back(entry.monitor);
+        // Test the unsaved slider and monitor selections immediately, even
+        // with automatic dimming disabled or the cursor on that display.
+        const auto test=[this](const Preferences* preview) {
+            dimOverlays_.clear();
+            if(!preview || !displayAwake_) return false;
+            refreshDimDisplays(true);
+            bool shown=false;
+            for(const auto& entry:dimDisplays_) if(preview->dims(entry.monitor))
+                shown=dimOverlays_.set(entry.monitor.device,preview->dimAmount) || shown;
+            return shown;
+        };
+        const auto updated=nightlight::inactive_dialog::settings(instance_,taskbarOwner_,
+            model_.preferences(),choices,pt(),test);
+        dimOverlays_.clear();
+        dimDialogOpen_=false;trayMenuOpen_=false;
+        if(updated) model_.updatePreferences(*updated);
+        resetDimActivity();
         syncInactiveDimming();
         tickInactiveDimming();
     }
     void scheduleDisplayRecovery() {
         if (!displayRecoveryActive_) {
-            resetDimActivity();
             recoveryPass_=0;
             recoverySettleChecks_=0;
             recoveryVerificationIssued_=false;
@@ -2613,42 +2723,9 @@ private:
         append(menu,MF_STRING|(model_.preferences().closeByClickingOutside?MF_CHECKED:0),
             ID_TRAY_CLOSE_OUTSIDE,tr(L"Close by clicking outside",L"Fechar ao clicar fora").c_str(),
             nightlight::MenuIcon::Window);
-        const auto& dim=model_.preferences();
-        HMENU dimMenu=createMenu(),dimScreens=createMenu(),dimTimes=createMenu();
-        append(dimMenu,MF_STRING|(dim.dimInactive?MF_CHECKED:0),ID_DIM_ENABLE,
-            tr(L"Enabled",L"Ativado").c_str(),nightlight::MenuIcon::Light);
-        append(dimScreens,MF_STRING|(dim.dimAll?MF_CHECKED:0),ID_DIM_ALL,
-            tr(L"All displays",L"Todos os ecrãs").c_str(),nightlight::MenuIcon::Monitor);
-        AppendMenuW(dimScreens,MF_SEPARATOR,0,nullptr);
-        for(size_t i=0;i<model_.monitors().size() && i<1000;++i) {
-            const auto& mon=model_.monitors()[i];
-            auto name=mon.displayName();
-            if(mon.physicalId.empty()) name+=tr(L" (unidentified)",L" (não identificado)");
-            append(dimScreens,MF_STRING|(dim.dims(mon)?MF_CHECKED:0)|(mon.physicalId.empty()?MF_GRAYED:0),
-                ID_DIM_MONITOR_BASE+i,name.c_str(),nightlight::MenuIcon::Monitor);
-        }
-        append(dimMenu,MF_POPUP,reinterpret_cast<UINT_PTR>(dimScreens),
-            tr(L"Displays",L"Ecrãs").c_str(),nightlight::MenuIcon::Monitor);
-        const auto amountText=tr(L"Dim amount: ",L"Escurecimento: ")+std::to_wstring(dim.dimAmount)+L" %…";
-        append(dimMenu,MF_STRING,ID_DIM_AMOUNT,amountText.c_str(),nightlight::MenuIcon::Adjust);
-        bool presetSelected=false;
-        for(size_t i=0;i<nightlight::kDimMinutePresets.size();++i) {
-            const int minutes=nightlight::kDimMinutePresets[i];
-            const bool checked=minutes==dim.dimMinutes;
-            presetSelected=presetSelected || checked;
-            const auto label=minutes==60?tr(L"1 hour",L"1 hora"):std::to_wstring(minutes)+L" min";
-            append(dimTimes,MF_STRING|(checked?MF_CHECKED:0),ID_DIM_PRESET_BASE+i,
-                label.c_str(),nightlight::MenuIcon::Tray);
-        }
-        const auto custom=presetSelected?tr(L"Custom minutes…",L"Minutos personalizados…"):
-            tr(L"Custom: ",L"Personalizado: ")+std::to_wstring(dim.dimMinutes)+L" min…";
-        append(dimTimes,MF_STRING|(!presetSelected?MF_CHECKED:0),ID_DIM_CUSTOM,
-            custom.c_str(),nightlight::MenuIcon::Adjust);
-        const auto timeText=tr(L"Inactive time: ",L"Tempo de inatividade: ")+
-            (dim.dimMinutes==60?tr(L"1 hour",L"1 hora"):std::to_wstring(dim.dimMinutes)+L" min");
-        append(dimMenu,MF_POPUP,reinterpret_cast<UINT_PTR>(dimTimes),timeText.c_str(),nightlight::MenuIcon::Tray);
-        append(menu,MF_POPUP|(dim.dimInactive?MF_CHECKED:0),reinterpret_cast<UINT_PTR>(dimMenu),
-            tr(L"Dim when inactive",L"Reduzir brilho quando inativo").c_str(),nightlight::MenuIcon::Light);
+        append(menu,MF_STRING|(model_.preferences().dimInactive?MF_CHECKED:0),
+            ID_DIM_SETTINGS,tr(L"Dim when inactive",L"Reduzir brilho quando inativo").c_str(),
+            nightlight::MenuIcon::Light);
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         append(menu,MF_STRING|(ddcVisible_?MF_CHECKED:0),ID_DDC,tr(L"DDC/CI Controls",L"Controlos DDC/CI").c_str(),nightlight::MenuIcon::Adjust);
         HMENU engines=createMenu();
@@ -2748,45 +2825,8 @@ private:
                     std::wstring(code);
                 MessageBoxW(window_,message.c_str(),L"NightLight",MB_OK|MB_ICONERROR);
             }
-        } else if(cmd==ID_DIM_ENABLE || cmd==ID_DIM_ALL || cmd==ID_DIM_AMOUNT ||
-                  cmd==ID_DIM_CUSTOM ||
-                  (cmd>=ID_DIM_PRESET_BASE && cmd<ID_DIM_PRESET_BASE+nightlight::kDimMinutePresets.size()) ||
-                  (cmd>=ID_DIM_MONITOR_BASE && cmd<ID_DIM_MONITOR_BASE+std::min<size_t>(1000,model_.monitors().size()))) {
-            Preferences pref=model_.preferences();
-            bool resetTimeout=true;
-            if(cmd==ID_DIM_ENABLE) {
-                pref.dimInactive=!pref.dimInactive;
-            } else if(cmd==ID_DIM_ALL) {
-                pref.dimAll=!pref.dimAll;
-                pref.dimDisplays.clear();
-            } else if(cmd==ID_DIM_AMOUNT || cmd==ID_DIM_CUSTOM) {
-                const bool amount=cmd==ID_DIM_AMOUNT;
-                const auto title=tr(L"Dim when inactive",L"Reduzir brilho quando inativo");
-                const auto prompt=amount?tr(L"Black overlay opacity (%, 1–99)",L"Opacidade da camada preta (%, 1–99)"):
-                    tr(L"Inactive time (minutes, 1–1440)",L"Tempo de inatividade (min, 1–1440)");
-                trayMenuOpen_=true;
-                const auto value=nightlight::inactive_dialog::number(instance_,taskbarOwner_,
-                    title.c_str(),prompt.c_str(),amount?pref.dimAmount:pref.dimMinutes,
-                    1,amount?99:1440,pt());
-                trayMenuOpen_=false;
-                if(!value) return;
-                if(amount) {pref.dimAmount=*value;resetTimeout=false;}
-                else pref.dimMinutes=*value;
-            } else if(cmd>=ID_DIM_PRESET_BASE && cmd<ID_DIM_PRESET_BASE+nightlight::kDimMinutePresets.size()) {
-                pref.dimMinutes=nightlight::kDimMinutePresets[cmd-ID_DIM_PRESET_BASE];
-            } else {
-                const auto& mon=model_.monitors()[cmd-ID_DIM_MONITOR_BASE];
-                if(mon.physicalId.empty()) return;
-                if(pref.dimAll) {
-                    pref.dimAll=false;pref.dimDisplays.clear();
-                    for(const auto& display:model_.monitors()) if(!display.physicalId.empty())
-                        pref.dimDisplays.insert(nightlight::monitorProfileKey(display));
-                }
-                const auto key=nightlight::monitorProfileKey(mon);
-                if(pref.dimDisplays.count(key)) pref.dimDisplays.erase(key);
-                else pref.dimDisplays.insert(key);
-            }
-            updateDimSettings(pref,resetTimeout);
+        } else if(cmd==ID_DIM_SETTINGS) {
+            openInactiveSettings();
         } else if (cmd==ID_TRAY_CLOSE_OUTSIDE) {
             Preferences pref=model_.preferences();
             pref.closeByClickingOutside=!pref.closeByClickingOutside;
@@ -2967,6 +3007,7 @@ private:
         case WM_COMMAND:
             handleCommand(LOWORD(wParam),HIWORD(wParam)); return 0;
         case WM_TRAY_ICON: {
+            if(dimDialogOpen_) return 0;
             // For NOTIFYICON_VERSION_4, LOWORD(lParam) is the message and
             // HIWORD(lParam) is our icon ID; legacy Shells use wParam as ID.
             if (trayVersion4_) {
@@ -3097,7 +3138,10 @@ private:
             break;
         case WM_DISPLAYCHANGE:
         case WM_DEVICECHANGE:
+            dimTopologyDirty_=true;
             if (msg==WM_DISPLAYCHANGE) {
+                // Remove any old-coordinate overlay before the next tick.
+                dimOverlays_.clear();
                 pageSurface_.reset();
                 for (auto& item:interactions_) item.second.surface.reset();
                 // Drivers often reset DDC/CI levels when a panel reconnects.
@@ -3123,10 +3167,11 @@ private:
                         }
                         KillTimer(taskbarOwner_,TIMER_DISPLAYS);
                         displayRecoveryActive_=false;
-                        syncColorWatchdog(); syncHardwarePoll();
+                        syncColorWatchdog(); syncHardwarePoll(); syncInactiveDimming();
                     } else {
-                        if(!wasAwake) restoreDdcAfterWake_=true;
+                        if(!wasAwake) {restoreDdcAfterWake_=true;dimTopologyDirty_=true;}
                         scheduleDisplayRecovery();
+                        syncInactiveDimming();
                         // The screen-off input guard may still be preventing
                         // an accidental immediate wake. Defer recovery.
                         if (screenOffGuard_.guarding())
@@ -3135,8 +3180,10 @@ private:
                 }
             } else if (wParam==PBT_APMRESUMEAUTOMATIC || wParam==PBT_APMRESUMESUSPEND) {
                 displayAwake_=true;
+                dimTopologyDirty_=true;
                 restoreDdcAfterWake_=true;
                 scheduleDisplayRecovery();
+                syncInactiveDimming();
             } else if (wParam==PBT_APMSUSPEND) {
                 resetDimActivity();
                 displayAwake_=false;
@@ -3145,7 +3192,7 @@ private:
                 ddc_.invalidateTopology();
                 model_.beginDisplayRecovery();
                 KillTimer(taskbarOwner_,TIMER_DISPLAYS);
-                syncColorWatchdog(); syncHardwarePoll();
+                syncColorWatchdog(); syncHardwarePoll(); syncInactiveDimming();
             }
             return TRUE;
         case WM_TIMER:
@@ -3297,7 +3344,6 @@ private:
                 ddc_.finishRestore();
                 displayRecoveryActive_=false;
                 restoreDdcAfterWake_=false;
-                resetDimActivity();
                 syncInactiveDimming();
                 recoveryPass_=0;
                 recoveryVerificationIssued_=false;

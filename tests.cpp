@@ -24,6 +24,16 @@ int main() {
                   dimOverlayAlpha(100)==252,"Black overlay opacity is bounded and never completely opaque");
             check(!displayIdleLongEnough(119999,0,2) && displayIdleLongEnough(120000,0,2) &&
                   !displayIdleLongEnough(1,100,2),"Timeout boundaries and monotonic activity");
+            Monitor fallback;fallback.device=L"DISPLAY-FALLBACK";
+            Preferences dim;
+            check(dim.dims(fallback),"All-display overlay does not require hardware identity");
+            dim.dimAll=false;dim.dimDisplays.insert(monitorProfileKey(fallback));
+            check(dim.dims(fallback),"Individual display can be selected using its live device fallback");
+            check(!confirmedForegroundMedia(false,100,200) &&
+                  !confirmedForegroundMedia(true,0,200) &&
+                  !confirmedForegroundMedia(true,100,8101) &&
+                  confirmedForegroundMedia(true,100,8100),
+                  "Missing, failed or stale media checks cannot indefinitely prevent dimming");
         }
         {
             DisplayTargetSnapshot snapshot;

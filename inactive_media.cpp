@@ -1,6 +1,7 @@
 #include "inactive_media.hpp"
 #include <mmdeviceapi.h>
 #include <audiopolicy.h>
+#include <endpointvolume.h>
 #include <appmodel.h>
 #include <shobjidl.h>
 #include <shellapi.h>
@@ -86,11 +87,20 @@ bool audioPlaying(DWORD foreground,const ProcessIdentity& app) {
                FAILED(control->QueryInterface(__uuidof(IAudioSessionControl2),reinterpret_cast<void**>(session.out())))) continue;
             DWORD pid=0;
             if(FAILED(session->GetProcessId(&pid)) || !pid) continue;
-            if(pid==foreground) return true;
-            const auto other=identity(pid);
-            // Browser/media subprocesses often share the executable path.
-            if((!app.path.empty() && app.path==other.path) ||
-               (!app.appId.empty() && app.appId==other.appId)) return true;
+            bool matches=pid==foreground;
+            if(!matches) {
+                const auto other=identity(pid);
+                matches=(!app.path.empty() && app.path==other.path) ||
+                    (!app.appId.empty() && app.appId==other.appId);
+            }
+            if(!matches) continue;
+            // A running audio stream is not proof of actual media playback:
+            // browsers can leave a silent stream active indefinitely.
+            Com<IAudioMeterInformation> meter;
+            float peak=0.0f;
+            if(SUCCEEDED(control->QueryInterface(__uuidof(IAudioMeterInformation),
+                   reinterpret_cast<void**>(meter.out()))) &&
+               SUCCEEDED(meter->GetPeakValue(&peak)) && peak>0.0001f) return true;
         }
     }
     return false;
@@ -187,8 +197,8 @@ void ForegroundMedia::run() {
 #ifdef NIGHTLIGHT_MEDIA_WINRT
                 if(!playing) playing=systemMediaPlaying(manager,app,windowAppId(window));
 #endif
-            } catch(...) { playing=true; }
-        } else playing=true;
+            } catch(...) { playing=false; }
+        }
         const auto now=GetTickCount64();
         std::lock_guard<std::mutex> lock(mutex_);
         if(!stopping_ && generation==generation_ && window==wanted_ && pid==pid_)

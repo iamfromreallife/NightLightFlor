@@ -59,13 +59,19 @@ struct Preferences {
     bool dimAll=true;
     std::set<std::wstring> dimDisplays; // stable physical profile keys
     bool dims(const Monitor& monitor) const {
-        return !monitor.physicalId.empty() &&
+        // An overlay needs a live desktop output, not DDC/CCD identity.
+        // Prefer the physical key, falling back to the GDI device only
+        // when no physical identity is available.
+        return !monitor.device.empty() &&
             (dimAll || dimDisplays.count(monitorProfileKey(monitor))!=0);
     }
 };
 inline constexpr std::array<int,6> kDimMinutePresets{2,5,10,15,30,60};
 inline constexpr BYTE dimOverlayAlpha(int amount) {
     return static_cast<BYTE>(((std::max)(0,(std::min)(99,amount))*255+50)/100);
+}
+inline bool confirmedForegroundMedia(bool playing,std::uint64_t sampled,std::uint64_t now) {
+    return playing && sampled!=0 && now>=sampled && now-sampled<=8000;
 }
 inline bool displayIdleLongEnough(std::uint64_t now,std::uint64_t last,int minutes) {
     return now>=last && now-last>=static_cast<std::uint64_t>((std::max)(1,minutes))*60000;
