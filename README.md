@@ -41,16 +41,6 @@ The status bar shows **NV target · Accepted** when the driver accepts the reque
 
 The build script uses a short temporary directory to avoid MSBuild path-length errors. Keep the executable in a writable folder: settings and recovery files are stored alongside it.
 
-## Performance
-
-With successful NVIDIA Target Gamma correction on all monitors, the periodic color watchdog is not needed. Hardware polling is suspended when the controls are hidden, and inactive workers sleep until needed.
-
-To measure real CPU usage, memory and resource counts on your own system, run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\measure-performance.ps1 -Seconds 60
-```
-
 ## Compatibility
 
 Designed for modern Windows 10 and Windows 11 systems. DDC/CI features depend on monitor firmware and connection type; enable DDC/CI in the monitor's own settings if required. NVIDIA Target Gamma requires a compatible NVIDIA driver and display connection.
