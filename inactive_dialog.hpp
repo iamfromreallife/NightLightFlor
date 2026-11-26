@@ -19,6 +19,7 @@ class InactiveSettingsWindow {
     std::map<int,HWND> controls_;
     std::set<HWND> hovering_;
     int chosenTime_=Custom;
+    bool sliderDragging_=false;
     RECT amountCard_{},timeCard_{},displaysCard_{};
     Test test_;
     Closed closed_;
@@ -49,6 +50,104 @@ class InactiveSettingsWindow {
             RemoveWindowSubclass(hwnd,hoverProc,id);
         }
         return DefSubclassProc(hwnd,msg,wp,lp);
+    }
+    RECT sliderChannel(HWND hwnd) const {
+        RECT client{},channel{};
+        GetClientRect(hwnd,&client);
+        SendMessageW(hwnd,TBM_GETCHANNELRECT,0,reinterpret_cast<LPARAM>(&channel));
+        if(channel.right<=channel.left) {
+            channel.left=px(10);
+            channel.right=std::max(channel.left+1,client.right-px(10));
+        }
+        return channel;
+    }
+    void moveSlider(HWND hwnd,int x) {
+        const RECT channel=sliderChannel(hwnd);
+        const int position=1+MulDiv(std::clamp(x,static_cast<int>(channel.left),
+            static_cast<int>(channel.right))-static_cast<int>(channel.left),98,
+            static_cast<int>(channel.right-channel.left));
+        if(SendMessageW(hwnd,TBM_GETPOS,0,0)!=position) {
+            // Keep the native value/keyboard semantics, but never let the
+            // common control paint an intermediate native thumb.
+            SendMessageW(hwnd,TBM_SETPOS,FALSE,position);
+            updateAmount();
+        }
+        InvalidateRect(hwnd,nullptr,FALSE);
+    }
+    static LRESULT CALLBACK sliderProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR data) {
+        auto* self=reinterpret_cast<InactiveSettingsWindow*>(data);
+        switch(msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            // The common trackbar normally invalidates only its native
+            // thumb bounds, which are smaller than our circular thumb.
+            // Expand the update region before BeginPaint and paint every
+            // pixel, including the previous thumb and its shadow.
+            InvalidateRect(hwnd,nullptr,FALSE);
+            PAINTSTRUCT ps{};
+            HDC dc=BeginPaint(hwnd,&ps);
+            if(dc) {
+                NMCUSTOMDRAW draw{};
+                draw.hdr.hwndFrom=hwnd;draw.dwDrawStage=CDDS_PREPAINT;draw.hdc=dc;
+                self->paintSlider(draw);
+            }
+            EndPaint(hwnd,&ps);
+            return 0;
+        }
+        case WM_PRINTCLIENT: {
+            NMCUSTOMDRAW draw{};
+            draw.hdr.hwndFrom=hwnd;draw.dwDrawStage=CDDS_PREPAINT;
+            draw.hdc=reinterpret_cast<HDC>(wp);
+            if(draw.hdc) self->paintSlider(draw);
+            return 0;
+        }
+        case WM_LBUTTONDOWN:case WM_LBUTTONDBLCLK:
+            if(IsWindowEnabled(hwnd)) {
+                SetFocus(hwnd);SetCapture(hwnd);
+                self->sliderDragging_=GetCapture()==hwnd;
+                self->moveSlider(hwnd,GET_X_LPARAM(lp));
+            }
+            return 0;
+        case WM_MOUSEMOVE:
+            if(self->hovering_.insert(hwnd).second) {
+                TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,hwnd,0};TrackMouseEvent(&track);
+                InvalidateRect(hwnd,nullptr,FALSE);
+            }
+            if(self->sliderDragging_ && GetCapture()==hwnd)
+                self->moveSlider(hwnd,GET_X_LPARAM(lp));
+            // No native mouse painting, even when just hovering.
+            return 0;
+        case WM_MOUSELEAVE:
+            self->hovering_.erase(hwnd);InvalidateRect(hwnd,nullptr,FALSE);return 0;
+        case WM_LBUTTONUP:
+            if(self->sliderDragging_) {
+                self->moveSlider(hwnd,GET_X_LPARAM(lp));
+                self->sliderDragging_=false;
+                if(GetCapture()==hwnd) ReleaseCapture();
+                InvalidateRect(hwnd,nullptr,FALSE);
+            }
+            return 0;
+        case WM_CANCELMODE:
+            if(self->sliderDragging_ && GetCapture()==hwnd) ReleaseCapture();
+            self->sliderDragging_=false;InvalidateRect(hwnd,nullptr,FALSE);
+            break;
+        case WM_CAPTURECHANGED:
+            self->sliderDragging_=false;InvalidateRect(hwnd,nullptr,FALSE);break;
+        case WM_NCDESTROY:
+            self->sliderDragging_=false;
+            self->hovering_.erase(hwnd);
+            RemoveWindowSubclass(hwnd,sliderProc,id);
+            break;
+        }
+        const auto result=DefSubclassProc(hwnd,msg,wp,lp);
+        // Preserve native keyboard input, range messages and accessibility;
+        // never rely on the native thumb's narrow invalidation rectangle.
+        if(msg==WM_KEYDOWN || msg==WM_KEYUP || msg==WM_MOUSEWHEEL ||
+           msg==TBM_SETPOS || msg==TBM_SETRANGE || msg==WM_SIZE ||
+           msg==WM_ENABLE || msg==WM_SETFOCUS || msg==WM_KILLFOCUS)
+            InvalidateRect(hwnd,nullptr,FALSE);
+        return result;
     }
     HWND child(int id,const wchar_t* cls,const wchar_t* label,DWORD style,DWORD ex=0) {
         HWND hwnd=CreateWindowExW(ex,cls,label,WS_CHILD|WS_VISIBLE|style,
@@ -86,7 +185,7 @@ class InactiveSettingsWindow {
     void createControls() {
         button(Enable,tr(L"Enable inactivity dimming",L"Ativar escurecimento por inatividade"));
         HWND slider=child(Amount,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_HORZ|TBS_NOTICKS);
-        if(slider) SetWindowSubclass(slider,hoverProc,1,reinterpret_cast<DWORD_PTR>(this));
+        if(slider) SetWindowSubclass(slider,sliderProc,1,reinterpret_cast<DWORD_PTR>(this));
         child(Percent,L"STATIC",L"",SS_RIGHT|SS_CENTERIMAGE);
         button(TestButton,tr(L"Test",L"Testar"));
         for(size_t i=0;i<nightlight::kDimMinutePresets.size();++i) {
@@ -226,18 +325,18 @@ class InactiveSettingsWindow {
     LRESULT paintSlider(NMCUSTOMDRAW& draw) {
         if(draw.dwDrawStage!=CDDS_PREPAINT) return CDRF_DODEFAULT;
         HWND slider=draw.hdr.hwndFrom;
-        RECT rc{},channel{},thumb{};
-        GetClientRect(slider,&rc);
-        SendMessageW(slider,TBM_GETCHANNELRECT,0,reinterpret_cast<LPARAM>(&channel));
-        SendMessageW(slider,TBM_GETTHUMBRECT,0,reinterpret_cast<LPARAM>(&thumb));
+        RECT rc{};GetClientRect(slider,&rc);
+        if(rc.right<=0 || rc.bottom<=0) return CDRF_SKIPDEFAULT;
+        const RECT channel=sliderChannel(slider);
         HDC dc=sliderSurface_.ensure(draw.hdc,rc.right,rc.bottom);
         if(!dc) dc=draw.hdc;
         const auto p=palette_();fill(dc,rc,p.card);
         const int cy=rc.bottom/2;
-        if(channel.right<=channel.left) {channel.left=px(10);channel.right=std::max(channel.left+1,rc.right-px(10));}
         RECT track{channel.left,cy-px(2),channel.right,cy+px(2)};
-        const int cx=std::clamp(static_cast<int>((thumb.left+thumb.right)/2),
-            static_cast<int>(track.left),static_cast<int>(track.right));
+        const int position=std::clamp(static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0)),1,99);
+        // Use the same geometry for pointer input and the painted thumb.
+        const int cx=static_cast<int>(track.left)+MulDiv(position-1,
+            static_cast<int>(track.right-track.left),98);
         rounded(dc,track,px(4),p.border,p.border);
         RECT active=track;active.right=cx;
         if(active.right>active.left) rounded(dc,active,px(4),p.accent,p.accent);
@@ -347,7 +446,9 @@ class InactiveSettingsWindow {
             break;
         }
         case WM_HSCROLL:
-            if(reinterpret_cast<HWND>(lp)==control(Amount)) {updateAmount();return 0;}
+            if(reinterpret_cast<HWND>(lp)==control(Amount)) {
+                updateAmount();InvalidateRect(control(Amount),nullptr,FALSE);return 0;
+            }
             break;
         case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORLISTBOX:case WM_CTLCOLORBTN: {
             const auto p=palette_();HDC dc=reinterpret_cast<HDC>(wp);
