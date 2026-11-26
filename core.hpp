@@ -70,7 +70,20 @@ inline constexpr std::array<int,6> kDimMinutePresets{2,5,10,15,30,60};
 inline constexpr BYTE dimOverlayAlpha(int amount) {
     return static_cast<BYTE>(((std::max)(0,(std::min)(99,amount))*255+50)/100);
 }
-inline constexpr std::uint64_t kDimFadeMs=200;
+inline constexpr std::uint64_t kDimFadeInMs=2000,kDimFadeOutMs=200;
+inline constexpr std::uint64_t dimFadeDuration(BYTE from,BYTE to) {
+    return to>from?kDimFadeInMs:kDimFadeOutMs;
+}
+inline constexpr std::uint64_t kStartupColorMs=3000;
+// Smoothstep in Kelvin: zero slope at both endpoints, exact saved target.
+inline constexpr int startupColorKelvin(int target,std::uint64_t elapsed) {
+    target=(std::max)(1000,(std::min)(6500,target));
+    if(elapsed>=kStartupColorMs) return target;
+    constexpr auto duration=kStartupColorMs;
+    constexpr auto denominator=duration*duration*duration;
+    const auto eased=elapsed*elapsed*(3*duration-2*elapsed);
+    return 6500-static_cast<int>(((6500-target)*eased+denominator/2)/denominator);
+}
 // LASTINPUTINFO uses the 32-bit tick clock even on 64-bit Windows.
 // Unsigned subtraction handles rollover; a very large backwards jump is
 // treated as a recent input instead of spuriously dimming the desktop.
@@ -79,9 +92,10 @@ inline constexpr std::uint64_t sessionInputAge(DWORD clock,DWORD input) {
     return elapsed>0x7fffffffu?0:elapsed;
 }
 inline constexpr BYTE dimFadeAlpha(BYTE from,BYTE to,std::uint64_t elapsed) {
-    if(elapsed>=kDimFadeMs) return to;
-    const auto remaining=kDimFadeMs-elapsed;
-    return static_cast<BYTE>((from*remaining+to*elapsed+kDimFadeMs/2)/kDimFadeMs);
+    const auto duration=dimFadeDuration(from,to);
+    if(elapsed>=duration) return to;
+    const auto remaining=duration-elapsed;
+    return static_cast<BYTE>((from*remaining+to*elapsed+duration/2)/duration);
 }
 inline bool confirmedForegroundMedia(bool playing,std::uint64_t sampled,std::uint64_t now) {
     return playing && sampled!=0 && now>=sampled && now-sampled<=8000;
@@ -251,6 +265,9 @@ public:
     bool refreshMonitors(bool afterWake=false,bool* stable=nullptr);
     void beginDisplayRecovery();
     void reassertWakeColors();
+    void armStartupColorTransition() { startupColorArmed_=true; }
+    bool startupColorActive() const { return !startupColorKeys_.empty(); }
+    void advanceStartupColorTransition(bool finish=false);
     bool wakeColorsPending() const;
     bool moveMonitor(size_t from,size_t to);
     void applyAll(GammaRefresh refresh=GammaRefresh::Normal);
@@ -322,6 +339,11 @@ private:
     std::vector<Monitor> wakeCandidate_;
     unsigned wakeConsistentSamples_=0;
     bool colorWritesPaused_=false; // UI thread only
+    // Transient launch-only values; never modify a profile or the UI's
+    // saved Kelvin. Hardware DDC gain writes retain their normal timing.
+    bool startupColorArmed_=false;
+    std::uint64_t startupColorStarted_=0,startupColorElapsed_=0;
+    std::set<std::wstring> startupColorKeys_;
     std::map<std::wstring, Ramp> originals_;
     std::string savedDocument_;
     FILETIME savedStamp_{};

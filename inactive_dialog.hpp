@@ -20,7 +20,7 @@ class InactiveSettingsWindow {
     std::set<HWND> hovering_;
     int chosenTime_=Custom;
     bool sliderDragging_=false;
-    RECT amountCard_{},timeCard_{},displaysCard_{};
+    RECT amountCard_{},timeCard_{},displaysCard_{},minutesFrame_{};
     Test test_;
     Closed closed_;
     std::function<Palette()> palette_;
@@ -51,6 +51,23 @@ class InactiveSettingsWindow {
         }
         return DefSubclassProc(hwnd,msg,wp,lp);
     }
+    COLORREF minutesBackground(const Palette& p) const {
+        return chosenTime_==Custom?p.chip:mix(p.card,p.chip,0.5);
+    }
+    void invalidateMinutesFrame() {
+        if(window_) InvalidateRect(window_,&minutesFrame_,FALSE);
+    }
+    static LRESULT CALLBACK minutesProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR data) {
+        auto* self=reinterpret_cast<InactiveSettingsWindow*>(data);
+        if(msg==WM_NCDESTROY) {
+            RemoveWindowSubclass(hwnd,minutesProc,id);
+            return DefSubclassProc(hwnd,msg,wp,lp);
+        }
+        const auto result=DefSubclassProc(hwnd,msg,wp,lp);
+        if(msg==WM_SETFOCUS || msg==WM_KILLFOCUS || msg==WM_ENABLE)
+            self->invalidateMinutesFrame();
+        return result;
+    }
     RECT sliderChannel(HWND hwnd) const {
         RECT client{},channel{};
         GetClientRect(hwnd,&client);
@@ -72,11 +89,20 @@ class InactiveSettingsWindow {
             SendMessageW(hwnd,TBM_SETPOS,FALSE,position);
             updateAmount();
         }
-        InvalidateRect(hwnd,nullptr,FALSE);
+        // The entire old and new circular thumb area is repainted in one
+        // buffered operation before the next pointer message.
+        RedrawWindow(hwnd,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOCHILDREN);
     }
     static LRESULT CALLBACK sliderProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR data) {
         auto* self=reinterpret_cast<InactiveSettingsWindow*>(data);
         switch(msg) {
+        case TBM_SETPOS: {
+            // Native TBM_SETPOS(TRUE) can draw directly outside WM_PAINT.
+            // Route every position change through our own paint path.
+            const auto result=DefSubclassProc(hwnd,msg,FALSE,lp);
+            InvalidateRect(hwnd,nullptr,FALSE);
+            return result;
+        }
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT: {
@@ -172,6 +198,8 @@ class InactiveSettingsWindow {
         if(bold_) DeleteObject(bold_);
         font_=normal;bold_=semibold;
         if(control(Displays)) SendMessageW(control(Displays),LB_SETITEMHEIGHT,0,px(30));
+        if(control(Minutes)) SendMessageW(control(Minutes),EM_SETMARGINS,
+            EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(px(1),px(1)));
     }
     void updateAmount() {
         draft_.dimAmount=static_cast<int>(SendMessageW(control(Amount),TBM_GETPOS,0,0));
@@ -180,6 +208,8 @@ class InactiveSettingsWindow {
     void setTime(int id) {
         chosenTime_=id;
         EnableWindow(control(Minutes),id==Custom);
+        invalidateMinutesFrame();
+        InvalidateRect(control(Minutes),nullptr,FALSE);
         for(int i=Preset;i<=Custom;++i) InvalidateRect(control(i),nullptr,FALSE);
     }
     void createControls() {
@@ -195,7 +225,8 @@ class InactiveSettingsWindow {
             if(min==draft_.dimMinutes) chosenTime_=Preset+static_cast<int>(i);
         }
         button(Custom,tr(L"Custom (min)",L"Personalizado (min)"));
-        child(Minutes,L"EDIT",L"",WS_TABSTOP|WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL);
+        const HWND minutes=child(Minutes,L"EDIT",L"",WS_TABSTOP|ES_NUMBER|ES_AUTOHSCROLL);
+        if(minutes) SetWindowSubclass(minutes,minutesProc,1,reinterpret_cast<DWORD_PTR>(this));
         button(All,tr(L"All displays",L"Todos os ecrãs"));
         child(Displays,L"LISTBOX",L"",WS_TABSTOP|WS_VSCROLL|LBS_MULTIPLESEL|
             LBS_NOTIFY|LBS_NOINTEGRALHEIGHT|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS);
@@ -241,7 +272,13 @@ class InactiveSettingsWindow {
         for(int i=0;i<6;++i) place(Preset+i,left+(i%3)*(cell+gap),
             px(171+(i/3)*31),cell,px(26));
         place(Custom,left,px(236),px(180),px(28));
-        place(Minutes,left+px(188),px(237),px(66),px(26));
+        minutesFrame_={left+px(188),px(236),left+px(270),px(264)};
+        // A genuine native EDIT preserves selection, caret, keyboard input
+        // and accessibility, but sits inside our antialiased rounded frame.
+        const int editHeight=px(18);
+        place(Minutes,minutesFrame_.left+px(8),
+            (minutesFrame_.top+minutesFrame_.bottom-editHeight)/2,
+            static_cast<int>(minutesFrame_.right-minutesFrame_.left)-px(16),editHeight);
         place(All,right-px(194),px(301),px(194),px(28));
         place(Displays,left,px(335),content,std::max(px(30),
             static_cast<int>(displaysCard_.bottom)-px(347)));
@@ -257,6 +294,9 @@ class InactiveSettingsWindow {
         fill(dc,rc,p.page);
         for(RECT card:{amountCard_,timeCard_,displaysCard_})
             rounded(dc,card,px(2*nightlight::kCardCornerRadiusDip),p.card,p.border);
+        const bool minutesFocused=GetFocus()==control(Minutes) && chosenTime_==Custom;
+        rounded(dc,minutesFrame_,px(8),minutesBackground(p),
+            minutesFocused?mix(p.border,p.accent,0.65):p.border);
         const int left=px(26),right=rc.right-px(26);
         text(dc,tr(L"Dim amount",L"Escurecimento"),RECT{left,px(63),right,px(82)},bold_,p.text);
         text(dc,tr(L"Inactivity time",L"Tempo de inatividade"),RECT{left,px(148),right,px(170)},bold_,p.text);
@@ -452,7 +492,10 @@ class InactiveSettingsWindow {
             break;
         case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORLISTBOX:case WM_CTLCOLORBTN: {
             const auto p=palette_();HDC dc=reinterpret_cast<HDC>(wp);
-            SetTextColor(dc,p.text);SetBkColor(dc,p.card);SetDCBrushColor(dc,p.card);
+            const bool minutes=reinterpret_cast<HWND>(lp)==control(Minutes);
+            const auto background=minutes?minutesBackground(p):p.card;
+            SetTextColor(dc,minutes && chosenTime_!=Custom?p.muted:p.text);
+            SetBkColor(dc,background);SetDCBrushColor(dc,background);
             return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
         }
         case WM_COMMAND:

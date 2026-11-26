@@ -53,7 +53,7 @@ constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103, ID_TRAY_STARTUP = 4104;
 constexpr int ID_DIM_SETTINGS=12000;
-constexpr UINT TIMER_INACTIVE_DIM=22, TIMER_DIM_FADE=23;
+constexpr UINT TIMER_INACTIVE_DIM=22, TIMER_DIM_FADE=23, TIMER_STARTUP_COLOR=24;
 constexpr UINT WM_DIM_POINTER_ACTIVITY=WM_APP+45;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_TARGET_BASE=10000;
@@ -486,7 +486,7 @@ class InactiveOverlays {
         if(!entry.animating) return true;
         const auto elapsed=now>=entry.started?now-entry.started:0;
         if(!apply(entry,nightlight::dimFadeAlpha(entry.from,entry.target,elapsed))) return false;
-        if(elapsed>=nightlight::kDimFadeMs) entry.animating=false;
+        if(elapsed>=nightlight::dimFadeDuration(entry.from,entry.target)) entry.animating=false;
         return true;
     }
     bool transition(Entry& entry,BYTE target,ULONGLONG now) {
@@ -665,6 +665,7 @@ public:
                         MB_ICONERROR | MB_OK);
             return 2;
         }
+        model_.armStartupColorTransition();
         // Previous NightLight cursor-test scripts set MouseTrails=-1,
         // deliberately forcing software pointer composition. Undo ONLY that
         // particular workaround; regular pointer preferences remain intact.
@@ -816,6 +817,7 @@ private:
     unsigned recoveryPass_=0;
     unsigned recoverySettleChecks_=0;
     bool recoveryVerificationIssued_=false;
+    bool startupColorTimer_=false;
     int hardwareTop_ = 0;
     int hardwareHeight_ = 186;
     HWND btnRefresh_=nullptr, btnScreenOff_=nullptr, editName_=nullptr;
@@ -1854,7 +1856,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.16";
+        const std::wstring version=L"NightLight v1.0.17";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1946,6 +1948,15 @@ private:
         ensureHardwareRows();
         for (const auto& row:hardwareRows_) ddc_.refresh(row.device);
         syncHardware();
+    }
+    void syncStartupColorTimer() {
+        const bool needed=model_.startupColorActive();
+        if(needed && !startupColorTimer_) {
+            startupColorTimer_=SetTimer(taskbarOwner_,TIMER_STARTUP_COLOR,100,nullptr)!=0;
+            if(!startupColorTimer_) model_.advanceStartupColorTransition(true);
+        } else if(!needed && startupColorTimer_) {
+            KillTimer(taskbarOwner_,TIMER_STARTUP_COLOR);startupColorTimer_=false;
+        }
     }
     void syncColorWatchdog() {
         const bool needed=displayAwake_ && !displayRecoveryActive_ && model_.needsColorWatchdog();
@@ -3428,6 +3439,11 @@ private:
         case WM_TIMER:
             if(wParam==TIMER_INACTIVE_DIM) { if(dimTimerRunning_) tickInactiveDimming(); return 0; }
             if(wParam==TIMER_DIM_FADE) {dimOverlays_.tickFade();syncInactiveDimming();return 0;}
+            if(wParam==TIMER_STARTUP_COLOR) {
+                model_.advanceStartupColorTransition();
+                syncStartupColorTimer();
+                return 0;
+            }
             if (wParam==TIMER_TRAY_RETRY) {
                 if (trayReady_ || addTray()) KillTimer(taskbarOwner_,TIMER_TRAY_RETRY);
                 return 0;
@@ -3477,6 +3493,7 @@ private:
                 const auto selectedKey=hasMonitor()?
                     nightlight::monitorProfileKey(*selectedMonitor()):L"";
                 const bool changed=model_.refreshMonitors(true,&stable);
+                syncStartupColorTimer();
                 if(!stable) {
                     if(recoveryPass_!=0) ddc_.invalidateTopology();
                     recoveryPass_=0;
@@ -3598,6 +3615,8 @@ private:
             shuttingDown_=true;
             if(dimSettings_) dimSettings_->close();
             KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM);
+            KillTimer(taskbarOwner_,TIMER_STARTUP_COLOR);
+            startupColorTimer_=false;
             dimTimerRunning_=false;
             setKeyboardActivity(false);
             resetDimActivity();

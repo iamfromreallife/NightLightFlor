@@ -709,6 +709,31 @@ void Model::reassertWakeColors() {
     for(auto& monitor:monitors_)
         if(monitor.gammaStatus!=-1) applyDisplay(monitor,GammaRefresh::Restore);
 }
+void Model::advanceStartupColorTransition(bool finish) {
+    if(startupColorKeys_.empty()) return;
+    collectGammaResults();
+    const auto now=GetTickCount64();
+    const auto elapsed=now>=startupColorStarted_?now-startupColorStarted_:0;
+    const auto previous=startupColorElapsed_;
+    startupColorElapsed_=finish?kStartupColorMs:std::min(elapsed,kStartupColorMs);
+    if(startupColorElapsed_>=kStartupColorMs) {
+        // Queue the exact final value even if an earlier sample remains
+        // pending. Generation checks coalesce queued work and reject stale
+        // completions. A paused topology is restored by normal wake recovery.
+        const auto keys=std::move(startupColorKeys_);
+        startupColorKeys_.clear();
+        if(!colorWritesPaused_) for(auto& monitor:monitors_)
+            if(keys.count(monitorProfileKey(monitor))) applyDisplay(monitor,GammaRefresh::Restore);
+        return;
+    }
+    if(colorWritesPaused_) return;
+    for(auto& monitor:monitors_) {
+        if(!startupColorKeys_.count(monitorProfileKey(monitor)) || monitor.gammaStatus==-1) continue;
+        if(monitor.gammaStatus==0 ||
+           startupColorKelvin(monitor.kelvin,previous)!=startupColorKelvin(monitor.kelvin,startupColorElapsed_))
+            applyDisplay(monitor,GammaRefresh::Restore);
+    }
+}
 bool Model::wakeColorsPending() const {
     return std::any_of(monitors_.begin(),monitors_.end(),
         [](const Monitor& monitor){return monitor.gammaStatus==-1;});
@@ -791,6 +816,16 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
         for(auto& entry:newestGeneration_) ++entry.second;
     }
     monitors_=std::move(entries);
+    if(startupColorArmed_) {
+        startupColorArmed_=false;
+        startupColorStarted_=GetTickCount64();
+        startupColorElapsed_=0;
+        startupColorKeys_.clear();
+        for(const auto& mon:monitors_) {
+            if(mon.enabled && mon.kelvin<6500 && !mon.hardwareColor)
+                startupColorKeys_.insert(monitorProfileKey(mon));
+        }
+    }
     applyAll(GammaRefresh::Restore);
     // Persist tab order with physical IDs even when the user never dragged
     // the tabs. Also migrate legacy GDI-based order entries while preserving
@@ -1209,11 +1244,17 @@ bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
     }
     const auto original = originals_.find(persistent);
     const Ramp* baseline = original != originals_.end() ? &original->second : nullptr;
-    const Ramp ramp = buildAppliedRamp(mon.kelvin, mon.enabled && !mon.hardwareColor && !mon.nvidiaTargetColor, baseline);
+    // Only the worker snapshot receives the transitional Kelvin. The saved
+    // profile, controls and configuration remain at the requested target.
+    const int kelvin=startupColorKeys_.count(persistent)?
+        startupColorKelvin(mon.kelvin,startupColorElapsed_):mon.kelvin;
+    const Ramp ramp = buildAppliedRamp(kelvin, mon.enabled && !mon.hardwareColor && !mon.nvidiaTargetColor, baseline);
     // Retain the last verified status during an unchanged periodic check.
     // A new Kelvin/backend/enable request or wake recovery invalidates it.
     if (refresh!=GammaRefresh::Verify) mon.gammaStatus=-1;
-    queueGamma(mon,ramp,refresh);
+    Monitor request=mon;
+    request.kelvin=kelvin;
+    queueGamma(request,ramp,refresh);
     return true;
 }
 void Model::applyAll(GammaRefresh refresh) {
@@ -1245,7 +1286,8 @@ bool Model::previewKelvin(size_t index, int kelvin) {
     auto& monitor=monitors_[index];
     const int target=std::clamp(kelvin,1000,6500);
     // Drag release persists the last preview without duplicating the driver call.
-    if(monitor.kelvin==target && monitor.gammaStatus!=0) return true;
+    const bool transitioning=startupColorKeys_.erase(monitorProfileKey(monitor))!=0;
+    if(monitor.kelvin==target && monitor.gammaStatus!=0 && !transitioning) return true;
     monitor.kelvin=target;
     root_["screen"]["kelvin"] = monitor.kelvin;
     // Multi-monitor sessions keep a fixed independent backend. An untouched
@@ -1259,6 +1301,7 @@ bool Model::updateKelvin(size_t index, int kelvin) {
 }
 bool Model::updateEnabled(size_t index, bool enabled) {
     if (index >= monitors_.size() || !loaded_) return false;
+    startupColorKeys_.erase(monitorProfileKey(monitors_[index]));
     monitors_[index].enabled = enabled;
     root_["screen"]["kelvin"] = monitors_[index].kelvin;
     applyDisplay(monitors_[index],GammaRefresh::Normal);
@@ -1270,6 +1313,7 @@ bool Model::updateColorBackend(size_t index,ColorBackend backend) {
     const bool hardware=backend==ColorBackend::MonitorHardware;
     const bool target=backend==ColorBackend::NvidiaTargetGamma;
     if (mon.hardwareColor==hardware && mon.nvidiaTargetColor==target) return true;
+    startupColorKeys_.erase(monitorProfileKey(mon));
     mon.hardwareColor=hardware;
     mon.nvidiaTargetColor=target;
     persistProfile(index);

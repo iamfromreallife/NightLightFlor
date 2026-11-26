@@ -28,10 +28,21 @@ int main() {
                   sessionInputAge(1000u,900u)==100 &&
                   sessionInputAge(1000u,1001u)==0,
                   "Windows session input clock handles 32-bit rollover and backwards samples");
-            check(dimFadeAlpha(0,230,0)==0 && dimFadeAlpha(0,230,100)==115 &&
-                  dimFadeAlpha(0,230,200)==230 && dimFadeAlpha(230,0,100)==115 &&
+            check(dimFadeDuration(0,230)==2000 && dimFadeDuration(230,0)==200 &&
+                  dimFadeAlpha(0,230,0)==0 && dimFadeAlpha(0,230,1000)==115 &&
+                  dimFadeAlpha(0,230,2000)==230 && dimFadeAlpha(230,0,100)==115 &&
                   dimFadeAlpha(230,0,200)==0 && dimFadeAlpha(230,0,999)==0,
-                  "Black overlay fades in and out over exactly 200 ms of elapsed time");
+                  "Black overlay fades in over 2 seconds and out over 200 ms");
+            check(startupColorKelvin(2500,0)==6500 && startupColorKelvin(2500,1500)==4500 &&
+                  startupColorKelvin(2500,3000)==2500 && startupColorKelvin(2500,9000)==2500 &&
+                  startupColorKelvin(6500,1500)==6500,
+                  "Launch color transition begins neutral and reaches the exact saved target");
+            int previous=6500;
+            for(unsigned ms=0;ms<=3000;++ms) {
+                const int next=startupColorKelvin(1000,ms);
+                check(next<=previous && next>=1000,"Startup color warms monotonically without overshoot");
+                previous=next;
+            }
             // A stationary pointer on a single monitor does not continually
             // renew last input. The system idle time reaches the timeout.
             const auto now=120000ull;
