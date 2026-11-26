@@ -2961,7 +2961,7 @@ private:
             } else if(manual)MessageBoxW(taskbarOwner_,tr(L"Could not check GitHub for updates. Please try again later.",L"Não foi possível procurar atualizações no GitHub. Tente novamente mais tarde.").c_str(),L"NightLight",MB_OK|MB_ICONWARNING);
         }
         if(updatePromptPending_ && !trayMenuOpen_){updatePromptPending_=false;showUpdateWindow();}
-        if(!updateRequest_ && model_.preferences().autoUpdates &&
+        if(!updateRequest_ && !trayMenuOpen_ && model_.preferences().autoUpdates &&
             nightlight::updateDue(nightlight::updateMinute(),model_.preferences().updateLastCheck))startUpdate(false);
         scheduleUpdate();
     }

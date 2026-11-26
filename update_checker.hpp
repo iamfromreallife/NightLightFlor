@@ -21,7 +21,8 @@ inline ReleaseResult fetchLatestRelease() {
         HINTERNET value=nullptr;
         ~Http(){if(value)WinHttpCloseHandle(value);}
     };
-    Http session{WinHttpOpen(L"NightLight/" L"1.0.19",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    const auto agent=std::wstring(L"NightLight/")+kAppVersionWide;
+    Http session{WinHttpOpen(agent.c_str(),WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0)};
     if(!session.value) return {};
     WinHttpSetTimeouts(session.value,5000,5000,5000,5000);
@@ -57,7 +58,11 @@ inline ReleaseResult fetchLatestRelease() {
         auto tag=json.get("tag_name").str();
         if(!parseReleaseVersion(tag)) return {};
         auto notes=json.get("body").str();
-        if(notes.size()>262144) notes.resize(262144);
+        if(notes.size()>262144) {
+            size_t limit=262144;
+            while(limit>0 && (static_cast<unsigned char>(notes[limit])&0xc0)==0x80)--limit;
+            notes.resize(limit);
+        }
         return {true,std::move(tag),std::move(notes)};
     } catch(...) {return {};}
 }

@@ -146,6 +146,7 @@ public:
     void close(){if(window_)DestroyWindow(window_);}
     void activate(){if(window_){if(IsIconic(window_))ShowWindow(window_,SW_RESTORE);SetForegroundWindow(window_);}}
     void refreshTheme(){if(window_){applyNightLightFrame(window_,palette_(),dark_(),hc_());
+        if(notes_)SetWindowTheme(notes_,dark_() && !hc_()?L"DarkMode_Explorer":L"Explorer",nullptr);
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME|RDW_ALLCHILDREN|RDW_NOERASE);}}
     bool pretranslate(MSG& m){if(!window_ || (m.hwnd!=window_ && !IsChild(window_,m.hwnd)))return false;
         if(m.message==WM_KEYDOWN && m.wParam==VK_ESCAPE){close();return true;}
@@ -165,6 +166,12 @@ public:
             WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,mi.rcWork.left+(mi.rcWork.right-mi.rcWork.left-w)/2,
             mi.rcWork.top+(mi.rcWork.bottom-mi.rcWork.top-h)/2,w,h,owner_,nullptr,instance_,this);
         if(!created)return false;
+        // WM_CREATE knows the target display DPI; size before first show.
+        RECT actual{0,0,px(560),px(440)};AdjustWindowRectExForDpi(&actual,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
+        const int dw=std::min(static_cast<int>(actual.right-actual.left),static_cast<int>(mi.rcWork.right-mi.rcWork.left));
+        const int dh=std::min(static_cast<int>(actual.bottom-actual.top),static_cast<int>(mi.rcWork.bottom-mi.rcWork.top));
+        if(dw!=w || dh!=h)SetWindowPos(created,nullptr,mi.rcWork.left+(mi.rcWork.right-mi.rcWork.left-dw)/2,
+            mi.rcWork.top+(mi.rcWork.bottom-mi.rcWork.top-dh)/2,dw,dh,SWP_NOZORDER|SWP_NOACTIVATE);
         ShowWindow(created,SW_SHOW);SetFocus(buttons_[0]);SetForegroundWindow(created);return true;
     }
 };

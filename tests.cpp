@@ -20,8 +20,9 @@ void check(bool ok,const char* message) {
 int main() {
     try {
         {
-            check(newerRelease("v1.0.20") && newerRelease("2.0.0") && !newerRelease("v1.0.19") && !newerRelease("v1.0.4"),"Numeric release comparison");
-            check(!newerRelease("v1.0.20","1.0.20") && newerRelease("v1.0.21","1.0.20"),"Ignore exactly one release version");
+            check(newerThan("v1.0.20","1.0.19") && newerThan("2.0.0","1.0.19") && !newerThan("v1.0.19","1.0.19") && !newerThan("v1.0.4","1.0.19"),"Numeric release comparison");
+            check(!newerThan("v1.0.20","1.0.19","1.0.20") && newerThan("v1.0.21","1.0.19","1.0.20"),"Ignore exactly one release version");
+            check(!newerRelease(kAppVersion) && parseReleaseVersion(kAppVersion).has_value(),"Installed build version is valid and not offered as an update");
             check(!parseReleaseVersion("v1.0.20-beta") && !parseReleaseVersion("../2.0.0") && !parseReleaseVersion("1.2"),"Reject prerelease and unsafe tag syntax");
             check(updateDue(2000,560) && !updateDue(1999,560) && updateDue(2000,0) && updateDue(100,200),"Daily check scheduling and backwards clock");
         }
@@ -816,6 +817,9 @@ int main() {
             updated.locale=L"en-US";
             updated.theme=L"system";
             check(!updated.dimInactive,"Inactivity dimming defaults to disabled");
+            check(!updated.autoUpdates && updated.updateLastCheck==0 && updated.ignoredUpdate.empty(),"Legacy config defaults to manual checking");
+            updated.autoUpdates=true;updated.updateLastCheck=12345;
+            updated.ignoredUpdate="v1.0.20";updated.availableUpdate="v1.0.21";updated.updateNotes="Example release notes";
             updated.dimInactive=true;updated.dimAmount=65;updated.dimMinutes=7;
             updated.dimAll=false;updated.dimDisplays.insert(L"PHYSICAL-A");
             model.updatePreferences(updated);
@@ -835,6 +839,9 @@ int main() {
             Model model(root);
             check(model.load(),"Reload from same folder");
             check(model.preferences().locale==L"en-US","Saved language");
+            check(model.preferences().autoUpdates && model.preferences().updateLastCheck==12345 &&
+                  model.preferences().ignoredUpdate=="v1.0.20" && model.preferences().availableUpdate=="v1.0.21" &&
+                  model.preferences().updateNotes=="Example release notes","Update settings, ignored version and cached notes round-trip");
             check(model.preferences().theme==L"system",
                 "System-following theme round-trips through portable config");
             check(model.preferences().dimInactive && model.preferences().dimAmount==65 &&

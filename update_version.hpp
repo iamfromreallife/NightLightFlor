@@ -4,8 +4,15 @@
 #include <string>
 #include <string_view>
 namespace nightlight {
-inline constexpr char kAppVersion[]="1.0.19";
-inline constexpr wchar_t kAppVersionWide[]=L"1.0.19";
+#ifndef NIGHTLIGHT_VERSION
+#define NIGHTLIGHT_VERSION "1.0.19"
+#endif
+#define NIGHTLIGHT_WIDE_IMPL(x) L##x
+#define NIGHTLIGHT_WIDE(x) NIGHTLIGHT_WIDE_IMPL(x)
+inline constexpr char kAppVersion[]=NIGHTLIGHT_VERSION;
+inline constexpr wchar_t kAppVersionWide[]=NIGHTLIGHT_WIDE(NIGHTLIGHT_VERSION);
+#undef NIGHTLIGHT_WIDE
+#undef NIGHTLIGHT_WIDE_IMPL
 using ReleaseVersion=std::array<unsigned,3>;
 inline std::optional<ReleaseVersion> parseReleaseVersion(std::string_view tag) {
     if(!tag.empty() && (tag.front()=='v' || tag.front()=='V')) tag.remove_prefix(1);
@@ -26,10 +33,13 @@ inline std::optional<ReleaseVersion> parseReleaseVersion(std::string_view tag) {
     if(!tag.empty()) return {};
     return result;
 }
-inline bool newerRelease(std::string_view tag,std::string_view ignored={}) {
-    const auto candidate=parseReleaseVersion(tag), installed=parseReleaseVersion(kAppVersion);
+inline bool newerThan(std::string_view tag,std::string_view current,std::string_view ignored={}) {
+    const auto candidate=parseReleaseVersion(tag), installed=parseReleaseVersion(current);
     const auto skipped=parseReleaseVersion(ignored);
     return candidate && installed && *candidate>*installed && (!skipped || *candidate!=*skipped);
+}
+inline bool newerRelease(std::string_view tag,std::string_view ignored={}) {
+    return newerThan(tag,kAppVersion,ignored);
 }
 inline bool updateDue(int now,int last) {
     return now>0 && (last<=0 || now<last || now-last>=1440);
