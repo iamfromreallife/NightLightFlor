@@ -89,9 +89,9 @@ inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
 
-// Initial silent startup and rare visible-iconic fallback: hide without
-// activation or changing the normal window geometry. Native minimize/restore
-// supplies the ordinary interactive DWM transitions.
+// Initial silent startup and external-minimize fallback: hide without
+// activation or changing normal geometry. Fresh native frames supply the
+// normal first-show DWM transition on each interactive reopening.
 inline constexpr bool trayWindowPresented(bool visible,bool iconic) {
     return visible && !iconic;
 }

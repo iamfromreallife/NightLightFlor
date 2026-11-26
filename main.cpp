@@ -56,6 +56,7 @@ constexpr UINT WM_MINIMIZE_TO_TRAY = WM_APP + 43;
 constexpr UINT TIMER_DISPLAYS = 10;
 constexpr UINT TIMER_TRAY_RETRY = 21;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
+constexpr wchar_t SERVICE_CLASS_NAME[] = L"NightLight.TrayService.Win32";
 constexpr int ICON_RESOURCE = 101; // full-size Explorer and application icon
 constexpr int ICON_RESOURCE_DARK_TASKBAR = 102; // white circle, black sun
 constexpr int ICON_RESOURCE_LIGHT_TASKBAR = 103; // black circle, white sun
@@ -391,6 +392,12 @@ public:
         wc.hbrBackground = nullptr;
         wc.style = CS_HREDRAW | CS_VREDRAW;
         if (!RegisterClassExW(&wc)) return 3;
+        WNDCLASSEXW serviceClass{};
+        serviceClass.cbSize=sizeof(serviceClass);
+        serviceClass.hInstance=instance_;
+        serviceClass.lpfnWndProc=NativeApp::serviceWindowProc;
+        serviceClass.lpszClassName=SERVICE_CLASS_NAME;
+        if(!RegisterClassExW(&serviceClass)) return 3;
 
         int windowWidth=560;
         // Fixed first-run height. The user controls the window size from then on,
@@ -422,8 +429,10 @@ public:
         }
         // A hidden owner keeps the visible window off the taskbar without
         // changing its regular title bar, resizing, or caption buttons.
-        taskbarOwner_ = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"NightLight Owner",
-            WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, nullptr);
+        // This permanently hidden top-level owner also hosts the tray icon,
+        // worker callbacks and timers. It survives every visual frame.
+        taskbarOwner_ = CreateWindowExW(WS_EX_TOOLWINDOW, SERVICE_CLASS_NAME, L"NightLight Service",
+            WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, this);
         if (!taskbarOwner_) return 4;
         window_ = CreateWindowExW(0, CLASS_NAME, L"NightLight",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
@@ -543,6 +552,8 @@ private:
         temperatureHover_=false;
     bool parentAnimating_=false,reflowAnimating_=false,composedTransition_=false;
     bool visibilityChanging_=false;
+    bool replacingFrame_=false;
+    bool frameHasOpened_=false;
     std::uintptr_t visibilityGeneration_=0;
 
     bool pt() const { return model_.preferences().locale == L"pt-PT"; }
@@ -587,9 +598,9 @@ private:
     }
     void startAnimationTimer() {
         if (!animationTimerRunning_ && windowPresented())
-            animationTimerRunning_=SetTimer(window_,TIMER_ANIMATION,10,nullptr)!=0;
+            animationTimerRunning_=SetTimer(taskbarOwner_,TIMER_ANIMATION,10,nullptr)!=0;
     }
-    void stopAnimationTimer() { KillTimer(window_,TIMER_ANIMATION); animationTimerRunning_=false; }
+    void stopAnimationTimer() { KillTimer(taskbarOwner_,TIMER_ANIMATION); animationTimerRunning_=false; }
     void finishReordering() {
         reorderInProgress_=false;
         for(auto& item:reorderPositions_){item.second.x.finish();item.second.y.finish();}
@@ -906,14 +917,9 @@ private:
         watchInteraction(control);
         return control;
     }
-    void initControls() {
-        dpi_ = GetDpiForWindow(window_);
-        updateMotionPreference();
-        ddc_.setWindow(window_);
-        btnRefresh_=createButton(ID_REFRESH,L"");
-        btnScreenOff_=createButton(ID_SCREEN_OFF,L"");
-        btnGamma_ = createButton(ID_GAMMA, L"");
-        ShowWindow(btnGamma_, gammaUnlocked_ ? SW_HIDE : SW_SHOW);
+    void createTooltips() {
+        if(gammaTooltip_ && IsWindow(gammaTooltip_)) DestroyWindow(gammaTooltip_);
+        gammaTooltip_=nullptr;
         gammaTooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
             WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
             CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
@@ -929,6 +935,16 @@ private:
         screenTool.lpszText=const_cast<wchar_t*>(L"Turn off screens");
         SendMessageW(gammaTooltip_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&screenTool));
         SendMessageW(gammaTooltip_,TTM_SETMAXTIPWIDTH,0,px(430));
+    }
+    void initControls() {
+        dpi_ = GetDpiForWindow(window_);
+        updateMotionPreference();
+        ddc_.setWindow(taskbarOwner_);
+        btnRefresh_=createButton(ID_REFRESH,L"");
+        btnScreenOff_=createButton(ID_SCREEN_OFF,L"");
+        btnGamma_ = createButton(ID_GAMMA, L"");
+        ShowWindow(btnGamma_, gammaUnlocked_ ? SW_HIDE : SW_SHOW);
+        createTooltips();
         editName_ = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL,
             0,0,1,1, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RENAME_EDIT)),
@@ -944,13 +960,13 @@ private:
         // Saved per-monitor targets are authoritative at launch. Hardware
         // discovery and writes will run after stable physical enumeration.
         ensureHardwareRows();
-        displayPowerNotification_=RegisterPowerSettingNotification(window_,&displayStateGuid,DEVICE_NOTIFY_WINDOW_HANDLE);
+        displayPowerNotification_=RegisterPowerSettingNotification(taskbarOwner_,&displayStateGuid,DEVICE_NOTIFY_WINDOW_HANDLE);
         taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
         trayReady_ = addTray();
         // Explorer can still be starting when a logon task launches this app.
         // TaskbarCreated is not sufficient if NIM_ADD failed the first time.
-        if (!trayReady_) SetTimer(window_,TIMER_TRAY_RETRY,1000,nullptr);
-        model_.setStatusWindow(window_);
+        if (!trayReady_) SetTimer(taskbarOwner_,TIMER_TRAY_RETRY,1000,nullptr);
+        model_.setStatusWindow(taskbarOwner_);
         model_.collectGammaResults();
         // Permit native DWM transitions while respecting OS animation settings.
         const BOOL forceDisableTransitions=FALSE;
@@ -1508,7 +1524,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.8";
+        const std::wstring version=L"NightLight v1.0.9";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1604,15 +1620,15 @@ private:
     void syncColorWatchdog() {
         const bool needed=displayAwake_ && !displayRecoveryActive_ && model_.needsColorWatchdog();
         if(needed==colorWatchdogRunning_) return;
-        if(needed) colorWatchdogRunning_=SetTimer(window_,TIMER_VERIFY_COLOR,3000,nullptr)!=0;
-        else { KillTimer(window_,TIMER_VERIFY_COLOR); colorWatchdogRunning_=false; }
+        if(needed) colorWatchdogRunning_=SetTimer(taskbarOwner_,TIMER_VERIFY_COLOR,3000,nullptr)!=0;
+        else { KillTimer(taskbarOwner_,TIMER_VERIFY_COLOR); colorWatchdogRunning_=false; }
     }
     void syncHardwarePoll() {
         const bool needed=ddcVisible_ && displayAwake_ && !displayRecoveryActive_ &&
             windowPresented() && !IsIconic(window_);
         if(needed==hardwarePollRunning_) return;
-        if(needed) hardwarePollRunning_=SetTimer(window_,TIMER_READ_DDC,nightlight::kDdcReadbackIntervalMs,nullptr)!=0;
-        else { KillTimer(window_,TIMER_READ_DDC); hardwarePollRunning_=false; }
+        if(needed) hardwarePollRunning_=SetTimer(taskbarOwner_,TIMER_READ_DDC,nightlight::kDdcReadbackIntervalMs,nullptr)!=0;
+        else { KillTimer(taskbarOwner_,TIMER_READ_DDC); hardwarePollRunning_=false; }
     }
     void pollHardware() {
         // Real DDC/CI and WMI readings, not saved profile values, set the
@@ -1645,7 +1661,7 @@ private:
         }
         displayRecoveryActive_=true;
         syncColorWatchdog(); syncHardwarePoll();
-        if (displayAwake_) SetTimer(window_,TIMER_DISPLAYS,750,nullptr);
+        if (displayAwake_) SetTimer(taskbarOwner_,TIMER_DISPLAYS,750,nullptr);
     }
     void syncHardware() {
         for (auto& row:hardwareRows_) {
@@ -1662,7 +1678,7 @@ private:
                 // DDC values. Do not overwrite the saved last good targets.
                 if (displayAwake_ && !displayRecoveryActive_ && value.managed && !captured &&
                     model_.rememberHardwarePercent(row.device,contrast,value.percent))
-                    SetTimer(window_,TIMER_SAVE_DDC,400,nullptr);
+                    SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);
                 InvalidateRect(slider,nullptr,FALSE);
             };
             sync(row.brightness,false,state.brightness); sync(row.contrast,true,state.contrast);
@@ -1971,7 +1987,7 @@ private:
         }
         gammaHelper_ = info.hProcess;
         EnableWindow(btnGamma_, FALSE);
-        SetTimer(window_, TIMER_GAMMA, 250, nullptr);
+        SetTimer(taskbarOwner_, TIMER_GAMMA, 250, nullptr);
     }
 
     void setKelvinFromX(int x, bool save) {
@@ -2016,11 +2032,11 @@ private:
                 const bool sized=model_.rememberWindowSize(
                     current.right-current.left,current.bottom-current.top);
                 if (moved || sized)
-                    SetTimer(window_,TIMER_SAVE_WINDOW,600,nullptr);
+                    SetTimer(taskbarOwner_,TIMER_SAVE_WINDOW,600,nullptr);
             }
         }
         if (flush) {
-            KillTimer(window_,TIMER_SAVE_WINDOW);
+            KillTimer(taskbarOwner_,TIMER_SAVE_WINDOW);
             model_.save();
         }
     }
@@ -2029,8 +2045,8 @@ private:
         // Repeated clicks reset only the initial one-shot delay.
         if (screenOffGuard_.guarding()) return;
         if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
-        KillTimer(window_,TIMER_SCREEN_OFF_ACTION);
-        if (!SetTimer(window_,TIMER_SCREEN_OFF_ACTION,
+        KillTimer(taskbarOwner_,TIMER_SCREEN_OFF_ACTION);
+        if (!SetTimer(taskbarOwner_,TIMER_SCREEN_OFF_ACTION,
                       nightlight::kScreenOffActionDelayMs,nullptr)) {
             dispatchScreenOff();
         }
@@ -2074,36 +2090,96 @@ private:
         if(dragging_) commitDrag();
         stopAnimationTimer();
         pageSurface_.reset();
-        KillTimer(window_,TIMER_READ_DDC); hardwarePollRunning_=false;
+        KillTimer(taskbarOwner_,TIMER_READ_DDC); hardwarePollRunning_=false;
     }
-    void hideVisibleMinimizedIcon() {
-        // The hidden owner permanently excludes this window from the taskbar.
-        // On systems that position an owned minimized window on the desktop,
-        // hide only that iconic representation, without restoring its state.
-        // Modern Windows normally parks minimized windows outside the desktop.
-        if(!IsIconic(window_) || !IsWindowVisible(window_)) return;
+    bool replaceHiddenFrame() {
+        // Recreate only the native top-level HWND, not the application,
+        // monitor model, tray registration, worker threads or child controls.
+        // On this Windows build a newly shown frame gets the stock DWM
+        // entrance effect while reused show/restore windows do not.
+        const HWND old=window_;
+        if(!old || windowPresented() || replacingFrame_) return false;
         RECT rect{};
-        if(!GetWindowRect(window_,&rect) ||
-           MonitorFromRect(&rect,MONITOR_DEFAULTTONULL)!=nullptr)
-            SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
+        if(!GetWindowRect(old,&rect)) return false;
+        if(IsIconic(old) || IsZoomed(old)) {
+            const auto savedPosition=model_.windowPosition();
+            const auto savedSize=model_.windowSize();
+            if(savedPosition && savedSize) {
+                rect={savedPosition->x,savedPosition->y,
+                    savedPosition->x+savedSize->cx,savedPosition->y+savedSize->cy};
+            } else {
+                WINDOWPLACEMENT placement{sizeof(placement)};
+                if(!GetWindowPlacement(old,&placement)) return false;
+                rect=placement.rcNormalPosition;
+                MONITORINFO mi{sizeof(mi)};
+                if(GetMonitorInfoW(MonitorFromWindow(old,MONITOR_DEFAULTTONEAREST),&mi))
+                    OffsetRect(&rect,mi.rcWork.left-mi.rcMonitor.left,
+                        mi.rcWork.top-mi.rcMonitor.top);
+            }
+        }
+        // The owner exists before and after the frame. Never create an
+        // unowned visible window or introduce WS_EX_APPWINDOW, even briefly.
+        replacingFrame_=true;
+        HWND fresh=CreateWindowExW(0,CLASS_NAME,L"NightLight",
+            WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
+            rect.left,rect.top,std::max(1L,rect.right-rect.left),
+            std::max(1L,rect.bottom-rect.top),taskbarOwner_,nullptr,instance_,this);
+        if(!fresh) { replacingFrame_=false; return false; }
+        std::vector<HWND> children;
+        for(HWND child=GetWindow(old,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT))
+            children.push_back(child);
+        std::vector<HWND> moved;
+        for(HWND child:children) {
+            SetParent(child,fresh);
+            if(GetParent(child)!=fresh) {
+                // Leave the existing hidden frame usable if reparenting fails.
+                for(HWND done:moved) SetParent(done,old);
+                DestroyWindow(fresh);
+                replacingFrame_=false;
+                return false;
+            }
+            moved.push_back(child);
+        }
+        // Preserve the actual control HWNDs, their subclass data, sliders,
+        // tabs, and interaction maps. Re-register only frame-owned tooltips.
+        if(gammaTooltip_) { DestroyWindow(gammaTooltip_); gammaTooltip_=nullptr; }
+        window_=fresh;
+        DestroyWindow(old); // staticWindowProc ignores retiring frames
+        replacingFrame_=false;
+        const UINT newDpi=GetDpiForWindow(window_);
+        if(newDpi && newDpi!=dpi_) { dpi_=newDpi; updateFonts(); }
+        createTooltips();
+        updateLanguage();
+        updateTheme();
+        const BOOL forceDisableTransitions=FALSE;
+        DwmSetWindowAttribute(window_,DWMWA_TRANSITIONS_FORCEDISABLED,
+            &forceDisableTransitions,sizeof(forceDisableTransitions));
+        layout();
+        return true;
     }
     void openWindow() {
         if(windowPresented()) { SetForegroundWindow(window_); return; }
         ++visibilityGeneration_;
         visibilityChanging_=true;
-        // A genuine minimized state triggers Windows' native restore path on
-        // every subsequent opening, not merely the initial HWND show effect.
-        // On first launch the untouched hidden window uses ordinary SW_SHOW.
-        ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
-        if(!windowPresented())
-            ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
+        const bool maximize=IsZoomed(window_)!=FALSE;
+        // First opening already has a fresh frame; all later openings get
+        // the same first-show path. Do not wait for a DWM completion event.
+        const bool replaced=frameHasOpened_ && replaceHiddenFrame();
+        const int showMode=maximize?SW_SHOWMAXIMIZED:
+            (IsIconic(window_)?SW_RESTORE:SW_SHOW);
+        ShowWindow(window_,showMode);
+        if(!windowPresented()) ShowWindow(window_,showMode);
         if(windowPresented()) {
+            frameHasOpened_=true;
             SetForegroundWindow(window_);
             repaint();
             if(ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
                 if(!hardwareDiscovered_) refreshHardware();
                 else pollHardware();
             }
+        } else if(replaced) {
+            // The new frame remains valid and can be opened on the next click.
+            frameHasOpened_=false;
         }
         visibilityChanging_=false;
         syncHardwarePoll();
@@ -2113,13 +2189,11 @@ private:
         ++visibilityGeneration_;
         visibilityChanging_=true;
         if(gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
+        finishInlineRename(true);
         noteWindowPosition();
-        // Keep the existing hidden owner and never set WS_EX_APPWINDOW.
-        // Do not immediately SW_HIDE the minimized window: that discards
-        // the native compositor transition on some Windows builds.
-        ShowWindow(window_,SW_MINIMIZE);
-        if(IsIconic(window_)) hideVisibleMinimizedIcon();
-        else if(IsWindowVisible(window_))
+        // Native hide, not iconification; no taskbar or desktop icon.
+        ShowWindow(window_,SW_HIDE);
+        if(IsWindowVisible(window_))
             SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         visibilityChanging_=false;
         syncHardwarePoll();
@@ -2132,7 +2206,7 @@ private:
         if (!trayReady_ || !window_) return false;
         NOTIFYICONIDENTIFIER icon{};
         icon.cbSize=sizeof(icon);
-        icon.hWnd=window_;
+        icon.hWnd=taskbarOwner_;
         icon.uID=TRAY_ID;
         RECT bounds{};
         if (FAILED(Shell_NotifyIconGetRect(&icon,&bounds))) return false;
@@ -2140,8 +2214,8 @@ private:
         return GetCursorPos(&cursor) && PtInRect(&bounds,cursor)!=FALSE;
     }
     void toggleTrayWindow() {
-        // Logical minimized/hidden state changes immediately, independently
-        // of any DWM animation still being composed.
+        // Visibility changes immediately; the next opening gets a new
+        // compositor frame without any animation-completion gate.
         if (windowPresented()) {
             hideWindowToTray();
         } else {
@@ -2185,7 +2259,7 @@ private:
         if(trayReady_ && !preparingAdd) {
             NOTIFYICONDATAW update{};
             update.cbSize=sizeof(update);
-            update.hWnd=window_; update.uID=TRAY_ID;
+            update.hWnd=taskbarOwner_; update.uID=TRAY_ID;
             update.uFlags=NIF_ICON; update.hIcon=next;
             if(!Shell_NotifyIconW(NIM_MODIFY,&update)) { DestroyIcon(next); return; }
             notify_.hIcon=next;
@@ -2197,7 +2271,7 @@ private:
     bool addTray() {
         ZeroMemory(&notify_,sizeof(notify_));
         notify_.cbSize=sizeof(notify_);
-        notify_.hWnd=window_;
+        notify_.hWnd=taskbarOwner_;
         notify_.uID=TRAY_ID;
         notify_.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_SHOWTIP;
         notify_.uCallbackMessage=WM_TRAY_ICON;
@@ -2308,14 +2382,14 @@ private:
         std::vector<HBITMAP> icons;
         HMENU menu=buildTrayMenu(icons,startupEnabled,startupStatus);
         POINT point{}; GetCursorPos(&point);
-        SetForegroundWindow(window_);
         trayMenuOpen_=true;
+        SetForegroundWindow(taskbarOwner_);
         const UINT cmd=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON|
-            TPM_NONOTIFY,point.x,point.y,0,window_,nullptr);
+            TPM_NONOTIFY,point.x,point.y,0,taskbarOwner_,nullptr);
         trayMenuOpen_=false;
         DestroyMenu(menu);
         for (HBITMAP bitmap:icons) DeleteObject(bitmap);
-        PostMessageW(window_,WM_NULL,0,0);
+        PostMessageW(taskbarOwner_,WM_NULL,0,0);
         if (cmd==ID_TRAY_EXIT) {
             shuttingDown_=true;
             DestroyWindow(window_);
@@ -2388,8 +2462,8 @@ private:
     LRESULT dispatch(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam) {
         if (taskbarCreated_ && msg==taskbarCreated_) {
             trayReady_=false;
-            if (addTray()) KillTimer(hwnd,TIMER_TRAY_RETRY);
-            else SetTimer(hwnd,TIMER_TRAY_RETRY,1000,nullptr);
+            if (addTray()) KillTimer(taskbarOwner_,TIMER_TRAY_RETRY);
+            else SetTimer(taskbarOwner_,TIMER_TRAY_RETRY,1000,nullptr);
             return 0;
         }
         switch (msg) {
@@ -2398,8 +2472,8 @@ private:
         case WM_SYSCOMMAND:
             if ((wParam & 0xFFF0)==SC_MINIMIZE && trayReady_ && !shuttingDown_ &&
                 !visibilityChanging_) {
-                // Defer until the current system command returns, so the
-                // native minimize path cannot recursively invoke itself.
+                // Defer until the system command returns. Closing to tray
+                // hides the frame rather than exposing an iconic window.
                 PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,TRUE,static_cast<LPARAM>(visibilityGeneration_));
                 return 0;
             }
@@ -2417,9 +2491,9 @@ private:
                 static_cast<std::uintptr_t>(lParam)==visibilityGeneration_) {
                 if(wParam!=FALSE && windowPresented()) hideWindowToTray();
                 else if(IsIconic(hwnd)) {
-                    // Do not hide a window that has since been restored.
+                    // An external minimize must not leave a desktop icon.
                     visibilityChanging_=true;
-                    hideVisibleMinimizedIcon();
+                    SetWindowPos(hwnd,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
                     visibilityChanging_=false;
                 }
             }
@@ -2585,7 +2659,7 @@ private:
                 const bool contrast=slider==row->contrast;
                 const int percent=(static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100;
                 if (displayAwake_ && !displayRecoveryActive_ && ddcVisible_ && ddc_.set(row->device,contrast?nightlight::DdcFeature::Contrast:nightlight::DdcFeature::Brightness,percent)) {
-                    if (model_.rememberHardwarePercent(row->device,contrast,percent)) SetTimer(hwnd,TIMER_SAVE_DDC,400,nullptr);
+                    if (model_.rememberHardwarePercent(row->device,contrast,percent)) SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);
                 }
                 // Repaint the whole channel once; native partial thumb redraws
                 // otherwise leave stale pieces of the custom filled track.
@@ -2689,7 +2763,7 @@ private:
                             model_.beginDisplayRecovery();
                             restoreDdcAfterWake_=true;
                         }
-                        KillTimer(hwnd,TIMER_DISPLAYS);
+                        KillTimer(taskbarOwner_,TIMER_DISPLAYS);
                         displayRecoveryActive_=false;
                         syncColorWatchdog(); syncHardwarePoll();
                     } else {
@@ -2698,7 +2772,7 @@ private:
                         // The screen-off input guard may still be preventing
                         // an accidental immediate wake. Defer recovery.
                         if (screenOffGuard_.guarding())
-                            SetTimer(hwnd,TIMER_DISPLAYS,3500,nullptr);
+                            SetTimer(taskbarOwner_,TIMER_DISPLAYS,3500,nullptr);
                     }
                 }
             } else if (wParam==PBT_APMRESUMEAUTOMATIC || wParam==PBT_APMRESUMESUSPEND) {
@@ -2711,17 +2785,17 @@ private:
                 displayRecoveryActive_=false;
                 ddc_.invalidateTopology();
                 model_.beginDisplayRecovery();
-                KillTimer(hwnd,TIMER_DISPLAYS);
+                KillTimer(taskbarOwner_,TIMER_DISPLAYS);
                 syncColorWatchdog(); syncHardwarePoll();
             }
             return TRUE;
         case WM_TIMER:
             if (wParam==TIMER_TRAY_RETRY) {
-                if (trayReady_ || addTray()) KillTimer(hwnd,TIMER_TRAY_RETRY);
+                if (trayReady_ || addTray()) KillTimer(taskbarOwner_,TIMER_TRAY_RETRY);
                 return 0;
             }
             if (wParam==TIMER_SCREEN_OFF_ACTION) {
-                KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
+                KillTimer(taskbarOwner_,TIMER_SCREEN_OFF_ACTION);
                 dispatchScreenOff();
                 return 0;
             }
@@ -2736,12 +2810,12 @@ private:
                 pollHardware();
                 return 0;
             }
-            if (wParam==TIMER_SAVE_DDC) { KillTimer(hwnd,TIMER_SAVE_DDC); model_.save(); return 0; }
-            if (wParam==TIMER_SAVE_WINDOW) { KillTimer(hwnd,TIMER_SAVE_WINDOW); model_.save(); return 0; }
+            if (wParam==TIMER_SAVE_DDC) { KillTimer(taskbarOwner_,TIMER_SAVE_DDC); model_.save(); return 0; }
+            if (wParam==TIMER_SAVE_WINDOW) { KillTimer(taskbarOwner_,TIMER_SAVE_WINDOW); model_.save(); return 0; }
             if (wParam==TIMER_GAMMA && gammaHelper_ && WaitForSingleObject(gammaHelper_,0)==WAIT_OBJECT_0) {
                 DWORD code=1; GetExitCodeProcess(gammaHelper_, &code);
                 CloseHandle(gammaHelper_); gammaHelper_=nullptr;
-                KillTimer(hwnd,TIMER_GAMMA);
+                KillTimer(taskbarOwner_,TIMER_GAMMA);
                 EnableWindow(btnGamma_,TRUE);
                 const bool ok=code==0 && nightlight::gammaRangeUnlocked();
                 syncGammaButton();
@@ -2752,10 +2826,10 @@ private:
                 model_.applyAll();
             }
             if (wParam==TIMER_DISPLAYS) {
-                KillTimer(hwnd,TIMER_DISPLAYS);
+                KillTimer(taskbarOwner_,TIMER_DISPLAYS);
                 if (!displayAwake_ || !displayRecoveryActive_) return 0;
                 if (screenOffGuard_.guarding()) {
-                    SetTimer(hwnd,TIMER_DISPLAYS,1000,nullptr);
+                    SetTimer(taskbarOwner_,TIMER_DISPLAYS,1000,nullptr);
                     return 0;
                 }
                 // Count successful topology samples separately from restore
@@ -2770,7 +2844,7 @@ private:
                     recoveryPass_=0;
                     recoverySettleChecks_=0;
                     recoveryVerificationIssued_=false;
-                    SetTimer(hwnd,TIMER_DISPLAYS,1000,nullptr);
+                    SetTimer(taskbarOwner_,TIMER_DISPLAYS,1000,nullptr);
                     return 0;
                 }
                 if(changed) {
@@ -2812,7 +2886,7 @@ private:
                     syncHardware();
                     updateTrayTooltip();
                     repaint();
-                    SetTimer(hwnd,TIMER_DISPLAYS,delay,nullptr);
+                    SetTimer(taskbarOwner_,TIMER_DISPLAYS,delay,nullptr);
                     return 0;
                 }
                 // After the last delayed write, explicitly read the monitors
@@ -2827,12 +2901,12 @@ private:
                     }
                     if(writePending && recoverySettleChecks_<3) {
                         ++recoverySettleChecks_;
-                        SetTimer(hwnd,TIMER_DISPLAYS,6000,nullptr);
+                        SetTimer(taskbarOwner_,TIMER_DISPLAYS,6000,nullptr);
                         return 0;
                     }
                     for(const auto& mon:model_.monitors()) ddc_.refresh(mon.device);
                     recoveryVerificationIssued_=true;
-                    SetTimer(hwnd,TIMER_DISPLAYS,2000,nullptr);
+                    SetTimer(taskbarOwner_,TIMER_DISPLAYS,2000,nullptr);
                     return 0;
                 }
                 // Wait for the actual workers; retry a bounded number of
@@ -2857,7 +2931,7 @@ private:
                     model_.retryFailedColors();
                     // A retry needs another verification after its grace period.
                     if(failed) recoveryVerificationIssued_=false;
-                    SetTimer(hwnd,TIMER_DISPLAYS,6000,nullptr);
+                    SetTimer(taskbarOwner_,TIMER_DISPLAYS,6000,nullptr);
                     return 0;
                 }
                 ddc_.finishRestore();
@@ -2880,18 +2954,18 @@ private:
             }
             return 0;
         case WM_DESTROY:
-            KillTimer(hwnd,TIMER_TRAY_RETRY);
-            KillTimer(hwnd,TIMER_SCREEN_OFF_ACTION);
+            KillTimer(taskbarOwner_,TIMER_TRAY_RETRY);
+            KillTimer(taskbarOwner_,TIMER_SCREEN_OFF_ACTION);
             screenOffGuard_.stop();
             noteWindowPosition(true);
             shuttingDown_=true;
             endHardwareDrag();finishScreenDrag();
              stopAnimationTimer();
-            KillTimer(hwnd,TIMER_VERIFY_COLOR); KillTimer(hwnd,TIMER_READ_DDC); KillTimer(hwnd,TIMER_DISPLAYS);
+            KillTimer(taskbarOwner_,TIMER_VERIFY_COLOR); KillTimer(taskbarOwner_,TIMER_READ_DDC); KillTimer(taskbarOwner_,TIMER_DISPLAYS);
             if (displayPowerNotification_) { UnregisterPowerSettingNotification(displayPowerNotification_); displayPowerNotification_=nullptr; }
-            KillTimer(hwnd,TIMER_GAMMA);
-            KillTimer(hwnd,TIMER_SAVE_DDC);
-            KillTimer(hwnd,TIMER_SAVE_WINDOW);
+            KillTimer(taskbarOwner_,TIMER_GAMMA);
+            KillTimer(taskbarOwner_,TIMER_SAVE_DDC);
+            KillTimer(taskbarOwner_,TIMER_SAVE_WINDOW);
             commitDrag();
                 model_.save();
             model_.restoreOriginals();
@@ -2908,11 +2982,33 @@ private:
         if (msg==WM_NCCREATE) {
             const auto* create=reinterpret_cast<const CREATESTRUCTW*>(lParam);
             app=static_cast<NativeApp*>(create->lpCreateParams);
-            app->window_=hwnd;
+            if(!app->replacingFrame_) app->window_=hwnd;
             SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));
         }
-        return app?app->dispatch(hwnd,msg,wParam,lParam):
-            DefWindowProcW(hwnd,msg,wParam,lParam);
+        // The fresh frame's creation and retired frame's destruction must
+        // never run the main app's WM_CREATE/WM_DESTROY lifecycle handlers.
+        if(!app || hwnd!=app->window_)
+            return DefWindowProcW(hwnd,msg,wParam,lParam);
+        if(app->taskbarCreated_ && msg==app->taskbarCreated_) return 0;
+        return app->dispatch(hwnd,msg,wParam,lParam);
+    }
+    static LRESULT CALLBACK serviceWindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
+        auto* app=reinterpret_cast<NativeApp*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+        if(msg==WM_NCCREATE) {
+            const auto* create=reinterpret_cast<const CREATESTRUCTW*>(lp);
+            app=static_cast<NativeApp*>(create->lpCreateParams);
+            SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));
+        }
+        // All callbacks remain addressed to this stable HWND; the current
+        // frame only supplies UI context. Broadcast display/resume messages
+        // are handled by the actual frame to avoid duplicate processing.
+        if(app && app->window_ && IsWindow(app->window_) && !app->shuttingDown_ &&
+           (msg==WM_TIMER || msg==WM_TRAY_ICON || msg==WM_GAMMA_COMPLETE ||
+            msg==nightlight::WM_DDC_COMPLETE ||
+            (app->taskbarCreated_ && msg==app->taskbarCreated_) ||
+            (msg==WM_POWERBROADCAST && wp==PBT_POWERSETTINGCHANGE)))
+            return app->dispatch(app->window_,msg,wp,lp);
+        return DefWindowProcW(hwnd,msg,wp,lp);
     }
 };
 } // namespace
