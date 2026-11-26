@@ -786,6 +786,13 @@ int main() {
             check(model.preferences().theme==L"light","Light theme");
             check(!model.windowPosition().has_value(),"Legacy config without a window position keeps default placement");
             check(!model.windowSize().has_value(),"Legacy config without dimensions keeps automatic first-run sizing");
+            check(!model.inactiveWindowGeometry(),"Legacy config has no inactivity window geometry");
+            const RECT dimRect{-1700,180,-1100,720};
+            check(model.rememberInactiveWindowGeometry(dimRect),"Remember independent inactivity window geometry on left monitor");
+            check(!model.rememberInactiveWindowGeometry(dimRect),"Identical inactivity window geometry is not dirty");
+            check(!model.rememberInactiveWindowGeometry(RECT{0,0,100,100}),"Reject unusable inactivity window size");
+            check(!model.rememberInactiveWindowGeometry(RECT{0,0,20000,20000}),"Reject excessive inactivity window size");
+            check(!model.rememberInactiveWindowGeometry(RECT{-2000000,0,-1999400,540}),"Reject invalid inactivity window coordinates");
             check(model.rememberWindowPosition(-1900,235),"Remember position on monitor left of primary");
             check(model.rememberWindowSize(870,610),"Remember user's outer window width and height");
             check(!model.rememberWindowSize(870,610),"Identical window size should not trigger a config update");
@@ -827,6 +834,10 @@ int main() {
                   model.preferences().dimMinutes==7 && !model.preferences().dimAll &&
                   model.preferences().dimDisplays.count(L"PHYSICAL-A")==1,
                   "Inactivity settings and physical monitor selection round-trip");
+            const auto dimRect=model.inactiveWindowGeometry();
+            check(dimRect && dimRect->left==-1700 && dimRect->top==180 &&
+                  dimRect->right==-1100 && dimRect->bottom==720,
+                  "Restore independent inactivity geometry through a restart");
             const auto restoredWindow=model.windowPosition();
             check(restoredWindow && restoredWindow->x==-1900 && restoredWindow->y==235,
                 "Persist and restore screen position across application starts");

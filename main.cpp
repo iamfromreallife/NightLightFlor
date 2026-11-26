@@ -1856,7 +1856,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.17";
+        const std::wstring version=L"NightLight v1.0.18";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1978,8 +1978,9 @@ private:
         if (!ddcVisible_ || !displayAwake_ || displayRecoveryActive_ ||
             screenOffGuard_.guarding() ||
             !windowPresented() || IsIconic(window_)) return;
+        const HWND captured=GetCapture();
         for (const auto& row:hardwareRows_) {
-            if (GetCapture()==row.brightness || GetCapture()==row.contrast) continue;
+            if (captured==row.brightness || captured==row.contrast) continue;
             ddc_.poll(row.device);
         }
     }
@@ -2153,7 +2154,8 @@ private:
             const bool freshInput=inputKnown && input.dwTime!=lastDimInput_;
             if(moved) {
                 noteDimActivity(hoverDevice,now);
-                noteDimActivity(displayDevice(MonitorFromPoint(lastDimCursor_,MONITOR_DEFAULTTONULL)),now);
+                const auto previousDevice=displayDevice(MonitorFromPoint(lastDimCursor_,MONITOR_DEFAULTTONULL));
+                if(previousDevice!=hoverDevice) noteDimActivity(previousDevice,now);
             } else if(freshInput) {
                 const bool keyboard=keyboardActivityRegistered_ && input.dwTime==lastDimKeyboardInput_;
                 if(!keyboard) {
@@ -2165,13 +2167,10 @@ private:
         if(inputKnown) lastDimInput_=input.dwTime;
         lastDimCursor_=cursor;haveDimInput_=true;
 
+        const bool probeForeground=foreground && std::any_of(dimDisplays_.begin(),dimDisplays_.end(),
+            [&](const DimDisplay& entry){return entry.monitor.device==foregroundDevice && pref.dims(entry.monitor);});
         DWORD foregroundPid=0;
-        if(foreground) GetWindowThreadProcessId(foreground,&foregroundPid);
-        bool probeForeground=false;
-        for(const auto& entry:dimDisplays_) {
-            const auto& mon=entry.monitor;
-            if(pref.dims(mon) && mon.device==foregroundDevice) probeForeground=true;
-        }
+        if(probeForeground) GetWindowThreadProcessId(foreground,&foregroundPid);
         bool foregroundPlaying=false;
         if(probeForeground && foreground && foregroundPid) {
             if(lastMediaWindow_!=foreground || lastMediaPid_!=foregroundPid ||
@@ -2260,6 +2259,8 @@ private:
         };
         dimSettings_=std::make_unique<InactiveSettingsWindow>(instance_,taskbarOwner_,
             model_.preferences(),std::move(choices),pt(),test,closed,
+            model_.inactiveWindowGeometry(),
+            [this](const RECT& r){if(model_.rememberInactiveWindowGeometry(r)) model_.save();},
             [this]{return palette();},
             [this]{return nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);},
             [this]{return highContrast_;});

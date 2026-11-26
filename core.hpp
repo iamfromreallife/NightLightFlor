@@ -289,6 +289,8 @@ public:
     bool rememberWindowSize(int width, int height);
     std::optional<POINT> windowPosition() const { return windowPosition_; }
     std::optional<SIZE> windowSize() const { return windowSize_; }
+    bool rememberInactiveWindowGeometry(const RECT& rect);
+    std::optional<RECT> inactiveWindowGeometry() const { return inactiveWindowGeometry_; }
     void restoreOriginals();
     void migrateAutorunEntry() const;
 
@@ -335,6 +337,7 @@ private:
     Preferences preferences_;
     std::optional<POINT> windowPosition_;
     std::optional<SIZE> windowSize_;
+    std::optional<RECT> inactiveWindowGeometry_;
     std::vector<Monitor> monitors_;
     std::vector<Monitor> wakeCandidate_;
     unsigned wakeConsistentSamples_=0;

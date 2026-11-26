@@ -5,6 +5,7 @@
 class InactiveSettingsWindow {
     using Test=std::function<bool(const Preferences*)>;
     using Closed=std::function<void(const std::optional<Preferences>&)>;
+    using SaveGeometry=std::function<void(const RECT&)>;
     enum : int { Enable=101,Amount=102,Percent=103,TestButton=104,All=105,
         Displays=106,Preset=110,Custom=116,Minutes=117 };
     static constexpr UINT_PTR TestTimer=1;
@@ -18,11 +19,25 @@ class InactiveSettingsWindow {
     HFONT font_=nullptr,bold_=nullptr;
     std::map<int,HWND> controls_;
     std::set<HWND> hovering_;
-    int chosenTime_=Custom;
+    int chosenTime_=Custom,shownAmount_=-1;
     bool sliderDragging_=false;
     RECT amountCard_{},timeCard_{},displaysCard_{},minutesFrame_{};
     Test test_;
     Closed closed_;
+    std::optional<RECT> savedGeometry_,normalGeometry_;
+    SaveGeometry saveGeometry_;
+    void recordNormalGeometry() {
+        if(!window_ || !ready_ || !IsWindowVisible(window_) || IsIconic(window_) || IsZoomed(window_)) return;
+        RECT r{};
+        if(GetWindowRect(window_,&r) && r.right>r.left && r.bottom>r.top) normalGeometry_=r;
+    }
+    void persistGeometry() {
+        recordNormalGeometry();
+        if(normalGeometry_ && (!savedGeometry_ || !EqualRect(&*normalGeometry_,&*savedGeometry_))) {
+            saveGeometry_(*normalGeometry_);
+            savedGeometry_=normalGeometry_;
+        }
+    }
     std::function<Palette()> palette_;
     std::function<bool()> dark_,highContrast_;
     nightlight::PaintSurface surface_,sliderSurface_;
@@ -78,12 +93,13 @@ class InactiveSettingsWindow {
         }
         return channel;
     }
-    void moveSlider(HWND hwnd,int x) {
+    void moveSlider(HWND hwnd,int x,bool forcePaint=false) {
         const RECT channel=sliderChannel(hwnd);
         const int position=1+MulDiv(std::clamp(x,static_cast<int>(channel.left),
             static_cast<int>(channel.right))-static_cast<int>(channel.left),98,
             static_cast<int>(channel.right-channel.left));
-        if(SendMessageW(hwnd,TBM_GETPOS,0,0)!=position) {
+        const bool changed=SendMessageW(hwnd,TBM_GETPOS,0,0)!=position;
+        if(changed) {
             // Keep the native value/keyboard semantics, but never let the
             // common control paint an intermediate native thumb.
             SendMessageW(hwnd,TBM_SETPOS,FALSE,position);
@@ -91,7 +107,8 @@ class InactiveSettingsWindow {
         }
         // The entire old and new circular thumb area is repainted in one
         // buffered operation before the next pointer message.
-        RedrawWindow(hwnd,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOCHILDREN);
+        if(changed || forcePaint)
+            RedrawWindow(hwnd,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOCHILDREN);
     }
     static LRESULT CALLBACK sliderProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR data) {
         auto* self=reinterpret_cast<InactiveSettingsWindow*>(data);
@@ -132,7 +149,7 @@ class InactiveSettingsWindow {
             if(IsWindowEnabled(hwnd)) {
                 SetFocus(hwnd);SetCapture(hwnd);
                 self->sliderDragging_=GetCapture()==hwnd;
-                self->moveSlider(hwnd,GET_X_LPARAM(lp));
+                self->moveSlider(hwnd,GET_X_LPARAM(lp),true);
             }
             return 0;
         case WM_MOUSEMOVE:
@@ -203,7 +220,10 @@ class InactiveSettingsWindow {
     }
     void updateAmount() {
         draft_.dimAmount=static_cast<int>(SendMessageW(control(Amount),TBM_GETPOS,0,0));
-        SetWindowTextW(control(Percent),(std::to_wstring(draft_.dimAmount)+L" %").c_str());
+        if(shownAmount_!=draft_.dimAmount) {
+            shownAmount_=draft_.dimAmount;
+            SetWindowTextW(control(Percent),(std::to_wstring(shownAmount_)+L" %").c_str());
+        }
     }
     void setTime(int id) {
         chosenTime_=id;
@@ -447,6 +467,14 @@ class InactiveSettingsWindow {
             if(wp==SIZE_MINIMIZED) {cancelTest();surface_.reset();sliderSurface_.reset();}
             else layout();
             return 0;
+        case WM_WINDOWPOSCHANGED: {
+            const auto* position=reinterpret_cast<const WINDOWPOS*>(lp);
+            if(position && (!(position->flags&SWP_NOMOVE) || !(position->flags&SWP_NOSIZE)))
+                recordNormalGeometry();
+            // Default processing still generates WM_MOVE and WM_SIZE.
+            break;
+        }
+        case WM_EXITSIZEMOVE:persistGeometry();return 0;
         case WM_GETMINMAXINFO: {
             RECT minimum{0,0,px(428),px(444)};
             AdjustWindowRectExForDpi(&minimum,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
@@ -508,7 +536,7 @@ class InactiveSettingsWindow {
         case WM_THEMECHANGED:case WM_SETTINGCHANGE:refreshTheme();break;
         case WM_CLOSE:close();return 0;
         case WM_DESTROY:
-            cancelTest();ready_=false;surface_.reset();sliderSurface_.reset();return 0;
+            persistGeometry();cancelTest();ready_=false;surface_.reset();sliderSurface_.reset();return 0;
         case WM_NCDESTROY: {
             const HWND old=window_;
             const LRESULT result=DefWindowProcW(old,msg,wp,lp);
@@ -531,9 +559,11 @@ class InactiveSettingsWindow {
 public:
     InactiveSettingsWindow(HINSTANCE instance,HWND owner,const Preferences& current,
         std::vector<Monitor> monitors,bool pt,Test test,Closed closed,
+        std::optional<RECT> geometry,SaveGeometry saveGeometry,
         std::function<Palette()> palette,std::function<bool()> dark,std::function<bool()> hc)
         :instance_(instance),owner_(owner),draft_(current),monitors_(std::move(monitors)),
         portuguese_(pt),test_(std::move(test)),closed_(std::move(closed)),
+        savedGeometry_(geometry),saveGeometry_(std::move(saveGeometry)),
         palette_(std::move(palette)),dark_(std::move(dark)),highContrast_(std::move(hc)) {}
     ~InactiveSettingsWindow() {close();if(font_) DeleteObject(font_);if(bold_) DeleteObject(bold_);}
     HWND hwnd() const {return window_;}
@@ -541,8 +571,10 @@ public:
     void activate() {if(window_) {if(IsIconic(window_)) ShowWindow(window_,SW_RESTORE);SetForegroundWindow(window_);}}
     void cancelTest() {
         if(window_) KillTimer(window_,TestTimer);
-        if(testing_) {testing_=false;test_(nullptr);}
-        if(HWND button=control(TestButton)) SetWindowTextW(button,tr(L"Test",L"Testar"));
+        if(testing_) {
+            testing_=false;test_(nullptr);
+            if(HWND button=control(TestButton)) SetWindowTextW(button,tr(L"Test",L"Testar"));
+        }
     }
     void refreshTheme() {
         if(!window_) return;
@@ -563,22 +595,34 @@ public:
         if(!RegisterClassExW(&wc) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) return false;
         POINT cursor{};GetCursorPos(&cursor);
         MONITORINFO mi{sizeof(mi)};
-        GetMonitorInfoW(MonitorFromPoint(cursor,MONITOR_DEFAULTTOPRIMARY),&mi);
+        const HMONITOR target=savedGeometry_?MonitorFromRect(&*savedGeometry_,MONITOR_DEFAULTTONEAREST):
+            MonitorFromPoint(cursor,MONITOR_DEFAULTTOPRIMARY);
+        if(!GetMonitorInfoW(target,&mi)) {
+            if(!SystemParametersInfoW(SPI_GETWORKAREA,0,&mi.rcWork,0)) return false;
+        }
         // Get initial DPI from the target monitor through a short-lived
         // ordinary window; the native frame adjusts on WM_DPICHANGED.
         dpi_=GetDpiForSystem();if(!dpi_)dpi_=96;
         RECT r{0,0,px(490),px(std::clamp(420+static_cast<int>(monitors_.size())*30,474,620))};
         AdjustWindowRectExForDpi(&r,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
-        const int w=std::min(static_cast<int>(r.right-r.left),static_cast<int>(mi.rcWork.right-mi.rcWork.left));
-        const int h=std::min(static_cast<int>(r.bottom-r.top),static_cast<int>(mi.rcWork.bottom-mi.rcWork.top));
-        const int x=mi.rcWork.left+(mi.rcWork.right-mi.rcWork.left-w)/2;
-        const int y=mi.rcWork.top+(mi.rcWork.bottom-mi.rcWork.top-h)/2;
+        RECT minimum{0,0,px(428),px(444)};
+        AdjustWindowRectExForDpi(&minimum,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
+        const int workW=static_cast<int>(mi.rcWork.right-mi.rcWork.left);
+        const int workH=static_cast<int>(mi.rcWork.bottom-mi.rcWork.top);
+        if(workW<=0 || workH<=0) return false;
+        const int wantedW=savedGeometry_?static_cast<int>(savedGeometry_->right-savedGeometry_->left):static_cast<int>(r.right-r.left);
+        const int wantedH=savedGeometry_?static_cast<int>(savedGeometry_->bottom-savedGeometry_->top):static_cast<int>(r.bottom-r.top);
+        const int w=std::min(workW,std::max(wantedW,static_cast<int>(minimum.right-minimum.left)));
+        const int h=std::min(workH,std::max(wantedH,static_cast<int>(minimum.bottom-minimum.top)));
+        const int x=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->left),static_cast<int>(mi.rcWork.left),static_cast<int>(mi.rcWork.right)-w):mi.rcWork.left+(workW-w)/2;
+        const int y=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->top),static_cast<int>(mi.rcWork.top),static_cast<int>(mi.rcWork.bottom)-h):mi.rcWork.top+(workH-h)/2;
         HWND created=CreateWindowExW(0,ClassName,tr(L"Dim when inactive",L"Reduzir brilho quando inativo"),
             WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,x,y,w,h,owner_,nullptr,instance_,this);
         if(!created) return false;
         const BOOL disable=FALSE;
         DwmSetWindowAttribute(created,DWMWA_TRANSITIONS_FORCEDISABLED,&disable,sizeof(disable));
         ShowWindow(created,SW_SHOW);
+        recordNormalGeometry();
         SetForegroundWindow(created);
         return true;
     }

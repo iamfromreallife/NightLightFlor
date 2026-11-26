@@ -492,6 +492,7 @@ Model::~Model() { save(); restoreOriginals(); }
 bool Model::load() {
     lastError_.clear();
     loaded_=false; savedStampValid_=false; windowPosition_.reset(); windowSize_.reset();
+    inactiveWindowGeometry_.reset();
     std::error_code ec;
     const bool exists=fs::exists(configPath_,ec);
     if (ec) { lastError_=L"Cannot access config.json; your file has not been modified."; return false; }
@@ -550,6 +551,16 @@ bool Model::load() {
         if (width>=200 && width<=10000 && height>=260 && height<=10000)
             windowSize_=SIZE{width,height};
     }
+    const auto& inactivePosition=general.get("inactive_window_position");
+    if(inactivePosition.isObject()) {
+        const int x=inactivePosition.get("x").integer(INT_MIN);
+        const int y=inactivePosition.get("y").integer(INT_MIN);
+        const int width=inactivePosition.get("width").integer(-1);
+        const int height=inactivePosition.get("height").integer(-1);
+        if(x>=-1000000 && x<=1000000 && y>=-1000000 && y<=1000000 &&
+            width>=200 && width<=10000 && height>=260 && height<=10000)
+            inactiveWindowGeometry_=RECT{x,y,x+width,y+height};
+    }
     loaded_ = true;
     // Read legacy profiles once, then retain only settings this app implements.
     if (!root_.get("screen").get("monitor_profiles").isObject())
@@ -595,6 +606,16 @@ bool Model::rememberWindowSize(int width,int height) {
     windowSize_=SIZE{width,height};
     return true;
 }
+bool Model::rememberInactiveWindowGeometry(const RECT& rect) {
+    const auto width=static_cast<std::int64_t>(rect.right)-rect.left;
+    const auto height=static_cast<std::int64_t>(rect.bottom)-rect.top;
+    if(!loaded_ || rect.left < -1000000 || rect.left > 1000000 ||
+       rect.top < -1000000 || rect.top > 1000000 ||
+       width<200 || width>10000 || height<260 || height>10000) return false;
+    if(inactiveWindowGeometry_ && EqualRect(&*inactiveWindowGeometry_,&rect)) return false;
+    inactiveWindowGeometry_=rect;
+    return true;
+}
 bool Model::save() {
     if (!loaded_) return false;
     root_["general"]["language"] = toUtf8(preferences_.locale);
@@ -630,6 +651,13 @@ bool Model::save() {
     if (windowSize_) {
         clean["general"]["window_position"]["width"]=windowSize_->cx;
         clean["general"]["window_position"]["height"]=windowSize_->cy;
+    }
+    if(inactiveWindowGeometry_) {
+        const auto& r=*inactiveWindowGeometry_;
+        auto& pos=clean["general"]["inactive_window_position"];
+        pos["x"]=static_cast<int>(r.left);pos["y"]=static_cast<int>(r.top);
+        pos["width"]=static_cast<int>(r.right-r.left);
+        pos["height"]=static_cast<int>(r.bottom-r.top);
     }
     auto profiles=portable::Json::object();
     if(auto values=std::get_if<portable::Json::Object>(&root_.get("screen").get("monitor_profiles").value))
