@@ -1,5 +1,9 @@
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -753,7 +757,7 @@ public:
         // available and the initial NIM_ADD can fail. Retrying tray registration
         // asynchronously (below) is safer than briefly showing the window.
         SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
-        UpdateWindow(window_);
+        ::UpdateWindow(window_);
         noteWindowPosition();
         initializeUpdates();
         MSG msg{};
@@ -784,7 +788,7 @@ private:
     ULONGLONG lastDimTopology_=0;
     bool dimTopologyDirty_=true,dimDialogOpen_=false;
     std::unique_ptr<InactiveSettingsWindow> dimSettings_;
-    std::unique_ptr<UpdateWindow> updateWindow_;
+    std::unique_ptr<ReleaseUpdateDialog> updateWindow_;
     std::shared_ptr<nightlight::UpdateRequest> updateRequest_;
     bool updateManual_=false,updatePromptPending_=false,trayIconBadged_=false;
     DWORD lastDimInput_=0,lastDimKeyboardInput_=0;
@@ -2904,7 +2908,7 @@ private:
         updateWindow_.reset();
         const auto& p=model_.preferences();
         const auto tag=p.availableUpdate;
-        updateWindow_=std::make_unique<UpdateWindow>(instance_,taskbarOwner_,pt(),
+        updateWindow_=std::make_unique<ReleaseUpdateDialog>(instance_,taskbarOwner_,pt(),
             nightlight::fromUtf8(tag),nightlight::fromUtf8(p.updateNotes),
             [this]{return palette();},
             [this]{return nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);},

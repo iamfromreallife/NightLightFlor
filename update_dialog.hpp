@@ -1,6 +1,6 @@
 #pragma once
 // Included after the same shared palette and Win32 painters as the dim window.
-class UpdateWindow {
+class ReleaseUpdateDialog {
     HINSTANCE instance_;
     HWND owner_,window_=nullptr,notes_=nullptr;
     std::array<HWND,3> buttons_{};
@@ -125,13 +125,13 @@ class UpdateWindow {
         return DefWindowProcW(window_,msg,wp,lp);
     }
     static LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp) {
-        auto* self=reinterpret_cast<UpdateWindow*>(GetWindowLongPtrW(h,GWLP_USERDATA));
-        if(msg==WM_NCCREATE){self=static_cast<UpdateWindow*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        auto* self=reinterpret_cast<ReleaseUpdateDialog*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        if(msg==WM_NCCREATE){self=static_cast<ReleaseUpdateDialog*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
             self->window_=h;SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
         return self?self->dispatch(msg,wp,lp):DefWindowProcW(h,msg,wp,lp);
     }
 public:
-    UpdateWindow(HINSTANCE instance,HWND owner,bool pt,std::wstring version,std::wstring notes,
+    ReleaseUpdateDialog(HINSTANCE instance,HWND owner,bool pt,std::wstring version,std::wstring notes,
         std::function<Palette()> p,std::function<bool()> dark,std::function<bool()> hc,std::function<void(int)> action)
         :instance_(instance),owner_(owner),pt_(pt),version_(std::move(version)),
         palette_(std::move(p)),dark_(std::move(dark)),hc_(std::move(hc)),action_(std::move(action)) {
@@ -141,7 +141,7 @@ public:
         }
         if(notesText_.empty())notesText_=tr(L"No release notes provided.",L"Não foram fornecidas notas da versão.");
     }
-    ~UpdateWindow(){close();if(font_)DeleteObject(font_);if(bold_)DeleteObject(bold_);}
+    ~ReleaseUpdateDialog(){close();if(font_)DeleteObject(font_);if(bold_)DeleteObject(bold_);}
     HWND hwnd()const{return window_;}
     void close(){if(window_)DestroyWindow(window_);}
     void activate(){if(window_){if(IsIconic(window_))ShowWindow(window_,SW_RESTORE);SetForegroundWindow(window_);}}
