@@ -56,9 +56,12 @@ powershell -ExecutionPolicy Bypass -File .\measure-performance.ps1 -Seconds 60
 Designed for modern Windows 10 and Windows 11 systems. DDC/CI features depend on monitor firmware and connection type; enable DDC/CI in the monitor's own settings if required. NVIDIA Target Gamma requires a compatible NVIDIA driver and display connection.
 
 
-<img width="289" height="261" alt="Captura de ecrã 2026-11-26 013253" src="https://github.com/user-attachments/assets/fb54d17b-adbd-4fb6-b224-a3ba423b6126" />
+
 <img width="772" height="756" alt="Captura de ecrã 2026-11-26 013315" src="https://github.com/user-attachments/assets/515c6330-c201-415f-966d-6ca7134f2df2" />
+
 <img width="742" height="791" alt="Captura de ecrã 2026-11-26 013230" src="https://github.com/user-attachments/assets/f3ba794c-781c-4cb8-972f-cfc0eaa5872a" />
+
+<img width="289" height="261" alt="Captura de ecrã 2026-11-26 013253" src="https://github.com/user-attachments/assets/fb54d17b-adbd-4fb6-b224-a3ba423b6126" />
 
 
 
