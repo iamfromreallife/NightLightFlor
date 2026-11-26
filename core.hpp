@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <filesystem>
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <string>
@@ -52,7 +53,25 @@ struct Preferences {
     std::wstring locale = L"en-US";
     std::wstring theme = L"system"; // system, light, dark
     bool closeByClickingOutside = true;
+    bool dimInactive=false;
+    int dimAmount=50; // reduction from normal brightness, not absolute level
+    int dimMinutes=5;
+    bool dimAll=true;
+    std::set<std::wstring> dimDisplays; // stable physical profile keys
+    bool dims(const Monitor& monitor) const {
+        return !monitor.physicalId.empty() &&
+            (dimAll || dimDisplays.count(monitorProfileKey(monitor))!=0);
+    }
 };
+inline constexpr std::array<int,6> kDimMinutePresets{2,5,10,15,30,60};
+inline int dimmedBrightness(int normal,int reduction) {
+    normal=(std::max)(0,(std::min)(100,normal));
+    reduction=(std::max)(0,(std::min)(99,reduction));
+    return normal==0?0:(std::max)(1,(normal*(100-reduction)+50)/100);
+}
+inline bool displayIdleLongEnough(std::uint64_t now,std::uint64_t last,int minutes) {
+    return now>=last && now-last>=static_cast<std::uint64_t>((std::max)(1,minutes))*60000;
+}
 
 // System app mode is AppsUseLightTheme (not the separate system/taskbar mode).
 // Read this only on startup and Windows setting-change notifications.

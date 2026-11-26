@@ -29,7 +29,7 @@ $libraries = @('-luser32','-lgdi32','-lshell32','-lole32','-loleaut32','-lwbemuu
 if ($LASTEXITCODE) { throw 'Test compilation failed' }
 & "$output/nightlight-native-tests.exe"
 if ($LASTEXITCODE) { throw 'Native regressions failed' }
-& $compiler @common -s -municode -mwindows "$PSScriptRoot/core.cpp" "$PSScriptRoot/display_identity.cpp" "$PSScriptRoot/ddc.cpp" "$PSScriptRoot/wmi_brightness.cpp" "$PSScriptRoot/main.cpp" "$PSScriptRoot/startup_task.cpp" "$output/app.res" -o $OutputPath @libraries -lcomctl32 -ldwmapi -luxtheme -lgdiplus -ltaskschd
+& $compiler @common -s -municode -mwindows "$PSScriptRoot/core.cpp" "$PSScriptRoot/display_identity.cpp" "$PSScriptRoot/ddc.cpp" "$PSScriptRoot/wmi_brightness.cpp" "$PSScriptRoot/main.cpp" "$PSScriptRoot/startup_task.cpp" "$PSScriptRoot/inactive_media.cpp" "$output/app.res" -o $OutputPath @libraries -lcomctl32 -ldwmapi -luxtheme -lgdiplus -ltaskschd
 if ($LASTEXITCODE) { throw 'Portable compilation failed' }
 Get-Item -LiteralPath $OutputPath | Select-Object FullName,Length
 Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256

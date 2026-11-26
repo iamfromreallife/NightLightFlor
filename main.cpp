@@ -27,6 +27,8 @@
 #include "menu_icons.hpp"
 #include "paint_surface.hpp"
 #include "startup_task.hpp"
+#include "inactive_media.hpp"
+#include "inactive_dialog.hpp"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -49,6 +51,9 @@ constexpr GUID displayStateGuid{0x2b84c20e,0xad23,0x4ddf,{0x93,0xdb,0x05,0xff,0x
 constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103, ID_TRAY_STARTUP = 4104;
+constexpr int ID_DIM_ENABLE=12000, ID_DIM_AMOUNT=12001, ID_DIM_ALL=12002,
+    ID_DIM_CUSTOM=12003, ID_DIM_PRESET_BASE=12010, ID_DIM_MONITOR_BASE=12100;
+constexpr UINT TIMER_INACTIVE_DIM=22;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_TARGET_BASE=10000;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
@@ -484,6 +489,12 @@ private:
     HINSTANCE instance_;
     Model model_;
     nightlight::DdcController ddc_;
+    nightlight::ForegroundMedia foregroundMedia_;
+    std::map<std::wstring,ULONGLONG> lastDisplayActivity_,lastDimDiscovery_;
+    HWND lastMediaWindow_=nullptr;
+    DWORD lastMediaPid_=0;
+    ULONGLONG lastMediaRequest_=0;
+    bool dimTimerRunning_=false,keyboardActivityRegistered_=false;
     HWND window_ = nullptr;
     HWND hardwareDrag_=nullptr;
     int hardwareDragLeft_=0,hardwareDragRight_=1;
@@ -1005,6 +1016,7 @@ private:
         // This is essential when the logon task starts before DDC/CI is ready.
         restoreDdcAfterWake_=true;
         scheduleDisplayRecovery();
+        syncInactiveDimming();
         updateTrayTooltip();
         // Native window controls render immediately; no WebView runtime.
     }
@@ -1580,7 +1592,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.10";
+        const std::wstring version=L"NightLight v1.0.11";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1698,8 +1710,130 @@ private:
             ddc_.poll(row.device);
         }
     }
+    static std::wstring displayDevice(HMONITOR monitor) {
+        MONITORINFOEXW info{};
+        info.cbSize=sizeof(info);
+        return monitor && GetMonitorInfoW(monitor,&info)?std::wstring(info.szDevice):L"";
+    }
+    void resetDimActivity() {
+        lastDisplayActivity_.clear();
+        lastDimDiscovery_.clear();
+        if(lastMediaWindow_) foregroundMedia_.clear();
+        lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
+    }
+    void setKeyboardActivity(bool enable) {
+        if(enable==keyboardActivityRegistered_) return;
+        // Only activity notifications: no key payload is read or logged.
+        RAWINPUTDEVICE device{0x01,0x06,static_cast<DWORD>(enable?RIDEV_INPUTSINK:RIDEV_REMOVE),
+            enable?taskbarOwner_:nullptr};
+        if(RegisterRawInputDevices(&device,1,sizeof(device))) keyboardActivityRegistered_=enable;
+    }
+    void syncInactiveDimming() {
+        const auto& pref=model_.preferences();
+        const bool selected=pref.dimInactive && (pref.dimAll || !pref.dimDisplays.empty());
+        const bool needed=selected || ddc_.dimRestoreOutstanding();
+        setKeyboardActivity(selected);
+        if(needed && !dimTimerRunning_)
+            dimTimerRunning_=SetTimer(taskbarOwner_,TIMER_INACTIVE_DIM,250,nullptr)!=0;
+        else if(!needed && dimTimerRunning_) {
+            KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM); dimTimerRunning_=false;
+        }
+        if(!selected && lastMediaWindow_) {
+            foregroundMedia_.clear();lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
+        }
+    }
+    void keyboardDisplayActivity() {
+        if(!model_.preferences().dimInactive || !displayAwake_ || displayRecoveryActive_) return;
+        HWND foreground=GetForegroundWindow();
+        const auto device=displayDevice(foreground?MonitorFromWindow(foreground,MONITOR_DEFAULTTONULL):nullptr);
+        for(const auto& mon:model_.monitors()) if(mon.device==device && model_.preferences().dims(mon)) {
+            lastDisplayActivity_[nightlight::monitorProfileKey(mon)]=GetTickCount64();
+            ddc_.setTemporaryDim(mon.device,mon.physicalId,0);
+            break;
+        }
+    }
+    void tickInactiveDimming() {
+        const auto& pref=model_.preferences();
+        if(!displayAwake_ || displayRecoveryActive_ || screenOffGuard_.guarding()) {
+            if(!lastDisplayActivity_.empty() || lastMediaWindow_) resetDimActivity();
+            return;
+        }
+        const auto now=GetTickCount64();
+        POINT cursor{};
+        // On the lock/secure desktop, activity cannot be reliably attributed.
+        if(pref.dimInactive && !GetCursorPos(&cursor)) {
+            resetDimActivity();
+            for(const auto& mon:model_.monitors()) ddc_.setTemporaryDim(mon.device,mon.physicalId,0);
+            return;
+        }
+        const auto hoverDevice=pref.dimInactive?
+            displayDevice(MonitorFromPoint(cursor,MONITOR_DEFAULTTONULL)):std::wstring{};
+        HWND foreground=pref.dimInactive?GetForegroundWindow():nullptr;
+        const auto foregroundDevice=displayDevice(foreground?
+            MonitorFromWindow(foreground,MONITOR_DEFAULTTONULL):nullptr);
+        DWORD foregroundPid=0;
+        if(foreground) GetWindowThreadProcessId(foreground,&foregroundPid);
+        bool probeForeground=false;
+        for(const auto& mon:model_.monitors())
+            if(pref.dimInactive && pref.dims(mon) && mon.device==foregroundDevice && mon.device!=hoverDevice)
+                probeForeground=true;
+        bool foregroundPlaying=false;
+        if(probeForeground && foreground && foregroundPid) {
+            if(lastMediaWindow_!=foreground || lastMediaPid_!=foregroundPid ||
+               now-lastMediaRequest_>=2000) {
+                foregroundMedia_.request(foreground,foregroundPid);
+                lastMediaWindow_=foreground;lastMediaPid_=foregroundPid;lastMediaRequest_=now;
+            }
+            const auto media=foregroundMedia_.result();
+            foregroundPlaying=media.window!=foreground || media.pid!=foregroundPid ||
+                !media.sampled || now-media.sampled>6000 || media.playing;
+        } else if(lastMediaWindow_) {
+            foregroundMedia_.clear();lastMediaWindow_=nullptr;lastMediaPid_=0;lastMediaRequest_=0;
+        }
+        for(const auto& mon:model_.monitors()) {
+            if(!pref.dimInactive || !pref.dims(mon)) {
+                ddc_.setTemporaryDim(mon.device,mon.physicalId,0);
+                continue;
+            }
+            const auto key=nightlight::monitorProfileKey(mon);
+            auto it=lastDisplayActivity_.try_emplace(key,now).first;
+            const bool active=mon.device==hoverDevice ||
+                (mon.device==foregroundDevice && (foregroundPlaying || !keyboardActivityRegistered_));
+            if(active) it->second=now;
+            if(active || !nightlight::displayIdleLongEnough(now,it->second,pref.dimMinutes)) {
+                ddc_.setTemporaryDim(mon.device,mon.physicalId,0);
+                continue;
+            }
+            const auto state=ddc_.state(mon.device);
+            const auto& brightness=state.brightness;
+            if(!brightness.dimOwned) {
+                if(!brightness.supported || !brightness.managed || !brightness.hasValue ||
+                   brightness.restoring || brightness.pending || brightness.failed || state.loading) {
+                    auto& last=lastDimDiscovery_[key];
+                    if(!state.loading && (!last || now-last>=30000)) {
+                        last=now; ddc_.refresh(mon.device);
+                    }
+                    continue;
+                }
+                // Crash recovery: persist the normal level BEFORE dimming.
+                model_.rememberHardwarePercent(mon.device,false,brightness.percent);
+                if(!model_.save()) continue;
+            }
+            ddc_.setTemporaryDim(mon.device,mon.physicalId,pref.dimAmount);
+        }
+        syncInactiveDimming();
+    }
+    void updateDimSettings(const Preferences& pref,bool resetTimeout) {
+        model_.updatePreferences(pref);
+        if(resetTimeout) resetDimActivity();
+        syncInactiveDimming();
+        tickInactiveDimming();
+    }
     void scheduleDisplayRecovery() {
         if (!displayRecoveryActive_) {
+            if(model_.preferences().dimInactive || ddc_.dimRestoreOutstanding())
+                restoreDdcAfterWake_=true;
+            resetDimActivity();
             recoveryPass_=0;
             recoverySettleChecks_=0;
             recoveryVerificationIssued_=false;
@@ -2391,6 +2525,42 @@ private:
         append(menu,MF_STRING|(model_.preferences().closeByClickingOutside?MF_CHECKED:0),
             ID_TRAY_CLOSE_OUTSIDE,tr(L"Close by clicking outside",L"Fechar ao clicar fora").c_str(),
             nightlight::MenuIcon::Window);
+        const auto& dim=model_.preferences();
+        HMENU dimMenu=createMenu(),dimScreens=createMenu(),dimTimes=createMenu();
+        append(dimMenu,MF_STRING|(dim.dimInactive?MF_CHECKED:0),ID_DIM_ENABLE,
+            tr(L"Enabled",L"Ativado").c_str(),nightlight::MenuIcon::Light);
+        append(dimScreens,MF_STRING|(dim.dimAll?MF_CHECKED:0),ID_DIM_ALL,
+            tr(L"All displays",L"Todos os ecrãs").c_str(),nightlight::MenuIcon::Monitor);
+        AppendMenuW(dimScreens,MF_SEPARATOR,0,nullptr);
+        for(size_t i=0;i<model_.monitors().size() && i<1000;++i) {
+            const auto& mon=model_.monitors()[i];
+            auto name=mon.displayName();
+            if(mon.physicalId.empty()) name+=tr(L" (unidentified)",L" (não identificado)");
+            append(dimScreens,MF_STRING|(dim.dims(mon)?MF_CHECKED:0)|(mon.physicalId.empty()?MF_GRAYED:0),
+                ID_DIM_MONITOR_BASE+i,name.c_str(),nightlight::MenuIcon::Monitor);
+        }
+        append(dimMenu,MF_POPUP,reinterpret_cast<UINT_PTR>(dimScreens),
+            tr(L"Displays",L"Ecrãs").c_str(),nightlight::MenuIcon::Monitor);
+        const auto amountText=tr(L"Dim amount: ",L"Redução de brilho: ")+std::to_wstring(dim.dimAmount)+L" %…";
+        append(dimMenu,MF_STRING,ID_DIM_AMOUNT,amountText.c_str(),nightlight::MenuIcon::Adjust);
+        bool presetSelected=false;
+        for(size_t i=0;i<nightlight::kDimMinutePresets.size();++i) {
+            const int minutes=nightlight::kDimMinutePresets[i];
+            const bool checked=minutes==dim.dimMinutes;
+            presetSelected=presetSelected || checked;
+            const auto label=minutes==60?tr(L"1 hour",L"1 hora"):std::to_wstring(minutes)+L" min";
+            append(dimTimes,MF_STRING|(checked?MF_CHECKED:0),ID_DIM_PRESET_BASE+i,
+                label.c_str(),nightlight::MenuIcon::Tray);
+        }
+        const auto custom=presetSelected?tr(L"Custom minutes…",L"Minutos personalizados…"):
+            tr(L"Custom: ",L"Personalizado: ")+std::to_wstring(dim.dimMinutes)+L" min…";
+        append(dimTimes,MF_STRING|(!presetSelected?MF_CHECKED:0),ID_DIM_CUSTOM,
+            custom.c_str(),nightlight::MenuIcon::Adjust);
+        const auto timeText=tr(L"Inactive time: ",L"Tempo de inatividade: ")+
+            (dim.dimMinutes==60?tr(L"1 hour",L"1 hora"):std::to_wstring(dim.dimMinutes)+L" min");
+        append(dimMenu,MF_POPUP,reinterpret_cast<UINT_PTR>(dimTimes),timeText.c_str(),nightlight::MenuIcon::Tray);
+        append(menu,MF_POPUP|(dim.dimInactive?MF_CHECKED:0),reinterpret_cast<UINT_PTR>(dimMenu),
+            tr(L"Dim when inactive",L"Reduzir brilho quando inativo").c_str(),nightlight::MenuIcon::Light);
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         append(menu,MF_STRING|(ddcVisible_?MF_CHECKED:0),ID_DDC,tr(L"DDC/CI Controls",L"Controlos DDC/CI").c_str(),nightlight::MenuIcon::Adjust);
         HMENU engines=createMenu();
@@ -2490,6 +2660,45 @@ private:
                     std::wstring(code);
                 MessageBoxW(window_,message.c_str(),L"NightLight",MB_OK|MB_ICONERROR);
             }
+        } else if(cmd==ID_DIM_ENABLE || cmd==ID_DIM_ALL || cmd==ID_DIM_AMOUNT ||
+                  cmd==ID_DIM_CUSTOM ||
+                  (cmd>=ID_DIM_PRESET_BASE && cmd<ID_DIM_PRESET_BASE+nightlight::kDimMinutePresets.size()) ||
+                  (cmd>=ID_DIM_MONITOR_BASE && cmd<ID_DIM_MONITOR_BASE+std::min<size_t>(1000,model_.monitors().size()))) {
+            Preferences pref=model_.preferences();
+            bool resetTimeout=true;
+            if(cmd==ID_DIM_ENABLE) {
+                pref.dimInactive=!pref.dimInactive;
+            } else if(cmd==ID_DIM_ALL) {
+                pref.dimAll=!pref.dimAll;
+                pref.dimDisplays.clear();
+            } else if(cmd==ID_DIM_AMOUNT || cmd==ID_DIM_CUSTOM) {
+                const bool amount=cmd==ID_DIM_AMOUNT;
+                const auto title=tr(L"Dim when inactive",L"Reduzir brilho quando inativo");
+                const auto prompt=amount?tr(L"Dim amount (% reduction, 1–99)",L"Redução de brilho (%, 1–99)"):
+                    tr(L"Inactive time (minutes, 1–1440)",L"Tempo de inatividade (min, 1–1440)");
+                trayMenuOpen_=true;
+                const auto value=nightlight::inactive_dialog::number(instance_,taskbarOwner_,
+                    title.c_str(),prompt.c_str(),amount?pref.dimAmount:pref.dimMinutes,
+                    1,amount?99:1440,pt());
+                trayMenuOpen_=false;
+                if(!value) return;
+                if(amount) {pref.dimAmount=*value;resetTimeout=false;}
+                else pref.dimMinutes=*value;
+            } else if(cmd>=ID_DIM_PRESET_BASE && cmd<ID_DIM_PRESET_BASE+nightlight::kDimMinutePresets.size()) {
+                pref.dimMinutes=nightlight::kDimMinutePresets[cmd-ID_DIM_PRESET_BASE];
+            } else {
+                const auto& mon=model_.monitors()[cmd-ID_DIM_MONITOR_BASE];
+                if(mon.physicalId.empty()) return;
+                if(pref.dimAll) {
+                    pref.dimAll=false;pref.dimDisplays.clear();
+                    for(const auto& display:model_.monitors()) if(!display.physicalId.empty())
+                        pref.dimDisplays.insert(nightlight::monitorProfileKey(display));
+                }
+                const auto key=nightlight::monitorProfileKey(mon);
+                if(pref.dimDisplays.count(key)) pref.dimDisplays.erase(key);
+                else pref.dimDisplays.insert(key);
+            }
+            updateDimSettings(pref,resetTimeout);
         } else if (cmd==ID_TRAY_CLOSE_OUTSIDE) {
             Preferences pref=model_.preferences();
             pref.closeByClickingOutside=!pref.closeByClickingOutside;
@@ -2816,6 +3025,7 @@ private:
                     const bool wasAwake=displayAwake_;
                     displayAwake_=state!=0;
                     if (!displayAwake_) {
+                        resetDimActivity();
                         if (wasAwake) {
                             // Preserve the in-memory/saved last applied levels,
                             // and discard I/O to the now sleeping screens.
@@ -2840,6 +3050,7 @@ private:
                 restoreDdcAfterWake_=true;
                 scheduleDisplayRecovery();
             } else if (wParam==PBT_APMSUSPEND) {
+                resetDimActivity();
                 displayAwake_=false;
                 restoreDdcAfterWake_=true;
                 displayRecoveryActive_=false;
@@ -2850,6 +3061,7 @@ private:
             }
             return TRUE;
         case WM_TIMER:
+            if(wParam==TIMER_INACTIVE_DIM) { if(dimTimerRunning_) tickInactiveDimming(); return 0; }
             if (wParam==TIMER_TRAY_RETRY) {
                 if (trayReady_ || addTray()) KillTimer(taskbarOwner_,TIMER_TRAY_RETRY);
                 return 0;
@@ -2997,6 +3209,8 @@ private:
                 ddc_.finishRestore();
                 displayRecoveryActive_=false;
                 restoreDdcAfterWake_=false;
+                resetDimActivity();
+                syncInactiveDimming();
                 recoveryPass_=0;
                 recoveryVerificationIssued_=false;
                 syncHardware();
@@ -3010,10 +3224,15 @@ private:
             if (wParam) {
                 noteWindowPosition(true);
                 model_.save();
+                ddc_.restoreDimmedBeforeStop();
                 model_.restoreOriginals();
             }
             return 0;
         case WM_DESTROY:
+            KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM);
+            dimTimerRunning_=false;
+            setKeyboardActivity(false);
+            resetDimActivity();
             KillTimer(taskbarOwner_,TIMER_TRAY_RETRY);
             KillTimer(taskbarOwner_,TIMER_SCREEN_OFF_ACTION);
             screenOffGuard_.stop();
@@ -3028,6 +3247,7 @@ private:
             KillTimer(taskbarOwner_,TIMER_SAVE_WINDOW);
             commitDrag();
                 model_.save();
+            ddc_.restoreDimmedBeforeStop();
             model_.restoreOriginals();
             ddc_.stop();
             if (gammaHelper_) { CloseHandle(gammaHelper_); gammaHelper_=nullptr; }
@@ -3058,6 +3278,11 @@ private:
             const auto* create=reinterpret_cast<const CREATESTRUCTW*>(lp);
             app=static_cast<NativeApp*>(create->lpCreateParams);
             SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));
+        }
+        if(app && msg==WM_INPUT && !app->shuttingDown_) {
+            // Only keyboard TLC was registered. Do not fetch raw keystrokes.
+            app->keyboardDisplayActivity();
+            return DefWindowProcW(hwnd,msg,wp,lp);
         }
         // All callbacks remain addressed to this stable HWND; the current
         // frame only supplies UI context. Broadcast display/resume messages

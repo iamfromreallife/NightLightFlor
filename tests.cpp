@@ -19,6 +19,22 @@ void check(bool ok,const char* message) {
 int main() {
     try {
         {
+            check(dimmedBrightness(80,50)==40 && dimmedBrightness(20,50)==10 &&
+                  dimmedBrightness(1,99)==1 && dimmedBrightness(0,50)==0 &&
+                  dimmedBrightness(80,0)==80,"Dimming is relative to normal brightness and never blacks out a lit panel");
+            check(!displayIdleLongEnough(119999,0,2) && displayIdleLongEnough(120000,0,2) &&
+                  !displayIdleLongEnough(1,100,2),"Timeout boundaries and monotonic activity");
+            DdcValue base;
+            base.percent=80; base.managed=true;base.hasValue=true;base.dimOwned=true;base.dimAmount=50;
+            DdcValue observed;
+            observed.percent=40;observed.hasValue=true;observed.readable=true;observed.supported=true;
+            applyDdcObservation(base,observed,false);
+            check(base.percent==80,"Temporary dim readback must never become saved brightness");
+            base.dimAmount=0;
+            applyDdcObservation(base,observed,false);
+            check(base.percent==80,"Pending restoration remains protected from the old dim readback");
+        }
+        {
             DisplayTargetSnapshot snapshot;
             snapshot.complete=true;
             DisplayTarget target;
@@ -759,6 +775,9 @@ int main() {
             Preferences updated=model.preferences();
             updated.locale=L"en-US";
             updated.theme=L"system";
+            check(!updated.dimInactive,"Inactivity dimming defaults to disabled");
+            updated.dimInactive=true;updated.dimAmount=65;updated.dimMinutes=7;
+            updated.dimAll=false;updated.dimDisplays.insert(L"PHYSICAL-A");
             model.updatePreferences(updated);
             check(model.preferences().theme==L"system",
                 "System-following theme remains a distinct persisted preference");
@@ -778,6 +797,10 @@ int main() {
             check(model.preferences().locale==L"en-US","Saved language");
             check(model.preferences().theme==L"system",
                 "System-following theme round-trips through portable config");
+            check(model.preferences().dimInactive && model.preferences().dimAmount==65 &&
+                  model.preferences().dimMinutes==7 && !model.preferences().dimAll &&
+                  model.preferences().dimDisplays.count(L"PHYSICAL-A")==1,
+                  "Inactivity settings and physical monitor selection round-trip");
             const auto restoredWindow=model.windowPosition();
             check(restoredWindow && restoredWindow->x==-1900 && restoredWindow->y==235,
                 "Persist and restore screen position across application starts");

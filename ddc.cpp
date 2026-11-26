@@ -18,7 +18,7 @@ void applyDdcObservation(DdcValue& current,const DdcValue& observed,
     current.supported=observed.supported;
     current.readable=observed.readable;
     current.backend=observed.backend;
-    if (!protectUserValue && !current.restoring && observed.readable && observed.hasValue) {
+    if (!protectUserValue && !current.restoring && !current.dimOwned && observed.readable && observed.hasValue) {
         current.percent=std::clamp(observed.percent,0,100);
         current.hasValue=true;
         current.managed=true; // persist the actual hardware value as fallback
@@ -29,7 +29,7 @@ void applyDdcObservation(DdcValue& current,const DdcValue& observed,
     // and must not be modified by this observation.
 }
 void verifyDdcRestore(DdcValue& current,const DdcValue& observed) {
-    if(!current.restoring || current.pending || !observed.readable || !observed.hasValue) return;
+    if(!current.restoring || current.dimOwned || current.pending || !observed.readable || !observed.hasValue) return;
     // A one-percentage-point difference can be hardware quantization.
     const int difference=current.percent-observed.percent;
     current.failed=difference>1 || difference< -1;
@@ -233,8 +233,84 @@ bool DdcController::set(const std::wstring& device,DdcFeature feature,int percen
     if (value.managed && value.hasValue && value.percent==percent && !value.failed && !value.restoring) return true;
     value.restoring=false;
     value.percent=percent; value.hasValue=true; value.managed=true; value.pending=true; value.failed=false; ++value.generation;
-    jobs_[{device,static_cast<int>(feature)}]={percent,value.generation}; wake_.notify_one();
+    const bool dimWrite=feature==DdcFeature::Brightness && value.dimOwned;
+    if(dimWrite) {
+        value.dimAttempts=1;
+        value.dimRetryAt=GetTickCount64()+5000;
+        jobs_[{device,0}]={dimmedBrightness(percent,value.dimAmount),value.generation,
+            false,found->second.dimPhysicalId,true};
+    } else jobs_[{device,static_cast<int>(feature)}]={percent,value.generation};
+    wake_.notify_one();
     return true;
+}
+void DdcController::setTemporaryDim(const std::wstring& device,const std::wstring& physicalId,int amount) {
+    if(device.empty() || physicalId.empty()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found=states_.find(device);
+    if(stopping_ || restoreWindow_ || found==states_.end()) return;
+    auto& state=found->second;
+    auto& value=state.brightness;
+    amount=std::clamp(amount,0,99);
+    if(!value.dimOwned && amount==0) return;
+    if(value.dimOwned && state.dimPhysicalId!=physicalId) return;
+    if(amount>0 && (!value.supported || !value.managed || !value.hasValue ||
+                    value.restoring || (!value.dimOwned && (state.loading || value.pending || value.failed)))) return;
+    const auto now=GetTickCount64();
+    const bool changed=amount!=value.dimAmount;
+    if(!changed && value.dimOwned) {
+        if(value.pending || now<value.dimRetryAt) return;
+        if(!value.failed) {
+            // A successful normal-brightness write still needs a settled
+            // readback before releasing the protected baseline.
+            if(amount==0 && !state.loading && readingDevice_!=device &&
+               jobs_.find({device,-1})==jobs_.end()) {
+                jobs_[{device,-1}]={};
+                value.dimRetryAt=now+3000;
+                wake_.notify_one();
+            }
+            return;
+        }
+        if(value.dimAttempts>=3) return;
+    }
+    if(changed) value.dimAttempts=0;
+    value.dimOwned=true;
+    value.dimAmount=amount;
+    state.dimPhysicalId=physicalId;
+    ++value.dimAttempts;
+    value.dimRetryAt=now+5000;
+    value.pending=true; value.failed=false; ++value.generation;
+    jobs_[{device,0}]={dimmedBrightness(value.percent,amount),value.generation,false,physicalId,true};
+    wake_.notify_one();
+}
+bool DdcController::dimRestoreOutstanding() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for(const auto& entry:states_) {
+        const auto& v=entry.second.brightness;
+        if(v.dimOwned && (v.dimAmount!=0 || v.pending || !v.failed || v.dimAttempts<3)) return true;
+    }
+    return false;
+}
+void DdcController::restoreDimmedBeforeStop() {
+    // All dim targets have a durable normal-brightness profile. Restore on
+    // clean exit before stopping the worker; never write to a recycled ID.
+    std::vector<std::pair<std::wstring,std::wstring>> targets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(stopping_ || restoreWindow_) return;
+        for(auto& entry:states_) if(entry.second.brightness.dimOwned) {
+            auto& value=entry.second.brightness;
+            // Force one fresh retry even if earlier attempts exhausted.
+            value.dimRetryAt=0; value.dimAttempts=0;
+            targets.emplace_back(entry.first,entry.second.dimPhysicalId);
+        }
+    }
+    for(const auto& target:targets) setTemporaryDim(target.first,target.second,0);
+    std::unique_lock<std::mutex> lock(mutex_);
+    wake_.wait_for(lock,std::chrono::seconds(12),[&] {
+        for(const auto& entry:states_)
+            if(entry.second.brightness.dimOwned && entry.second.brightness.pending) return false;
+        return true;
+    });
 }
 DdcState DdcController::state(const std::wstring& device) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -307,6 +383,21 @@ void DdcController::run() {
                 if(restoreWindow_ && !protect) verifyDdcRestore(value,observed);
                 applyDdcObservation(value,observed,protect);
             };
+            auto& dim=state.brightness;
+            if(dim.dimOwned && dim.dimAmount==0 && !dim.pending && now>=dim.protectUntilTickMs) {
+                if(brightness.readable && brightness.hasValue) {
+                    if(std::abs(dim.percent-brightness.percent)<=1) {
+                        dim.dimOwned=false; dim.failed=false;
+                        // Keep the exact saved target rather than adopt
+                        // a one-point quantization difference.
+                        dim.protectUntilTickMs=now+5000;
+                    } else { dim.failed=true; dim.dimRetryAt=now+1000; }
+                } else if(!dim.failed) {
+                    // A setter-only display cannot be independently read.
+                    dim.dimOwned=false;
+                    dim.protectUntilTickMs=now+5000;
+                }
+            }
             publish(state.brightness,brightness);
             publish(state.contrast,contrast);
             const auto changed=[](const DdcValue& a,const DdcValue& b){
@@ -331,18 +422,18 @@ void DdcController::run() {
             // A saved restoration job must still address the same physical
             // panel at execution time, not merely the old DISPLAYx number.
             bool correctTarget=true;
-            if(job.restoring && !job.physicalId.empty()) {
+            if((job.restoring || job.dimWrite) && !job.physicalId.empty()) {
                 const auto snapshot=queryPhysicalDisplayTargets();
                 correctTarget=matchPhysicalTarget(snapshot,key.first,job.physicalId)!=nullptr;
             }
             bool usedWmi=false;
-            bool ok=correctTarget && writePhysical(api,monitor,key.second,job.percent,job.restoring);
+            bool ok=correctTarget && writePhysical(api,monitor,key.second,job.percent,job.restoring || job.dimWrite);
             // Upstream also attempts WMI after DDC/CI. Match that behavior for
             // the selected WMI instance, including drivers that return success
             // from SetMonitorBrightness without changing an internal panel.
             if (correctTarget && key.second==0) {
                 const auto panel=wmi.find(key.first);
-                if (panel && ((!job.restoring && panel.readable && panel.percent==job.percent) || wmi.set(panel,job.percent))) { ok=true; usedWmi=true; }
+                if (panel && ((!job.restoring && !job.dimWrite && panel.readable && panel.percent==job.percent) || wmi.set(panel,job.percent))) { ok=true; usedWmi=true; }
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (epoch!=topologyEpoch_ || stopping_) continue;
@@ -355,10 +446,15 @@ void DdcController::run() {
                 // The next poll must not read a monitor's old value while
                 // its firmware is still applying our last local write.
                 value.protectUntilTickMs=ok?
-                    GetTickCount64()+(job.restoring?5000:kDdcPostWriteGraceMs):0;
+                    GetTickCount64()+((job.restoring || job.dimWrite)?5000:kDdcPostWriteGraceMs):0;
                 value.hasValue=true;
-                value.percent=job.percent;
+                if(!job.dimWrite) value.percent=job.percent;
+                else {
+                    value.dimRetryAt=GetTickCount64()+5000;
+                    if(ok && value.dimAmount==0 && !value.readable) value.dimOwned=false;
+                }
             }
+            wake_.notify_all(); // clean exit may be waiting for normal brightness
             if (window_ && !stopping_) PostMessageW(window_,WM_DDC_COMPLETE,0,0);
         }
         } // Destroy physical monitor handles before releasing DDC lock.
