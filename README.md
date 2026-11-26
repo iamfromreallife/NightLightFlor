@@ -55,14 +55,10 @@ powershell -ExecutionPolicy Bypass -File .\measure-performance.ps1 -Seconds 60
 
 Designed for modern Windows 10 and Windows 11 systems. DDC/CI features depend on monitor firmware and connection type; enable DDC/CI in the monitor's own settings if required. NVIDIA Target Gamma requires a compatible NVIDIA driver and display connection.
 
-The NVIDIA target gamma interface is based on independently documented reverse-engineered ABI information from [nvBrightness](https://github.com/pbatard/nvBrightness) and [NvProfileSwitcher](https://github.com/mgcarnevali/NvProfileSwitcher).
+
+<img width="289" height="261" alt="Captura de ecrã 2026-11-26 013253" src="https://github.com/user-attachments/assets/fb54d17b-adbd-4fb6-b224-a3ba423b6126" />
+<img width="772" height="756" alt="Captura de ecrã 2026-11-26 013315" src="https://github.com/user-attachments/assets/515c6330-c201-415f-966d-6ca7134f2df2" />
+<img width="742" height="791" alt="Captura de ecrã 2026-11-26 013230" src="https://github.com/user-attachments/assets/f3ba794c-781c-4cb8-972f-cfc0eaa5872a" />
 
 
-<img width="709" height="721" alt="image" src="https://github.com/user-attachments/assets/27c4af10-1ee6-450f-a667-87a7a706ede3" />
 
-
-The tray icon automatically switches between light- and dark-taskbar variants using the Windows system theme, independently of NightLight's app theme.
-
-The monochrome circular sun icon has inverted light/dark tray variants rasterized and antialiased at native small-icon sizes, and a full-size executable icon up to 256×256 pixels.
-
-The tray artwork fills the available icon square edge to edge, with independently antialiased frames at every even size from 16 to 64 pixels. Native menu glyphs use supersampled premultiplied-alpha rendering. The earlier local-build branch's legacy cursor repair is included: only the old `MouseTrails=-1` override is cleared, while ordinary mouse-trail preferences are left unchanged.
