@@ -581,8 +581,12 @@ private:
             if (window_) layout();
         }
     }
+    bool windowPresented() const {
+        return window_ && nightlight::trayWindowPresented(
+            IsWindowVisible(window_)!=FALSE,IsIconic(window_)!=FALSE);
+    }
     void startAnimationTimer() {
-        if (!animationTimerRunning_ && IsWindowVisible(window_))
+        if (!animationTimerRunning_ && windowPresented())
             animationTimerRunning_=SetTimer(window_,TIMER_ANIMATION,10,nullptr)!=0;
     }
     void stopAnimationTimer() { KillTimer(window_,TIMER_ANIMATION); animationTimerRunning_=false; }
@@ -684,7 +688,7 @@ private:
     }
     void animate(nightlight::Motion& motion,double target,unsigned duration=140) {
         const auto now=uiTime();
-        if (!animations_ || !IsWindowVisible(window_)) motion.snap(target);
+        if (!animations_ || !windowPresented()) motion.snap(target);
         else motion.to(target,now,duration,true);
         if (motion.active(now)) startAnimationTimer();
     }
@@ -828,7 +832,7 @@ private:
     void tickAnimations() {
         // Only internal control motions are timer-driven; DWM handles the
         // main window transitions without an application animation timer.
-        if (IsWindowVisible(window_) && animations_) DwmFlush();
+        if (windowPresented() && animations_) DwmFlush();
         const auto now=uiTime();
         bool active=false;
         const bool reflow=hardwareReveal_.active(now) || reorderInProgress_;
@@ -847,14 +851,14 @@ private:
             state.repainting=moving;
             active=active || moving;
         }
-        if (IsWindowVisible(window_)) {
+        if (windowPresented()) {
             // Present child controls and the resized frame together. Letting
             // WM_PAINT wait until after a resize exposes the previous content
             // bitmap at the new frame size for one compositor frame.
             RedrawWindow(window_,nullptr,nullptr,RDW_UPDATENOW|RDW_ALLCHILDREN|RDW_NOERASE);
             GdiFlush();
         }
-        if (!active || !IsWindowVisible(window_)) stopAnimationTimer();
+        if (!active || !windowPresented()) stopAnimationTimer();
     }
     int px(int value) const { return MulDiv(value, dpi_, 96); }
     bool hasMonitor() const { return selected_ < model_.monitors().size(); }
@@ -862,7 +866,7 @@ private:
         return hasMonitor() ? &model_.monitors()[selected_] : nullptr;
     }
     void repaint() {
-        if (window_ && IsWindowVisible(window_)) InvalidateRect(window_, nullptr, FALSE);
+        if (window_ && windowPresented()) InvalidateRect(window_, nullptr, FALSE);
     }
     void updateFonts() {
         for (HFONT font : fonts_) if (font) DeleteObject(font);
@@ -1143,7 +1147,7 @@ private:
         return true;
     }
     void layout() {
-        if (!window_ || layingOut_) return;
+        if (!window_ || layingOut_ || IsIconic(window_)) return;
         if (!layoutDepth_) layoutTime_=uiTime();
         struct LayoutScope { unsigned& depth; ~LayoutScope() { --depth; } } scope{layoutDepth_};
         ++layoutDepth_;
@@ -1156,15 +1160,15 @@ private:
             if(!control)return;
             if(!hardwareRow(control) && !hardwareNameButton(control)) {
                 auto& motion=reorderPositions_[control];
-                motion.x.to(x,layoutTime_,180,reorderInProgress_ && animations_ && IsWindowVisible(window_));
-                motion.y.to(y,layoutTime_,180,reorderInProgress_ && animations_ && IsWindowVisible(window_));
+                motion.x.to(x,layoutTime_,180,reorderInProgress_ && animations_ && windowPresented());
+                motion.y.to(y,layoutTime_,180,reorderInProgress_ && animations_ && windowPresented());
                 x=static_cast<int>(std::round(motion.x.value(layoutTime_)));
                 y=static_cast<int>(std::round(motion.y.value(layoutTime_)));
             }
             placements.push_back({control,x,y,std::max(1,w),std::max(1,h)});
         };
         const double hardwareProgress=hardwareReveal_.value(layoutTime_);
-        composedTransition_=IsWindowVisible(window_) && (hardwareReveal_.active(layoutTime_) || reorderInProgress_);
+        composedTransition_=windowPresented() && (hardwareReveal_.active(layoutTime_) || reorderInProgress_);
         const int margin=px(nightlight::kCardOuterMarginDip);
         const int inset=px(nightlight::kCardInnerInsetDip);
         panelTop_=px(nightlight::kCardsTopMarginDip);
@@ -1235,7 +1239,7 @@ private:
             row.topMotion.to(hardwareTop_+px(nightlight::kDdcFirstRowTopDip+
                 nightlight::kDdcRowStepDip*static_cast<int>(i)),
                 layoutTime_,180,
-                reorderInProgress_ && animations_ && IsWindowVisible(window_));
+                reorderInProgress_ && animations_ && windowPresented());
             row.top=static_cast<int>(std::round(row.topMotion.value(layoutTime_)));
             const auto& name=model_.monitors()[i].displayName();
             const int nameWidth=std::max(px(44),std::min({
@@ -1504,7 +1508,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.7";
+        const std::wstring version=L"NightLight v1.0.8";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1539,8 +1543,10 @@ private:
     void paint() {
         PAINTSTRUCT ps{};
         HDC dc=BeginPaint(window_,&ps);
-        RECT client{}; GetClientRect(window_,&client);
-        paintClient(dc,client);
+        if(!IsIconic(window_)) {
+            RECT client{}; GetClientRect(window_,&client);
+            paintClient(dc,client);
+        }
         EndPaint(window_,&ps);
     }
     bool hardwareNameButton(HWND control) const {
@@ -1603,7 +1609,7 @@ private:
     }
     void syncHardwarePoll() {
         const bool needed=ddcVisible_ && displayAwake_ && !displayRecoveryActive_ &&
-            IsWindowVisible(window_) && !IsIconic(window_);
+            windowPresented() && !IsIconic(window_);
         if(needed==hardwarePollRunning_) return;
         if(needed) hardwarePollRunning_=SetTimer(window_,TIMER_READ_DDC,nightlight::kDdcReadbackIntervalMs,nullptr)!=0;
         else { KillTimer(window_,TIMER_READ_DDC); hardwarePollRunning_=false; }
@@ -1614,7 +1620,7 @@ private:
         // UI thread, and do not query sleeping or hidden displays.
         if (!ddcVisible_ || !displayAwake_ || displayRecoveryActive_ ||
             screenOffGuard_.guarding() ||
-            !IsWindowVisible(window_) || IsIconic(window_)) return;
+            !windowPresented() || IsIconic(window_)) return;
         for (const auto& row:hardwareRows_) {
             if (GetCapture()==row.brightness || GetCapture()==row.contrast) continue;
             ddc_.poll(row.device);
@@ -1665,7 +1671,7 @@ private:
     void toggleHardware() {
         ddcVisible_=!ddcVisible_;
         animate(hardwareReveal_,ddcVisible_?1:0,240);
-        if (ddcVisible_ && IsWindowVisible(window_)) refreshHardware();
+        if (ddcVisible_ && windowPresented()) refreshHardware();
         else { hardwareDiscovered_=false; syncHardware(); }
         syncHardwarePoll();
         layout();
@@ -2002,7 +2008,7 @@ private:
     }
     void noteWindowPosition(bool flush=false) {
         // Persist normal geometry only; DWM does not change this rectangle.
-        if (model_.isReady() && window_ && IsWindowVisible(window_) &&
+        if (model_.isReady() && window_ && windowPresented() &&
             !IsIconic(window_) && !IsZoomed(window_)) {
             RECT current{};
             if (GetWindowRect(window_,&current)) {
@@ -2054,36 +2060,67 @@ private:
                 L"NightLight",MB_OK|MB_ICONWARNING);
         }
     }
+    void suspendWindowRendering() {
+        // Iconified windows still have WS_VISIBLE. Stop their UI work exactly
+        // as for a hidden window, without discarding the monitor controller.
+        finishReordering(); hardwareReveal_.finish();
+        endHardwareDrag(); finishScreenDrag();
+        temperatureHover_=false; temperatureEngagement_.snap(0);
+        temperaturePosition_.finish(); refreshTurn_.finish();
+        for(auto& item:interactions_) {
+            item.second.hover.snap(0); item.second.press.snap(0);
+            item.second.position.finish(); item.second.surface.reset();
+        }
+        if(dragging_) commitDrag();
+        stopAnimationTimer();
+        pageSurface_.reset();
+        KillTimer(window_,TIMER_READ_DDC); hardwarePollRunning_=false;
+    }
+    void hideVisibleMinimizedIcon() {
+        // The hidden owner permanently excludes this window from the taskbar.
+        // On systems that position an owned minimized window on the desktop,
+        // hide only that iconic representation, without restoring its state.
+        // Modern Windows normally parks minimized windows outside the desktop.
+        if(!IsIconic(window_) || !IsWindowVisible(window_)) return;
+        RECT rect{};
+        if(!GetWindowRect(window_,&rect) ||
+           MonitorFromRect(&rect,MONITOR_DEFAULTTONULL)!=nullptr)
+            SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
+    }
     void openWindow() {
-        // Ordinary Win32 show/restore every time. No layered window, alpha
-        // ramp, custom geometry, sleeps or animation-completion gate.
-        const bool reveal=!IsWindowVisible(window_) || IsIconic(window_);
-        if(reveal) {
-            ++visibilityGeneration_;
-            visibilityChanging_=true;
+        if(windowPresented()) { SetForegroundWindow(window_); return; }
+        ++visibilityGeneration_;
+        visibilityChanging_=true;
+        // A genuine minimized state triggers Windows' native restore path on
+        // every subsequent opening, not merely the initial HWND show effect.
+        // On first launch the untouched hidden window uses ordinary SW_SHOW.
+        ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
+        if(!windowPresented())
             ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
-            // The first call may inherit STARTUPINFO from Task Scheduler.
-            if(!IsWindowVisible(window_) || IsIconic(window_))
-                ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
+        if(windowPresented()) {
             SetForegroundWindow(window_);
-            visibilityChanging_=false;
             repaint();
             if(ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
                 if(!hardwareDiscovered_) refreshHardware();
                 else pollHardware();
             }
-        } else SetForegroundWindow(window_);
+        }
+        visibilityChanging_=false;
         syncHardwarePoll();
     }
     void hideWindowToTray() {
-        if(!trayReady_ || shuttingDown_ || !IsWindowVisible(window_)) return;
+        if(!trayReady_ || shuttingDown_ || !windowPresented()) return;
         ++visibilityGeneration_;
-        // Ignore recursive deactivation caused by the native hide, not
-        // physical tray clicks. DWM owns the visual transition.
         visibilityChanging_=true;
         if(gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
         noteWindowPosition();
-        ShowWindow(window_,SW_HIDE);
+        // Keep the existing hidden owner and never set WS_EX_APPWINDOW.
+        // Do not immediately SW_HIDE the minimized window: that discards
+        // the native compositor transition on some Windows builds.
+        ShowWindow(window_,SW_MINIMIZE);
+        if(IsIconic(window_)) hideVisibleMinimizedIcon();
+        else if(IsWindowVisible(window_))
+            SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
         visibilityChanging_=false;
         syncHardwarePoll();
     }
@@ -2103,8 +2140,9 @@ private:
         return GetCursorPos(&cursor) && PtInRect(&bounds,cursor)!=FALSE;
     }
     void toggleTrayWindow() {
-        // Minimized windows are not displayed, so a click should restore them.
-        if (IsWindowVisible(window_) && !IsIconic(window_)) {
+        // Logical minimized/hidden state changes immediately, independently
+        // of any DWM animation still being composed.
+        if (windowPresented()) {
             hideWindowToTray();
         } else {
             openWindow();
@@ -2335,7 +2373,7 @@ private:
     }
     void handleCommand(int id,int code) {
         if (code==BN_CLICKED) {
-            if (id==ID_REFRESH) { refreshTurn_.to(refreshTurn_.value(uiTime())+360.0,uiTime(),460,animations_ && IsWindowVisible(window_)); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
+            if (id==ID_REFRESH) { refreshTurn_.to(refreshTurn_.value(uiTime())+360.0,uiTime(),460,animations_ && windowPresented()); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
             else if (id==ID_SCREEN_OFF) turnOffScreens();
             else if (id==ID_GAMMA) unlockGamma();
             else if (id>=ID_MONITOR_BASE &&
@@ -2358,33 +2396,33 @@ private:
         case WM_CREATE:
             initControls(); return 0;
         case WM_SYSCOMMAND:
-            if ((wParam & 0xFFF0)==SC_MINIMIZE && trayReady_ && !shuttingDown_) {
-                // Handle the title-bar button, Alt+Space+N and Win+Down
-                // BEFORE Windows enters its minimized state. Calling
-                // ShowWindow(SW_HIDE) reentrantly from WM_SIZE can recurse
-                // into WM_SHOWWINDOW/layout while the client is minimized.
-                // Defer hiding until the current system command returns.
-                // No nested WM_SHOWWINDOW or layout inside the system handler.
+            if ((wParam & 0xFFF0)==SC_MINIMIZE && trayReady_ && !shuttingDown_ &&
+                !visibilityChanging_) {
+                // Defer until the current system command returns, so the
+                // native minimize path cannot recursively invoke itself.
                 PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,TRUE,static_cast<LPARAM>(visibilityGeneration_));
                 return 0;
             }
             break;
         case WM_SIZE:
             if (wParam==SIZE_MINIMIZED) {
-                // Fallback for ShowWindow(SW_MINIMIZE), Win+M and external
-                // minimize requests that bypass WM_SYSCOMMAND. Never hide
-                // synchronously inside WM_SIZE.
-                if (trayReady_ && !shuttingDown_)
-                    PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,0,static_cast<LPARAM>(visibilityGeneration_));
+                suspendWindowRendering();
+                // Win+M and external minimize can bypass our tray path.
+                if (trayReady_ && !shuttingDown_ && !visibilityChanging_)
+                    PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,FALSE,static_cast<LPARAM>(visibilityGeneration_));
             } else layout();
             return 0;
         case WM_MINIMIZE_TO_TRAY:
-            // wParam=TRUE is a queued SC_MINIMIZE, intercepted before iconify.
-            // wParam=FALSE is an external minimize, which may have been restored.
-            if (trayReady_ && !shuttingDown_ && IsWindowVisible(hwnd) &&
-                static_cast<std::uintptr_t>(lParam)==visibilityGeneration_ &&
-                (wParam != FALSE || IsIconic(hwnd)))
-                hideWindowToTray();
+            if (trayReady_ && !shuttingDown_ &&
+                static_cast<std::uintptr_t>(lParam)==visibilityGeneration_) {
+                if(wParam!=FALSE && windowPresented()) hideWindowToTray();
+                else if(IsIconic(hwnd)) {
+                    // Do not hide a window that has since been restored.
+                    visibilityChanging_=true;
+                    hideVisibleMinimizedIcon();
+                    visibilityChanging_=false;
+                }
+            }
             return 0;
         case WM_ACTIVATE:
             if (LOWORD(wParam)==WA_INACTIVE && model_.preferences().closeByClickingOutside &&
@@ -2441,9 +2479,11 @@ private:
         case WM_DPICHANGED: {
                 dpi_=HIWORD(wParam);
             const RECT* suggested=reinterpret_cast<const RECT*>(lParam);
-            SetWindowPos(hwnd,nullptr,suggested->left,suggested->top,
-                suggested->right-suggested->left,suggested->bottom-suggested->top,
-                SWP_NOZORDER|SWP_NOACTIVATE);
+            // The minimized rectangle is not the normal restore geometry.
+            if(!IsIconic(hwnd))
+                SetWindowPos(hwnd,nullptr,suggested->left,suggested->top,
+                    suggested->right-suggested->left,suggested->bottom-suggested->top,
+                    SWP_NOZORDER|SWP_NOACTIVATE);
             updateFonts(); layout(); refreshTrayIcon(); return 0;
         }
         case WM_DWMCOLORIZATIONCOLORCHANGED:
@@ -2472,20 +2512,7 @@ private:
             break;
         }
         case WM_SHOWWINDOW:
-            if (!wParam) {
-                finishReordering(); hardwareReveal_.finish();
-                // Minimized windows have zero/invalid client geometry.
-                // Reflow after restore, not while Windows is minimizing.
-                if (!IsIconic(hwnd)) layout();
-                stopAnimationTimer();
-                endHardwareDrag();finishScreenDrag();
-                temperatureHover_=false; temperatureEngagement_.snap(0);
-                for (auto& item:interactions_) { item.second.hover.snap(0); item.second.press.snap(0); }
-                if (dragging_) commitDrag();
-                pageSurface_.reset();
-                for(auto& item:interactions_) item.second.surface.reset();
-                KillTimer(hwnd,TIMER_READ_DDC); hardwarePollRunning_=false;
-            }
+            if(!wParam) suspendWindowRendering();
             break;
         case WM_DRAWITEM: {
             const auto* item=reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);

@@ -89,8 +89,12 @@ inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
 
-// Initial silent startup: keep the window hidden without activation or
-// geometry changes. Interactive show/hide uses native DWM transitions.
+// Initial silent startup and rare visible-iconic fallback: hide without
+// activation or changing the normal window geometry. Native minimize/restore
+// supplies the ordinary interactive DWM transitions.
+inline constexpr bool trayWindowPresented(bool visible,bool iconic) {
+    return visible && !iconic;
+}
 inline constexpr UINT kHideToTrayFlags =
     SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE |
     SWP_NOZORDER | SWP_NOOWNERZORDER;

@@ -680,6 +680,13 @@ int main() {
               !swapped.shouldToggle(Click::Select,5001) &&
               !swapped.shouldToggle(Click::MouseUp,5015),
             "Reordered Shell selection and release stay deduplicated");
+        // WS_VISIBLE stays set when a window is minimized. A visible
+        // iconic HWND must count as closed so the next click restores it.
+        check(!trayWindowPresented(false,false) &&
+              !trayWindowPresented(true,true) &&
+              !trayWindowPresented(false,true) &&
+              trayWindowPresented(true,false),
+              "Tray presentation distinguishes normal, hidden and iconic states");
         // A burst of physical clicks must not be gated by a prior animation.
         nightlight::TrayClickFilter burst;
         bool shown=false;
