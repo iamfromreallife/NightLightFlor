@@ -3,6 +3,7 @@
 #include <audiopolicy.h>
 #include <appmodel.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include <propkey.h>
 #include <propvarutil.h>
 #include <algorithm>

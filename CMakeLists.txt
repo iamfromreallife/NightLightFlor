@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(NightLightNative VERSION 1.0.11 LANGUAGES CXX RC)
+project(NightLightNative VERSION 1.0.12 LANGUAGES CXX RC)
 if(NOT WIN32)
     message(FATAL_ERROR "Native NightLight requires Windows.")
 endif()
@@ -32,6 +32,8 @@ target_link_libraries(NightLight PRIVATE nightlight-core
 target_compile_definitions(NightLight PRIVATE UNICODE _UNICODE)
 if(MSVC)
     target_compile_options(NightLight PRIVATE /W4 /permissive- /EHsc)
+    # Modern C++/WinRT uses standard coroutines, not deprecated /await.
+    target_compile_features(NightLight PRIVATE cxx_std_20)
     target_link_libraries(NightLight PRIVATE windowsapp)
     target_link_options(NightLight PRIVATE /MANIFEST:EMBED)
 endif()

@@ -529,7 +529,7 @@ bool Model::load() {
         appearance=="dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = general.get("close_by_clicking_outside").boolean(true);
     preferences_.dimInactive=general.get("dim_inactive").boolean(false);
-    preferences_.dimAmount=std::clamp(general.get("dim_amount").integer(50),1,99);
+    preferences_.dimAmount=std::clamp(general.get("dim_amount").integer(90),1,99);
     preferences_.dimMinutes=std::clamp(general.get("dim_minutes").integer(5),1,1440);
     preferences_.dimAll=general.get("dim_all").boolean(true);
     preferences_.dimDisplays.clear();

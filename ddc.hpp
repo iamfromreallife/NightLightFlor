@@ -26,11 +26,6 @@ struct DdcValue {
     bool pending = false;
     bool failed = false;
     bool restoring = false; // protect a saved wake target from premature reads
-    // Temporary dimming never changes percent (the normal user target).
-    int dimAmount=0;
-    bool dimOwned=false;
-    unsigned dimAttempts=0;
-    std::uint64_t dimRetryAt=0;
     int percent = 50;
     DdcBackend backend = DdcBackend::None;
     std::uint64_t generation = 0;
@@ -48,7 +43,6 @@ struct DdcState {
     bool loading = false;
     DdcValue brightness;
     DdcValue contrast;
-    std::wstring dimPhysicalId;
 };
 DWORD ddcRawValue(DWORD minimum, DWORD maximum, int percent);
 int ddcPercentage(DWORD minimum, DWORD maximum, DWORD value);
@@ -83,13 +77,10 @@ public:
     void invalidateTopology();
     void poll(const std::wstring& device); // silent read; does not disable live sliders
     bool set(const std::wstring& device, DdcFeature feature, int percent);
-    void setTemporaryDim(const std::wstring& device,const std::wstring& physicalId,int amount);
-    bool dimRestoreOutstanding();
-    void restoreDimmedBeforeStop();
     DdcState state(const std::wstring& device);
     void stop();
 private:
-    struct Job { int percent = 0; std::uint64_t generation = 0; bool restoring=false; std::wstring physicalId; bool dimWrite=false; };
+    struct Job { int percent = 0; std::uint64_t generation = 0; bool restoring=false; std::wstring physicalId; };
     void run();
     std::mutex mutex_;
     std::condition_variable wake_;
