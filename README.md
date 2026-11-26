@@ -55,3 +55,5 @@ Designed for modern Windows 10 and Windows 11 systems. DDC/CI features depend on
 
 
 
+
+Display wake recovery reasserts all connected monitors' saved color temperatures and known brightness/contrast values across multiple delayed passes, even when the driver initially accepts a write. It preserves physical monitor identity and protects saved targets from transient readbacks. The recovery timer stops after the bounded sequence once the topology is stable.

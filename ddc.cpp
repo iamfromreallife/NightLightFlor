@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "display_identity.hpp"
 #include "ddc.hpp"
 #include "wmi_brightness.hpp"
 #include <physicalmonitorenumerationapi.h>
@@ -17,7 +18,7 @@ void applyDdcObservation(DdcValue& current,const DdcValue& observed,
     current.supported=observed.supported;
     current.readable=observed.readable;
     current.backend=observed.backend;
-    if (!protectUserValue && observed.readable && observed.hasValue) {
+    if (!protectUserValue && !current.restoring && observed.readable && observed.hasValue) {
         current.percent=std::clamp(observed.percent,0,100);
         current.hasValue=true;
         current.managed=true; // persist the actual hardware value as fallback
@@ -156,27 +157,41 @@ void DdcController::seed(const std::wstring& device,int brightness,int contrast,
     state.brightness.hasValue=state.contrast.hasValue=true;
     state.brightness.managed=savedBrightness; state.contrast.managed=savedContrast;
 }
-void DdcController::restore(const std::wstring& device,int brightness,int contrast,bool savedBrightness,bool savedContrast) {
+void DdcController::restore(const std::wstring& device,int brightness,int contrast,bool savedBrightness,bool savedContrast,
+                            const std::wstring& physicalId) {
     if (device.empty() || (!savedBrightness && !savedContrast)) return;
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) return;
+    restoreWindow_=true;
     auto& state=states_[device];
     auto restoreValue=[&](DdcValue& value,int feature,int percent,bool saved) {
         if (!saved) return; // Never send a UI placeholder to hardware.
         percent=std::clamp(percent,0,100);
+        value.restoring=true;
         if (value.pending && value.percent==percent) return;
         value.percent=percent; value.hasValue=true; value.managed=true;
         value.pending=true; value.failed=false; ++value.generation;
-        jobs_[{device,feature}]={percent,value.generation};
+        jobs_[{device,feature}]={percent,value.generation,true,physicalId};
     };
     restoreValue(state.brightness,0,brightness,savedBrightness);
     restoreValue(state.contrast,1,contrast,savedContrast);
     jobs_[{device,-1}]={};
     wake_.notify_one();
 }
+void DdcController::finishRestore() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    restoreWindow_=false;
+    for(auto& item:states_) for(auto* value:{&item.second.brightness,&item.second.contrast}) {
+        if(value->restoring && !value->pending && !value->failed) {
+            value->restoring=false;
+            value->protectUntilTickMs=GetTickCount64()+5000;
+        }
+    }
+}
 void DdcController::invalidateTopology() {
     std::lock_guard<std::mutex> lock(mutex_);
     ++topologyEpoch_;
+    restoreWindow_=false;
     jobs_.clear();
     states_.clear();
     readingDevice_.clear();
@@ -207,7 +222,8 @@ bool DdcController::set(const std::wstring& device,DdcFeature feature,int percen
     auto& value=feature==DdcFeature::Brightness?found->second.brightness:found->second.contrast;
     if (!value.supported) return false;
     percent=std::clamp(percent,0,100);
-    if (value.managed && value.hasValue && value.percent==percent && !value.failed) return true;
+    if (value.managed && value.hasValue && value.percent==percent && !value.failed && !value.restoring) return true;
+    value.restoring=false;
     value.percent=percent; value.hasValue=true; value.managed=true; value.pending=true; value.failed=false; ++value.generation;
     jobs_[{device,static_cast<int>(feature)}]={percent,value.generation}; wake_.notify_one();
     return true;
@@ -270,7 +286,15 @@ void DdcController::run() {
             const auto beforeBrightness=state.brightness,beforeContrast=state.contrast;
             state.loading=false;
             const auto now=GetTickCount64();
-            auto publish=[now](DdcValue& value,const DdcValue& observed) {
+            auto publish=[this,now](DdcValue& value,const DdcValue& observed) {
+                // A failed restoration must not be replaced by a waking
+                // panel's defaults. Release protection only on matching read,
+                // a successful restore, or an explicit new user adjustment.
+                if(!restoreWindow_ && value.restoring && !value.pending &&
+                   observed.readable && observed.hasValue && observed.percent==value.percent) {
+                    value.restoring=false;
+                    value.failed=false;
+                }
                 const bool protect=value.pending || now<value.protectUntilTickMs;
                 applyDdcObservation(value,observed,protect);
             };
@@ -295,14 +319,24 @@ void DdcController::run() {
                 const auto& latest=key.second==0?state.brightness:state.contrast;
                 if (latest.generation!=job.generation) continue;
             }
+            // A saved restoration job must still address the same physical
+            // panel at execution time, not merely the old DISPLAYx number.
+            bool correctTarget=true;
+            if(job.restoring && !job.physicalId.empty()) {
+                const auto snapshot=queryPhysicalDisplayTargets();
+                const auto it=snapshot.bySource.find(normalizedDisplayId(key.first));
+                correctTarget=snapshot.complete && it!=snapshot.bySource.end() &&
+                    it->second.size()==1 &&
+                    normalizedDisplayId(it->second.front().physicalId)==normalizedDisplayId(job.physicalId);
+            }
             bool usedWmi=false;
-            bool ok=writePhysical(api,monitor,key.second,job.percent);
+            bool ok=correctTarget && writePhysical(api,monitor,key.second,job.percent);
             // Upstream also attempts WMI after DDC/CI. Match that behavior for
             // the selected WMI instance, including drivers that return success
             // from SetMonitorBrightness without changing an internal panel.
-            if (key.second==0) {
+            if (correctTarget && key.second==0) {
                 const auto panel=wmi.find(key.first);
-                if (panel && ((panel.readable && panel.percent==job.percent) || wmi.set(panel,job.percent))) { ok=true; usedWmi=true; }
+                if (panel && ((!job.restoring && panel.readable && panel.percent==job.percent) || wmi.set(panel,job.percent))) { ok=true; usedWmi=true; }
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (epoch!=topologyEpoch_ || stopping_) continue;
@@ -310,11 +344,12 @@ void DdcController::run() {
             auto& value=key.second==0?state.brightness:state.contrast;
             if (value.generation==job.generation) {
                 value.pending=false; value.failed=!ok;
+                if(job.restoring && ok && !restoreWindow_) value.restoring=false;
                 if (usedWmi) value.backend=DdcBackend::WindowsWmi;
                 // The next poll must not read a monitor's old value while
                 // its firmware is still applying our last local write.
                 value.protectUntilTickMs=ok?
-                    GetTickCount64()+kDdcPostWriteGraceMs:0;
+                    GetTickCount64()+(job.restoring?5000:kDdcPostWriteGraceMs):0;
                 value.hasValue=true;
                 value.percent=job.percent;
             }

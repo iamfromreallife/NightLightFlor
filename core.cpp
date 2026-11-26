@@ -672,6 +672,32 @@ static bool sameDisplaySnapshot(const std::vector<Monitor>& a,
             a[i].primary!=b[i].primary) return false;
     return true;
 }
+void Model::pauseColorWrites() {
+    if(colorWritesPaused_) return;
+    colorWritesPaused_=true;
+    std::lock_guard<std::mutex> guard(gammaMutex_);
+    pendingGamma_.clear();
+    gammaResults_.clear();
+    for(auto& item:newestGeneration_) ++item.second;
+    for(auto& monitor:monitors_) monitor.gammaStatus=0;
+}
+void Model::beginDisplayRecovery() {
+    wakeCandidate_.clear();
+    wakeConsistentSamples_=0;
+    pauseColorWrites();
+}
+void Model::reassertWakeColors() {
+    if(colorWritesPaused_) return;
+    collectGammaResults();
+    // Always force another write, even after a driver accepted the earlier
+    // request. Do not supersede work still in flight on a slower display.
+    for(auto& monitor:monitors_)
+        if(monitor.gammaStatus!=-1) applyDisplay(monitor,GammaRefresh::Restore);
+}
+bool Model::wakeColorsPending() const {
+    return std::any_of(monitors_.begin(),monitors_.end(),
+        [](const Monitor& monitor){return monitor.gammaStatus==-1;});
+}
 bool Model::refreshMonitors(bool afterWake,bool* stable) {
     if (stable) *stable=false;
     const auto physical=queryPhysicalDisplayTargets();
@@ -679,7 +705,10 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
     context.targets=&physical;
     if (!EnumDisplayMonitors(nullptr,nullptr,enumerateMonitors,
                              reinterpret_cast<LPARAM>(&context)) ||
-        context.entries.empty()) return false;
+        context.entries.empty()) {
+        if(afterWake) beginDisplayRecovery();
+        return false;
+    }
     auto& entries=context.entries;
     std::vector<std::wstring> order;
     if (auto saved=std::get_if<portable::Json::Array>(
@@ -708,8 +737,7 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
         // Never replace live monitors with such a partial/suspect snapshot.
         if (!physical.complete || !context.complete ||
             !wakeTopologyIsUsable(monitors_,entries)) {
-            wakeCandidate_.clear();
-            wakeConsistentSamples_=0;
+            beginDisplayRecovery();
             return false;
         }
         if (sameDisplaySnapshot(wakeCandidate_,entries))
@@ -719,7 +747,8 @@ bool Model::refreshMonitors(bool afterWake,bool* stable) {
             wakeConsistentSamples_=1;
         }
         // Two identical samples, on distinct timer ticks, are required.
-        if (wakeConsistentSamples_<2) return false;
+        if (wakeConsistentSamples_<2) { pauseColorWrites(); return false; }
+        colorWritesPaused_=false;
         if (stable) *stable=true;
     } else {
         wakeCandidate_.clear();
@@ -1097,13 +1126,17 @@ void Model::gammaLoop() {
                     result=applyHardwareColor(job.monitor,active)?1:0;
                 }
             }
-        } else if (applyNvidiaTargetColor(job.monitor,false,job.refresh) &&
+        } else if ((job.refresh!=GammaRefresh::Restore || job.monitor.physicalId.empty() ||
+                    uniquePhysicalTarget(job.monitor)) &&
+                   applyNvidiaTargetColor(job.monitor,false,job.refresh) &&
                    applyHardwareColor(job.monitor,false)) {
             HDC dc=CreateDCW(L"DISPLAY",device.c_str(),nullptr,nullptr);
             if (dc) {
                 result=updateGammaRamp(job.ramp,job.refresh,appliedRamps[device],
                     [&](Ramp& actual) { return GetDeviceGammaRamp(dc,&actual)!=FALSE; },
                     [&](const Ramp& desired) {
+                        if(job.refresh==GammaRefresh::Restore && !job.monitor.physicalId.empty() &&
+                           !uniquePhysicalTarget(job.monitor)) return false;
                         gammaTouched_.insert(key);
                         return SetDeviceGammaRamp(dc,const_cast<Ramp*>(&desired))!=FALSE;
                     })?1:0;
@@ -1158,6 +1191,7 @@ void Model::stopGamma() {
 }
 
 bool Model::applyDisplay(Monitor& mon,GammaRefresh refresh) {
+    if(colorWritesPaused_) { mon.gammaStatus=0; return true; }
     // Capture the pre-NightLight ramp on this (infrequent) monitor-discovery
     // path. Never read or mutate originals_ from the gamma worker.
     const auto persistent=monitorProfileKey(mon);

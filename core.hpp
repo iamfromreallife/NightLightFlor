@@ -216,6 +216,9 @@ public:
     bool load();
     bool save();
     bool refreshMonitors(bool afterWake=false,bool* stable=nullptr);
+    void beginDisplayRecovery();
+    void reassertWakeColors();
+    bool wakeColorsPending() const;
     bool moveMonitor(size_t from,size_t to);
     void applyAll(GammaRefresh refresh=GammaRefresh::Normal);
     bool needsColorWatchdog() const;
@@ -251,6 +254,7 @@ private:
     bool applyDisplay(Monitor& monitor,GammaRefresh refresh);
     void adoptOriginal(const std::wstring& device, HDC dc);
     void queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh refresh);
+    void pauseColorWrites();
     bool applyHardwareColor(const Monitor& monitor,bool active);
     std::set<std::wstring> cleanHardware_,cleanTarget_;
     bool applyNvidiaTargetColor(const Monitor& monitor,bool active,GammaRefresh refresh);
@@ -284,6 +288,7 @@ private:
     std::vector<Monitor> monitors_;
     std::vector<Monitor> wakeCandidate_;
     unsigned wakeConsistentSamples_=0;
+    bool colorWritesPaused_=false; // UI thread only
     std::map<std::wstring, Ramp> originals_;
     std::string savedDocument_;
     FILETIME savedStamp_{};

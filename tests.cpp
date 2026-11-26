@@ -228,6 +228,21 @@ int main() {
             ddc.stop();
             check(!ddc.set(L"missing",DdcFeature::Contrast,40),"DDC refuses writes after shutdown");
         }
+        {
+            DdcValue target;
+            target.percent=23; target.hasValue=true; target.managed=true;
+            target.restoring=true; target.failed=true;
+            DdcValue wakingDefault;
+            wakingDefault.percent=100; wakingDefault.hasValue=true;
+            wakingDefault.readable=true; wakingDefault.supported=true;
+            applyDdcObservation(target,wakingDefault,false);
+            check(target.percent==23 && target.failed && target.restoring,
+                "Wake readbacks must not erase a protected saved hardware target");
+            target.restoring=false;
+            applyDdcObservation(target,wakingDefault,false);
+            check(target.percent==100 && !target.failed,
+                "Normal hardware readback remains authoritative after recovery");
+        }
         const std::string legacy=R"({"version":"2.1.1","screen":{"kelvin":4200,"brightness":25,"monitor_profiles":{"\\\\.\\DISPLAY1":{"enabled":false,"kelvin":3120,"brightness":85,"custom_name":"Meu ecr\u00e3"}}},"general":{"language":"pt-PT","appearance":"light","startup_mode":"tray"},"old_module":{"preserve_me":[1,"ok",false]}})";
         auto data=Json::parse(legacy);
         check(data.get("screen").get("kelvin").integer()==4200,"Read old Kelvin");
