@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <future>
+#include <functional>
 #include <cwchar>
 #include <memory>
 #include <map>
@@ -29,7 +30,6 @@
 #include "paint_surface.hpp"
 #include "startup_task.hpp"
 #include "inactive_media.hpp"
-#include "inactive_dialog.hpp"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -469,6 +469,41 @@ public:
     }
 };
 
+void paintNightLightThumb(HDC dc,float cx,float cy,double hover,double pressed,bool enabled,
+    const Palette& p,UINT dpi,bool dark,bool highContrast) {
+    const auto px=[dpi](int dip){return MulDiv(dip,static_cast<int>(dpi),96);};
+        const float radius=static_cast<float>(px(10));
+        Gdiplus::Graphics g(dc); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        if (!highContrast) {
+            Gdiplus::SolidBrush shadow(Gdiplus::Color(30,0,0,0));
+            g.FillEllipse(&shadow,cx-radius,cy-radius+px(1),radius*2,radius*2);
+        }
+        const auto shell=highContrast?p.card:(dark?RGB(69,69,69):RGB(255,255,255));
+        const auto edge=highContrast?p.text:(dark?RGB(92,92,92):RGB(214,214,214));
+        Gdiplus::SolidBrush body(drawingColor(shell));
+        Gdiplus::Pen border(drawingColor(edge),static_cast<float>(dpi)/96);
+        g.FillEllipse(&body,cx-radius,cy-radius,radius*2,radius*2);
+        g.DrawEllipse(&border,cx-radius,cy-radius,radius*2,radius*2);
+        const float dot=static_cast<float>(px(5)+px(1)*hover-px(1)*pressed);
+        Gdiplus::SolidBrush accent(drawingColor(enabled?p.accent:p.muted));
+        g.FillEllipse(&accent,cx-dot,cy-dot,dot*2,dot*2);
+}
+void applyNightLightFrame(HWND window,const Palette& p,bool dark,bool highContrast) {
+    const BOOL immersive=dark?TRUE:FALSE;
+    DwmSetWindowAttribute(window,20,&immersive,sizeof(immersive));
+    const COLORREF caption=p.header,captionText=p.text;
+    DwmSetWindowAttribute(window,35,&caption,sizeof(caption));
+    DwmSetWindowAttribute(window,36,&captionText,sizeof(captionText));
+    const DWORD corners=2;
+    DwmSetWindowAttribute(window,33,&corners,sizeof(corners));
+    const COLORREF frameBorder=highContrast?p.text:(dark?RGB(112,112,112):RGB(160,160,160));
+    DwmSetWindowAttribute(window,34,&frameBorder,sizeof(frameBorder));
+}
+
+// The settings frame uses the same palette and primitive painters as the main UI.
+#include "inactive_dialog.hpp"
+
 class NativeApp {
 public:
     NativeApp(HINSTANCE instance)
@@ -478,6 +513,9 @@ public:
         BufferedPaintInit();
     }
     ~NativeApp() {
+        shuttingDown_=true;
+        if(dimSettings_) dimSettings_->close();
+        dimSettings_.reset();
         removeTray();
         if (taskbarOwner_) DestroyWindow(taskbarOwner_);
         for (HFONT font : fonts_) if (font) DeleteObject(font);
@@ -581,6 +619,7 @@ public:
         MSG msg{};
         BOOL messageResult=0;
         while ((messageResult=GetMessageW(&msg, nullptr, 0, 0)) > 0) {
+            if(dimSettings_ && dimSettings_->pretranslate(msg)) continue;
             const bool inlineKey=msg.hwnd==editName_ && msg.message==WM_KEYDOWN &&
                 (msg.wParam==VK_RETURN || msg.wParam==VK_ESCAPE);
             if (inlineKey || !IsDialogMessageW(window_, &msg)) {
@@ -603,6 +642,7 @@ private:
     std::vector<DimDisplay> dimDisplays_;
     ULONGLONG lastDimTopology_=0;
     bool dimTopologyDirty_=true,dimDialogOpen_=false;
+    std::unique_ptr<InactiveSettingsWindow> dimSettings_;
     DWORD lastDimInput_=0;
     POINT lastDimCursor_{};
     bool haveDimInput_=false;
@@ -1140,18 +1180,9 @@ private:
         // notifications, not on each slider/painting frame.
         systemDark_=nightlight::systemAppsUseDarkTheme();
         refreshTrayIcon();
-        const BOOL dark=nightlight::effectiveDarkTheme(
-            model_.preferences().theme,systemDark_)?TRUE:FALSE;
-        const Palette p = palette();
-        DwmSetWindowAttribute(window_, 20, &dark, sizeof(dark)); // immersive dark titlebar
-        COLORREF caption = p.header;
-        DwmSetWindowAttribute(window_, 35, &caption, sizeof(caption));
-        COLORREF captionText = p.text;
-        DwmSetWindowAttribute(window_, 36, &captionText, sizeof(captionText));
-        const DWORD corners=2; // DWMWCP_ROUND; ignored gracefully on Windows 10.
-        DwmSetWindowAttribute(window_,33,&corners,sizeof(corners));
-        const COLORREF frameBorder=highContrast_?p.text:(dark?RGB(112,112,112):RGB(160,160,160));
-        DwmSetWindowAttribute(window_,34,&frameBorder,sizeof(frameBorder));
+        const bool dark=nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);
+        applyNightLightFrame(window_,palette(),dark,highContrast_);
+        if(dimSettings_ && dimSettings_->hwnd()) dimSettings_->refreshTheme();
         // Repaint the native non-client caption as well as app contents;
         // the standard title bar must retain the matching text colour.
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME);
@@ -1556,25 +1587,8 @@ private:
         }
     }
     void drawSliderThumb(HDC dc,float cx,float cy,double hover,double pressed,bool enabled) {
-        const auto p=palette();
-        const bool dark=nightlight::effectiveDarkTheme(
-            model_.preferences().theme,systemDark_);
-        const float radius=static_cast<float>(px(10));
-        Gdiplus::Graphics g(dc); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-        if (!highContrast_) {
-            Gdiplus::SolidBrush shadow(Gdiplus::Color(30,0,0,0));
-            g.FillEllipse(&shadow,cx-radius,cy-radius+px(1),radius*2,radius*2);
-        }
-        const auto shell=highContrast_?p.card:(dark?RGB(69,69,69):RGB(255,255,255));
-        const auto edge=highContrast_?p.text:(dark?RGB(92,92,92):RGB(214,214,214));
-        Gdiplus::SolidBrush body(drawingColor(shell));
-        Gdiplus::Pen border(drawingColor(edge),static_cast<float>(dpi_)/96);
-        g.FillEllipse(&body,cx-radius,cy-radius,radius*2,radius*2);
-        g.DrawEllipse(&border,cx-radius,cy-radius,radius*2,radius*2);
-        const float dot=static_cast<float>(px(5)+px(1)*hover-px(1)*pressed);
-        Gdiplus::SolidBrush accent(drawingColor(enabled?p.accent:p.muted));
-        g.FillEllipse(&accent,cx-dot,cy-dot,dot*2,dot*2);
+        paintNightLightThumb(dc,cx,cy,hover,pressed,enabled,palette(),dpi_,
+            nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_),highContrast_);
     }
     void drawSlider(HDC dc) {
         const bool enabled = hasMonitor() && selectedMonitor()->enabled;
@@ -1707,7 +1721,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.13";
+        const std::wstring version=L"NightLight v1.0.14";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -2002,33 +2016,57 @@ private:
         dimOverlays_.foregroundChanged(foreground);
     }
     void openInactiveSettings() {
-        if(dimDialogOpen_) return;
+        if(dimSettings_ && dimSettings_->hwnd()) {
+            dimSettings_->activate();
+            return;
+        }
+        // Every opening creates a fresh, normal HWND so DWM can perform the
+        // same first-show transition that the main window uses.
+        dimSettings_.reset();
         dimDialogOpen_=true;
-        trayMenuOpen_=true;
         resetDimActivity();
         syncInactiveDimming();
         refreshDimDisplays(true);
         std::vector<Monitor> choices;
         for(const auto& entry:dimDisplays_) choices.push_back(entry.monitor);
-        // Test the unsaved slider and monitor selections immediately, even
-        // with automatic dimming disabled or the cursor on that display.
         const auto test=[this](const Preferences* preview) {
             dimOverlays_.clear();
-            if(!preview || !displayAwake_) return false;
+            if(!preview || !displayAwake_ || shuttingDown_) return false;
             refreshDimDisplays(true);
             bool shown=false;
             for(const auto& entry:dimDisplays_) if(preview->dims(entry.monitor))
                 shown=dimOverlays_.set(entry.monitor.device,preview->dimAmount) || shown;
             return shown;
         };
-        const auto updated=nightlight::inactive_dialog::settings(instance_,taskbarOwner_,
-            model_.preferences(),choices,pt(),test);
-        dimOverlays_.clear();
-        dimDialogOpen_=false;trayMenuOpen_=false;
-        if(updated) model_.updatePreferences(*updated);
-        resetDimActivity();
-        syncInactiveDimming();
-        tickInactiveDimming();
+        const auto closed=[this](const std::optional<Preferences>& updated) {
+            dimOverlays_.clear();
+            dimDialogOpen_=false;
+            if(shuttingDown_) return;
+            if(updated) {
+                // Other tray settings remain available while this regular
+                // window is open. Do not overwrite those unrelated changes.
+                auto merged=model_.preferences();
+                merged.dimInactive=updated->dimInactive;
+                merged.dimAmount=updated->dimAmount;
+                merged.dimMinutes=updated->dimMinutes;
+                merged.dimAll=updated->dimAll;
+                merged.dimDisplays=updated->dimDisplays;
+                model_.updatePreferences(merged);
+            }
+            resetDimActivity();
+            syncInactiveDimming();
+            tickInactiveDimming();
+        };
+        dimSettings_=std::make_unique<InactiveSettingsWindow>(instance_,taskbarOwner_,
+            model_.preferences(),std::move(choices),pt(),test,closed,
+            [this]{return palette();},
+            [this]{return nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);},
+            [this]{return highContrast_;});
+        if(!dimSettings_->open()) {
+            dimSettings_.reset();
+            dimDialogOpen_=false;
+            syncInactiveDimming();
+        }
     }
     void scheduleDisplayRecovery() {
         if (!displayRecoveryActive_) {
@@ -3007,7 +3045,6 @@ private:
         case WM_COMMAND:
             handleCommand(LOWORD(wParam),HIWORD(wParam)); return 0;
         case WM_TRAY_ICON: {
-            if(dimDialogOpen_) return 0;
             // For NOTIFYICON_VERSION_4, LOWORD(lParam) is the message and
             // HIWORD(lParam) is our icon ID; legacy Shells use wParam as ID.
             if (trayVersion4_) {
@@ -3141,6 +3178,7 @@ private:
             dimTopologyDirty_=true;
             if (msg==WM_DISPLAYCHANGE) {
                 // Remove any old-coordinate overlay before the next tick.
+                if(dimSettings_) dimSettings_->cancelTest();
                 dimOverlays_.clear();
                 pageSurface_.reset();
                 for (auto& item:interactions_) item.second.surface.reset();
@@ -3157,6 +3195,7 @@ private:
                     const bool wasAwake=displayAwake_;
                     displayAwake_=state!=0;
                     if (!displayAwake_) {
+                        if(dimSettings_) dimSettings_->cancelTest();
                         resetDimActivity();
                         if (wasAwake) {
                             // Preserve the in-memory/saved last applied levels,
@@ -3185,6 +3224,7 @@ private:
                 scheduleDisplayRecovery();
                 syncInactiveDimming();
             } else if (wParam==PBT_APMSUSPEND) {
+                if(dimSettings_) dimSettings_->cancelTest();
                 resetDimActivity();
                 displayAwake_=false;
                 restoreDdcAfterWake_=true;
@@ -3358,11 +3398,14 @@ private:
             if (wParam) {
                 noteWindowPosition(true);
                 model_.save();
+                if(dimSettings_) dimSettings_->cancelTest();
                 dimOverlays_.clear();
                 model_.restoreOriginals();
             }
             return 0;
         case WM_DESTROY:
+            shuttingDown_=true;
+            if(dimSettings_) dimSettings_->close();
             KillTimer(taskbarOwner_,TIMER_INACTIVE_DIM);
             dimTimerRunning_=false;
             setKeyboardActivity(false);
