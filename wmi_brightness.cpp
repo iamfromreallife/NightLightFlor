@@ -135,9 +135,10 @@ WmiBrightnessPanel WmiBrightness::find(const std::wstring& device) {
         impl_->negativeCache[device]=now+30000;
         return {};
     }
-    auto selected=matches.front();
+    auto selected=std::move(matches.front());
+    const auto selectedIdentity=normalizeMonitorInstance(selected.instance);
     impl_->query(L"SELECT * FROM WmiMonitorBrightness",[&](IWbemClassObject* object) {
-        if (!active(object) || normalizeMonitorInstance(stringProperty(object,L"InstanceName"))!=normalizeMonitorInstance(selected.instance)) return;
+        if (!active(object) || normalizeMonitorInstance(stringProperty(object,L"InstanceName"))!=selectedIdentity) return;
         DWORD value=0;
         if (numberProperty(object,L"CurrentBrightness",value) && value<=100) { selected.readable=true; selected.percent=static_cast<int>(value); }
     });

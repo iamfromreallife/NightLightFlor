@@ -19,6 +19,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 #include "core.hpp"
 #include "ddc.hpp"
@@ -302,9 +303,11 @@ COLORREF mix(COLORREF a, COLORREF b, double f) {
                c(GetBValue(a), GetBValue(b)));
 }
 void fill(HDC dc, RECT rect, COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
-    FillRect(dc, &rect, brush);
-    DeleteObject(brush);
+    // A stock brush is owned by GDI; avoid allocating a new brush for
+    // every parent/child background on every animation frame.
+    const COLORREF previous=SetDCBrushColor(dc,color);
+    FillRect(dc,&rect,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    if(previous!=CLR_INVALID) SetDCBrushColor(dc,previous);
 }
 Gdiplus::Color drawingColor(COLORREF c) {
     return Gdiplus::Color(255,GetRValue(c),GetGValue(c),GetBValue(c));
@@ -356,6 +359,8 @@ public:
         removeTray();
         if (taskbarOwner_) DestroyWindow(taskbarOwner_);
         for (HFONT font : fonts_) if (font) DeleteObject(font);
+        // Cached native paths must die before the GDI+ runtime.
+        glyphPaths_.clear();
         if (drawingToken_) Gdiplus::GdiplusShutdown(drawingToken_);
         BufferedPaintUnInit();
     }
@@ -520,6 +525,10 @@ private:
     // All three section headings share exactly the same HFONT handle.
     HFONT sectionTitleFont_ = nullptr;
     std::vector<HFONT> fonts_;
+    // Bounded per-font measurements; invalidate before deleting/reusing
+    // HFONTs. Unlike HWND caches these survive a native frame replacement.
+    mutable std::map<HFONT,std::map<std::wstring,int>> textWidths_;
+    std::map<std::pair<wchar_t,int>,std::unique_ptr<Gdiplus::GraphicsPath>> glyphPaths_;
     size_t selected_ = 0;
     UINT dpi_ = 96;
     int width_ = 870, height_ = 440;
@@ -880,6 +889,8 @@ private:
         if (window_ && windowPresented()) InvalidateRect(window_, nullptr, FALSE);
     }
     void updateFonts() {
+        textWidths_.clear();
+        glyphPaths_.clear();
         for (HFONT font : fonts_) if (font) DeleteObject(font);
         fonts_.clear();
         auto create = [&](int size, int weight) {
@@ -1100,10 +1111,21 @@ private:
         layout();
     }
     int textWidth(const std::wstring& text, HFONT font=nullptr) const {
+        const HFONT effective=font?font:(font_?font_:static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT)));
+        auto& cache=textWidths_[effective];
+        if(const auto found=cache.find(text);found!=cache.end()) return found->second;
         HDC dc=GetDC(window_);
-        HGDIOBJ old=SelectObject(dc,font?font:(font_?font_:GetStockObject(DEFAULT_GUI_FONT)));
-        SIZE size{}; GetTextExtentPoint32W(dc,text.c_str(),static_cast<int>(text.size()),&size);
+        if(!dc) return 0;
+        HGDIOBJ old=SelectObject(dc,effective);
+        SIZE size{};
+        const BOOL ok=GetTextExtentPoint32W(dc,text.c_str(),static_cast<int>(text.size()),&size);
         SelectObject(dc,old); ReleaseDC(window_,dc);
+        // Keep the cache small even when a slider produces thousands of
+        // different numeric labels or a user repeatedly renames monitors.
+        if(ok && old && old!=HGDI_ERROR) {
+            if(cache.size()>=128) cache.clear();
+            cache.emplace(text,static_cast<int>(size.cx));
+        }
         return size.cx;
     }
     int selectorWidth(HWND control) const {
@@ -1117,8 +1139,9 @@ private:
             tabWidths.push_back(std::max(px(108),
                 textWidth(monitor.displayName(),boldFont_)+px(88)));
         // The exit animation still draws hardware while it is collapsing.
+        const auto now=uiTime();
         const bool hardwareShown=ddcVisible_ ||
-            (hardwareReveal_.active(uiTime()) && hardwareReveal_.value(uiTime())>0);
+            (hardwareReveal_.active(now) && hardwareReveal_.value(now)>0);
         return nightlight::calculateWindowContentMinimum(
             static_cast<int>(dpi_),clientWidth,tabWidths,
             hardwareRows_.size(),gammaUnlocked_,hardwareShown);
@@ -1172,6 +1195,7 @@ private:
         width_=std::max(1L,client.right); height_=std::max(1L,client.bottom);
         struct Placement { HWND control; int x,y,w,h; };
         std::vector<Placement> placements;
+        placements.reserve(tabs_.size()+hardwareRows_.size()*3+4);
         auto place=[&](HWND control,int x,int y,int w,int h,BOOL) {
             if(!control)return;
             if(!hardwareRow(control) && !hardwareNameButton(control)) {
@@ -1225,7 +1249,9 @@ private:
         // Keep the smaller square button vertically centred on the tabs.
         place(btnScreenOff_,tabX,tabY+(tabH-offSize)/2,
             offSize,offSize,TRUE);
-        EnableWindow(btnScreenOff_,!tabs_.empty());
+        const bool screenOffEnabled=!tabs_.empty();
+        if((IsWindowEnabled(btnScreenOff_)!=FALSE)!=screenOffEnabled)
+            EnableWindow(btnScreenOff_,screenOffEnabled);
         panelHeight_=px(46+rows*38);
         secondPanelTop_=panelTop_+panelHeight_+px(nightlight::kCardsGapDip);
         const bool narrowTemperature=width_<px(350);
@@ -1250,6 +1276,9 @@ private:
         hardwareHeight_=px(hardwareRows_.empty()?72:
             nightlight::kDdcSectionBaseDip+
                 nightlight::kDdcRowStepDip*static_cast<int>(hardwareRows_.size()));
+        const int percentTextWidth=std::max(px(1),textWidth(L"100 %",smallFont_));
+        const int hardwareSliderWidth=nightlight::ddcSliderWidth(
+            static_cast<int>(dpi_),width_,percentTextWidth);
         for (size_t i=0;i<hardwareRows_.size();++i) {
             auto& row=hardwareRows_[i];
             row.topMotion.to(hardwareTop_+px(nightlight::kDdcFirstRowTopDip+
@@ -1269,12 +1298,8 @@ private:
             // The native trackbar reserves its own thumb inset. Extend the
             // HWND close enough to the percentage to remove the large gap,
             // while leaving room for a full 100 % reading.
-            const int percentTextWidth=std::max(px(1),
-                textWidth(L"100 %",smallFont_));
-            const int sliderWidth=nightlight::ddcSliderWidth(
-                static_cast<int>(dpi_),width_,percentTextWidth);
-            place(row.brightness,sliderLeft,row.top+px(36),sliderWidth,px(28),TRUE);
-            place(row.contrast,sliderLeft,row.top+px(66),sliderWidth,px(28),TRUE);
+            place(row.brightness,sliderLeft,row.top+px(36),hardwareSliderWidth,px(28),TRUE);
+            place(row.contrast,sliderLeft,row.top+px(66),hardwareSliderWidth,px(28),TRUE);
         }
         hardwareVisibleHeight_=static_cast<int>(std::round(hardwareHeight_*hardwareProgress));
         contentHeight_=secondPanelTop_+temperatureHeight_+margin+
@@ -1422,11 +1447,12 @@ private:
         if (dragging_) temperaturePosition_.snap(current);
         else animate(temperaturePosition_,current,160);
         animate(temperatureEngagement_,dragging_?1.0:(temperatureHover_?0.35:0.0),120);
+        const auto now=uiTime();
         const int cx=nightlight::temperatureSliderXFromKelvin(
-            static_cast<int>(std::lround(temperaturePosition_.value(uiTime()))),
+            static_cast<int>(std::lround(temperaturePosition_.value(now))),
             slider_.left,slider_.right);
         const int cy=(slider_.top+slider_.bottom)/2;
-        const double engagement=temperatureEngagement_.value(uiTime());
+        const double engagement=temperatureEngagement_.value(now);
         drawSliderThumb(dc,static_cast<float>(cx),static_cast<float>(cy),temperatureHover_?engagement:0,
             dragging_?engagement:0,enabled);
     }
@@ -1524,7 +1550,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.9";
+        const std::wstring version=L"NightLight v1.0.10";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1693,32 +1719,35 @@ private:
         layout();
         repaint();
     }
-    void drawCenteredDdcGlyph(HDC dc,const wchar_t* glyph,POINT center,
-        int sizeDip,COLORREF foreground) {
-        // Draw the actual *ink* of the glyph about the slider track's
-        // centre, not the font's line box (whose asymmetric bearing made
-        // brightness and contrast appear vertically offset).
+    const Gdiplus::GraphicsPath* centeredGlyph(wchar_t glyph,int emPixels) {
+        const auto key=std::make_pair(glyph,emPixels);
+        if(const auto it=glyphPaths_.find(key);it!=glyphPaths_.end()) return it->second.get();
         Gdiplus::FontFamily fluent(L"Segoe Fluent Icons");
         Gdiplus::FontFamily fallback(L"Segoe MDL2 Assets");
-        const Gdiplus::FontFamily* family=fluent.IsAvailable()?&fluent:&fallback;
-        Gdiplus::GraphicsPath path;
-        const Gdiplus::StringFormat* typography=
-            Gdiplus::StringFormat::GenericTypographic();
-        if (path.AddString(glyph,1,family,Gdiplus::FontStyleRegular,
-                static_cast<Gdiplus::REAL>(px(sizeDip)),Gdiplus::PointF(0,0),
-                typography)!=Gdiplus::Ok) return;
+        const auto* family=fluent.IsAvailable()?&fluent:&fallback;
+        auto path=std::make_unique<Gdiplus::GraphicsPath>();
+        if(path->AddString(&glyph,1,family,Gdiplus::FontStyleRegular,
+            static_cast<Gdiplus::REAL>(emPixels),Gdiplus::PointF(0,0),
+            Gdiplus::StringFormat::GenericTypographic())!=Gdiplus::Ok) return nullptr;
         Gdiplus::RectF ink{};
-        if (path.GetBounds(&ink)!=Gdiplus::Ok || ink.Width<=0 || ink.Height<=0)
-            return;
+        if(path->GetBounds(&ink)!=Gdiplus::Ok || ink.Width<=0 || ink.Height<=0) return nullptr;
         Gdiplus::Matrix centerInk;
         centerInk.Translate(-ink.X-ink.Width/2.0f,-ink.Y-ink.Height/2.0f);
-        path.Transform(&centerInk);
+        if(path->Transform(&centerInk)!=Gdiplus::Ok) return nullptr;
+        // Only four glyphs are currently used; bound future additions too.
+        if(glyphPaths_.size()>=16) glyphPaths_.clear();
+        return glyphPaths_.emplace(key,std::move(path)).first->second.get();
+    }
+    void drawCenteredDdcGlyph(HDC dc,const wchar_t* glyph,POINT center,
+        int sizeDip,COLORREF foreground) {
+        const auto* path=centeredGlyph(*glyph,px(sizeDip));
+        if(!path) return;
         Gdiplus::Graphics g(dc);
         nightlight::configureIconGraphics(g);
         g.TranslateTransform(static_cast<Gdiplus::REAL>(center.x),
             static_cast<Gdiplus::REAL>(center.y));
         Gdiplus::SolidBrush brush(drawingColor(foreground));
-        g.FillPath(&brush,&path);
+        g.FillPath(&brush,path);
     }
     void drawHardware(HDC dc) {
         const Palette p=palette();
@@ -1734,6 +1763,7 @@ private:
             RECT empty{left,hardwareTop_+px(40),right,hardwareTop_+px(62)};
             drawTextAt(dc,tr(L"No connected displays",L"Nenhum ecrã ligado"),empty,font_,p.muted);
         }
+        const int percentTextWidth=std::max(px(1),textWidth(L"100 %",smallFont_));
         for (size_t i=0;i<hardwareRows_.size();++i) {
             const auto& row=hardwareRows_[i];
             const auto state=ddc_.state(row.device);
@@ -1747,8 +1777,6 @@ private:
                     iconCenter,contrast?15:18,p.subtle);
                 // Match the exact right edge of the temperature gradient
                 // and its 6500 K label, even with odd window widths.
-                const int percentTextWidth=std::max(px(1),
-                    textWidth(L"100 %",smallFont_));
                 const RECT number=nightlight::ddcPercentageRect(
                     static_cast<int>(dpi_),width_,percentTextWidth,y,px(28));
                 const int percent=GetCapture()==slider?
@@ -1877,21 +1905,7 @@ private:
             // path, instead of rotating a layout rectangle. Font bearings
             // are removed once before rotation, so the icon cannot orbit
             // off-centre or jump as the angle changes.
-            Gdiplus::FontFamily fluent(L"Segoe Fluent Icons");
-            Gdiplus::FontFamily mdl2(L"Segoe MDL2 Assets");
-            const Gdiplus::FontFamily* family=fluent.IsAvailable()?&fluent:&mdl2;
-            Gdiplus::GraphicsPath glyph;
-            const Gdiplus::StringFormat* typography=
-                Gdiplus::StringFormat::GenericTypographic();
-            glyph.AddString(L"\uE777",1,family,Gdiplus::FontStyleRegular,19.0f,
-                Gdiplus::PointF(0.0f,0.0f),typography);
-            Gdiplus::RectF ink{};
-            if (glyph.GetBounds(&ink)==Gdiplus::Ok &&
-                ink.Width>0.0f && ink.Height>0.0f) {
-                Gdiplus::Matrix zeroInkOrigin;
-                zeroInkOrigin.Translate(-ink.X-ink.Width/2.0f,
-                    -ink.Y-ink.Height/2.0f);
-                glyph.Transform(&zeroInkOrigin);
+            if(const auto* glyph=centeredGlyph(L'\uE777',19)) {
                 Gdiplus::Graphics g(dc);
                 nightlight::configureIconGraphics(g);
                 g.TranslateTransform(static_cast<float>(rc.left+rc.right)/2.0f,
@@ -1903,7 +1917,7 @@ private:
                 const float scale=static_cast<float>(dpi_)/96.0f;
                 g.ScaleTransform(-scale,scale);
                 Gdiplus::SolidBrush brush(drawingColor(foreground));
-                g.FillPath(&brush,&glyph);
+                g.FillPath(&brush,glyph);
             }
         }
         if (id==ID_SCREEN_OFF) {
@@ -2305,13 +2319,23 @@ private:
             return result;
         };
         HMENU menu=createMenu();
+        // Multiple items use identical artwork (especially monitor/backend
+        // submenus). Share only within this popup; free after DestroyMenu.
+        std::map<std::tuple<nightlight::MenuIcon,COLORREF,bool>,HBITMAP> rendered;
         auto append=[&](HMENU target,UINT flags,UINT_PTR command,const wchar_t* text,nightlight::MenuIcon icon) {
             AppendMenuW(target,flags,command,text);
-            HBITMAP bitmap=nightlight::menuIconBitmap(icon,dpi_,GetSysColor(flags&MF_GRAYED?COLOR_GRAYTEXT:COLOR_MENUTEXT),(flags&MF_CHECKED)!=0);
-            if (bitmap) {
-                MENUITEMINFOW item{sizeof(item)};item.fMask=MIIM_BITMAP;item.hbmpItem=bitmap;
+            const auto color=GetSysColor(flags&MF_GRAYED?COLOR_GRAYTEXT:COLOR_MENUTEXT);
+            const bool checked=(flags&MF_CHECKED)!=0;
+            const auto key=std::make_tuple(icon,color,checked);
+            auto it=rendered.find(key);
+            if(it==rendered.end()) {
+                const HBITMAP bitmap=nightlight::menuIconBitmap(icon,dpi_,color,checked);
+                it=rendered.emplace(key,bitmap).first;
+                if(bitmap) icons.push_back(bitmap);
+            }
+            if(it->second) {
+                MENUITEMINFOW item{sizeof(item)};item.fMask=MIIM_BITMAP;item.hbmpItem=it->second;
                 SetMenuItemInfoW(target,GetMenuItemCount(target)-1,TRUE,&item);
-                icons.push_back(bitmap);
             }
         };
         HMENU monitors=createMenu();
@@ -2560,6 +2584,11 @@ private:
                     SWP_NOZORDER|SWP_NOACTIVATE);
             updateFonts(); layout(); refreshTrayIcon(); return 0;
         }
+        case WM_FONTCHANGE:
+            textWidths_.clear();
+            glyphPaths_.clear();
+            tabDesiredWidths_.clear();
+            layout(); repaint(); return 0;
         case WM_DWMCOLORIZATIONCOLORCHANGED:
         case WM_THEMECHANGED:
         case WM_SETTINGCHANGE:

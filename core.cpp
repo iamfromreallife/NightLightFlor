@@ -79,7 +79,7 @@ ColorGains kelvinGains(int kelvin) {
     const double k = std::clamp(kelvin, 1000, 6500);
     if (k == 6500) return {1, 1, 1};
     const double t = k / 100.0;
-    const double d65 = (99.4708025861 * std::log(65.0) - 161.1195681661) / 255.0;
+    static const double d65 = (99.4708025861 * std::log(65.0) - 161.1195681661) / 255.0;
     double green = (99.4708025861 * std::log(std::max(t, 19.0)) - 161.1195681661) / 255.0 / d65;
     if (k < 1900) green *= std::pow((k - 1000.0) / 900.0, 1.2);
     const double blue = t <= 19 ? 0 :
@@ -181,7 +181,13 @@ Ramp buildAppliedRamp(int kelvin, bool enabled, const Ramp* originalRamp) {
     //
     // Only disabling the filter (or exiting the app) restores that original.
     if (!enabled && originalRamp) return *originalRamp;
-    return buildKelvinRamp(enabled ? kelvin : 6500);
+    // The neutral LUT is immutable and shared across all neutral requests.
+    // Preserve the original calibration branch above and exact ramp math.
+    if(!enabled || kelvin==6500) {
+        static const Ramp neutral=buildKelvinRamp(6500);
+        return neutral;
+    }
+    return buildKelvinRamp(kelvin);
 }
 
 int sliderPositionFromX(int x,int left,int right,int minimum,int maximum) {
