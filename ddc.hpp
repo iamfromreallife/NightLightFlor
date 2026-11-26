@@ -36,6 +36,9 @@ struct DdcValue {
 // keeps the last displayed or stored percentage.
 void applyDdcObservation(DdcValue& current,const DdcValue& observed,
                          bool protectUserValue);
+// Settled restoration observations verify the target rather than adopt
+// whatever value the monitor reported during boot or wake.
+void verifyDdcRestore(DdcValue& current,const DdcValue& observed);
 struct DdcState {
     bool loading = false;
     DdcValue brightness;

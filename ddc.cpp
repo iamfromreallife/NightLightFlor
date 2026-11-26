@@ -28,6 +28,12 @@ void applyDdcObservation(DdcValue& current,const DdcValue& observed,
     // fallback. pending, generation and write-grace belong to local writes
     // and must not be modified by this observation.
 }
+void verifyDdcRestore(DdcValue& current,const DdcValue& observed) {
+    if(!current.restoring || current.pending || !observed.readable || !observed.hasValue) return;
+    // A one-percentage-point difference can be hardware quantization.
+    const int difference=current.percent-observed.percent;
+    current.failed=difference>1 || difference< -1;
+}
 DWORD ddcRawValue(DWORD lo,DWORD hi,int percent) {
     if (hi<=lo) return lo;
     return lo+static_cast<DWORD>((std::uint64_t(hi-lo)*std::clamp(percent,0,100)+50)/100);
@@ -127,12 +133,14 @@ DdcValue observe(Api& api,Physical& physical,WmiBrightness& wmi,const std::wstri
     }
     return value;
 }
-bool writePhysical(Api& api,Physical& physical,int feature,int percent) {
+bool writePhysical(Api& api,Physical& physical,int feature,int percent,bool force) {
     if (physical.handles.empty()) return false;
     bool allSucceeded=true;
     for (const auto& monitor:physical.handles) {
         const auto reading=read(api,monitor.hPhysicalMonitor,feature);
-        if (reading.supported && ddcPercentage(reading.lo,reading.hi,reading.value)==percent) continue;
+        // At boot a cached getter can already claim the desired percentage
+        // while the actual panel is still using its power-on brightness.
+        if (!force && reading.supported && ddcPercentage(reading.lo,reading.hi,reading.value)==percent) continue;
         const auto setter=feature==0?api.setBrightness:api.setContrast;
         const bool ok=writeDdcValue(reading.supported,reading.lo,reading.hi,percent,
             [&](DWORD raw){return setter && setter(monitor.hPhysicalMonitor,raw);},
@@ -296,6 +304,7 @@ void DdcController::run() {
                     value.failed=false;
                 }
                 const bool protect=value.pending || now<value.protectUntilTickMs;
+                if(restoreWindow_ && !protect) verifyDdcRestore(value,observed);
                 applyDdcObservation(value,observed,protect);
             };
             publish(state.brightness,brightness);
@@ -330,7 +339,7 @@ void DdcController::run() {
                     normalizedDisplayId(it->second.front().physicalId)==normalizedDisplayId(job.physicalId);
             }
             bool usedWmi=false;
-            bool ok=correctTarget && writePhysical(api,monitor,key.second,job.percent);
+            bool ok=correctTarget && writePhysical(api,monitor,key.second,job.percent,job.restoring);
             // Upstream also attempts WMI after DDC/CI. Match that behavior for
             // the selected WMI instance, including drivers that return success
             // from SetMonitorBrightness without changing an internal panel.

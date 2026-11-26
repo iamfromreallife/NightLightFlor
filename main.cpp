@@ -361,7 +361,9 @@ public:
 
     int run(int show) {
         gammaUnlocked_ = nightlight::gammaRangeUnlocked();
-        if (model_.load()) model_.refreshMonitors();
+        // Do not write to the first, potentially incomplete boot topology.
+        // The normal recovery timer will enumerate twice before restoring.
+        model_.load();
         if (!model_.isReady()) {
             MessageBoxW(nullptr, model_.lastError().c_str(), L"NightLight",
                         MB_ICONERROR | MB_OK);
@@ -487,6 +489,7 @@ private:
     bool restoreDdcAfterWake_=false;
     unsigned recoveryPass_=0;
     unsigned recoverySettleChecks_=0;
+    bool recoveryVerificationIssued_=false;
     int hardwareTop_ = 0;
     int hardwareHeight_ = 186;
     HWND btnRefresh_=nullptr, btnScreenOff_=nullptr, editName_=nullptr;
@@ -953,8 +956,8 @@ private:
         updateLanguage();
         updateTheme();
         layout();
-        // Initial DDC/CI readback is authoritative; saved values are used
-        // only as UI fallback if the monitor cannot report its settings.
+        // Saved per-monitor targets are authoritative at launch. Hardware
+        // discovery and writes will run after stable physical enumeration.
         ensureHardwareRows();
         displayPowerNotification_=RegisterPowerSettingNotification(window_,&displayStateGuid,DEVICE_NOTIFY_WINDOW_HANDLE);
         taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
@@ -964,7 +967,10 @@ private:
         if (!trayReady_) SetTimer(window_,TIMER_TRAY_RETRY,1000,nullptr);
         model_.setStatusWindow(window_);
         model_.collectGammaResults();
-        syncColorWatchdog();
+        // Run on every launch, not just after a Windows power notification.
+        // This is essential when the logon task starts before DDC/CI is ready.
+        restoreDdcAfterWake_=true;
+        scheduleDisplayRecovery();
         updateTrayTooltip();
         // Native window controls render immediately; no WebView runtime.
     }
@@ -1513,7 +1519,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.5";
+        const std::wstring version=L"NightLight v1.0.6";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1633,6 +1639,7 @@ private:
         if (!displayRecoveryActive_) {
             recoveryPass_=0;
             recoverySettleChecks_=0;
+            recoveryVerificationIssued_=false;
             // Commit any active rename/drag while the old device mapping is
             // still intact. Otherwise an in-flight rename could be saved to
             // the wrong physical panel after Windows swaps DISPLAYx numbers.
@@ -2790,6 +2797,7 @@ private:
                     if(recoveryPass_!=0) ddc_.invalidateTopology();
                     recoveryPass_=0;
                     recoverySettleChecks_=0;
+                    recoveryVerificationIssued_=false;
                     SetTimer(hwnd,TIMER_DISPLAYS,1000,nullptr);
                     return 0;
                 }
@@ -2799,6 +2807,7 @@ private:
                     ddc_.invalidateTopology();
                     recoveryPass_=0;
                     recoverySettleChecks_=0;
+                    recoveryVerificationIssued_=false;
                     restoreDdcAfterWake_=true;
                     const auto& monitors=model_.monitors();
                     const auto found=std::find_if(monitors.begin(),monitors.end(),
@@ -2834,16 +2843,35 @@ private:
                     SetTimer(hwnd,TIMER_DISPLAYS,delay,nullptr);
                     return 0;
                 }
-                // Final pass has had time to complete. Wait for the actual
-                // workers; give failed transports several extra attempts,
-                // without keeping the recovery timer alive forever.
+                // After the last delayed write, explicitly read the monitors
+                // back even when the controls have never been opened. A
+                // successful transport call is not proof of actual brightness.
+                // Keep saved targets protected throughout this verification.
+                if(restoreDdcAfterWake_ && !recoveryVerificationIssued_) {
+                    bool writePending=false;
+                    for(const auto& mon:model_.monitors()) {
+                        const auto current=ddc_.state(mon.device);
+                        writePending=writePending || current.brightness.pending || current.contrast.pending;
+                    }
+                    if(writePending && recoverySettleChecks_<3) {
+                        ++recoverySettleChecks_;
+                        SetTimer(hwnd,TIMER_DISPLAYS,6000,nullptr);
+                        return 0;
+                    }
+                    for(const auto& mon:model_.monitors()) ddc_.refresh(mon.device);
+                    recoveryVerificationIssued_=true;
+                    SetTimer(hwnd,TIMER_DISPLAYS,2000,nullptr);
+                    return 0;
+                }
+                // Wait for the actual workers; retry a bounded number of
+                // times on a failed write or a mismatching settled readback.
                 model_.collectGammaResults();
                 bool pending=model_.wakeColorsPending();
                 bool failed=false;
                 for(const auto& mon:model_.monitors()) {
                     failed=failed || mon.gammaStatus==0;
                     const auto current=ddc_.state(mon.device);
-                    pending=pending || current.brightness.pending || current.contrast.pending;
+                    pending=pending || current.loading || current.brightness.pending || current.contrast.pending;
                     const bool retryBrightness=restoreDdcAfterWake_ && current.brightness.failed &&
                         model_.hasHardwarePercent(mon.device,false);
                     const bool retryContrast=restoreDdcAfterWake_ && current.contrast.failed &&
@@ -2855,13 +2883,16 @@ private:
                 }
                 if((pending || failed) && recoverySettleChecks_++<3) {
                     model_.retryFailedColors();
-                    SetTimer(hwnd,TIMER_DISPLAYS,5000,nullptr);
+                    // A retry needs another verification after its grace period.
+                    if(failed) recoveryVerificationIssued_=false;
+                    SetTimer(hwnd,TIMER_DISPLAYS,6000,nullptr);
                     return 0;
                 }
                 ddc_.finishRestore();
                 displayRecoveryActive_=false;
                 restoreDdcAfterWake_=false;
                 recoveryPass_=0;
+                recoveryVerificationIssued_=false;
                 syncHardware();
                 syncColorWatchdog(); syncHardwarePoll();
                 updateTrayTooltip(); repaint();

@@ -238,6 +238,19 @@ int main() {
             applyDdcObservation(target,wakingDefault,false);
             check(target.percent==23 && target.failed && target.restoring,
                 "Wake readbacks must not erase a protected saved hardware target");
+            verifyDdcRestore(target,wakingDefault);
+            check(target.failed && target.percent==23,
+                "A successful transport write with a mismatching boot readback requires retry");
+            wakingDefault.percent=24;
+            verifyDdcRestore(target,wakingDefault);
+            check(!target.failed && target.percent==23,
+                "Allow a one-point hardware quantization difference without changing the saved target");
+            target.pending=true;
+            wakingDefault.percent=100;
+            verifyDdcRestore(target,wakingDefault);
+            check(!target.failed && target.percent==23,
+                "Do not verify an in-flight restore against an old hardware read");
+            target.pending=false;
             target.restoring=false;
             applyDdcObservation(target,wakingDefault,false);
             check(target.percent==100 && !target.failed,
