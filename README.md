@@ -10,6 +10,7 @@ NightLight is a lightweight, portable Windows utility for adjusting display colo
 - Custom monitor names, reorderable monitor tabs, and saved per-monitor settings.
 - Automatic monitor detection and restoration of saved adjustments after display sleep or system resume.
 - Starts in the system tray; single-click the tray icon to open or hide the window.
+- Optional **Start with Windows** in the tray menu, directly below Theme. Creates a per-user scheduled logon task; disabling deletes that task. No administrator elevation or password is requested. If you move the portable executable, disable and re-enable the option to update its path.
 - Optional close-by-clicking-outside behavior and a button to turn off the displays without suspending the PC.
 - Light, dark and system themes; English and European Portuguese.
 - Low idle overhead through event-driven workers, deferred hardware discovery, and drawing-buffer cleanup when hidden.
@@ -62,4 +63,4 @@ The NVIDIA target gamma interface is based on independently documented reverse-e
 
 The tray icon automatically switches between light- and dark-taskbar variants using the Windows system theme, independently of NightLight's app theme.
 
-The Fluent-inspired sun icon has dedicated light/dark tray variants rasterized at native small-icon sizes, and a separate full-size executable icon up to 256×256 pixels.
+The monochrome circular sun icon has inverted light/dark tray variants rasterized and antialiased at native small-icon sizes, and a full-size executable icon up to 256×256 pixels.

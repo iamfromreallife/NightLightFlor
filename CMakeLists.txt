@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(NightLightNative VERSION 1.0.2 LANGUAGES CXX RC)
+project(NightLightNative VERSION 1.0.3 LANGUAGES CXX RC)
 if(NOT WIN32)
     message(FATAL_ERROR "Native NightLight requires Windows.")
 endif()
@@ -26,9 +26,9 @@ if(NOT EXISTS "${ICON_PATH}" OR NOT EXISTS "${ICON_DARK_PATH}" OR NOT EXISTS "${
 endif()
 configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
 
-add_executable(NightLight WIN32 main.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+add_executable(NightLight WIN32 main.cpp startup_task.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
 target_link_libraries(NightLight PRIVATE nightlight-core
-    user32 gdi32 shell32 ole32 advapi32 comctl32 dwmapi uxtheme gdiplus)
+    user32 gdi32 shell32 ole32 advapi32 comctl32 dwmapi uxtheme gdiplus taskschd uuid)
 target_compile_definitions(NightLight PRIVATE UNICODE _UNICODE)
 if(MSVC)
     target_compile_options(NightLight PRIVATE /W4 /permissive- /EHsc)

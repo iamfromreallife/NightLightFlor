@@ -25,6 +25,7 @@
 #include "motion.hpp"
 #include "menu_icons.hpp"
 #include "paint_surface.hpp"
+#include "startup_task.hpp"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -46,7 +47,7 @@ constexpr UINT TIMER_VERIFY_COLOR = 14, TIMER_READ_DDC = 15;
 constexpr GUID displayStateGuid{0x2b84c20e,0xad23,0x4ddf,{0x93,0xdb,0x05,0xff,0xbd,0x7e,0xfc,0xa5}};
 constexpr int ID_MONITOR_BASE = 2000;
 constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
-constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103;
+constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103, ID_TRAY_STARTUP = 4104;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
 constexpr int ID_TRAY_COLOR_GPU_BASE=7000, ID_TRAY_COLOR_HW_BASE=8000, ID_TRAY_COLOR_TARGET_BASE=10000;
 constexpr UINT WM_TRAY_ICON = WM_APP + 37;
@@ -1507,7 +1508,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.2";
+        const std::wstring version=L"NightLight v1.0.3";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -2224,7 +2225,7 @@ private:
         notify_.hIcon=nullptr;
         trayIconResource_=trayIconWidth_=trayIconHeight_=0;
     }
-    HMENU buildTrayMenu(std::vector<HBITMAP>& icons) {
+    HMENU buildTrayMenu(std::vector<HBITMAP>& icons,bool startupEnabled,HRESULT startupStatus) {
         auto createMenu=[] {
             HMENU result=CreatePopupMenu();
             MENUINFO settings{sizeof(settings)}; settings.fMask=MIM_STYLE;
@@ -2260,6 +2261,9 @@ private:
             ID_TRAY_THEME_BASE+1,tr(L"Dark",L"Escuro").c_str(),nightlight::MenuIcon::Dark);
         append(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(themes),
             tr(L"Theme",L"Tema").c_str(),nightlight::MenuIcon::Theme);
+        append(menu,MF_STRING|(startupEnabled?MF_CHECKED:0)|(FAILED(startupStatus)?MF_GRAYED:0),
+            ID_TRAY_STARTUP,tr(L"Start with Windows",L"Iniciar com o Windows").c_str(),
+            nightlight::MenuIcon::Start);
         append(menu,MF_STRING|(model_.preferences().closeByClickingOutside?MF_CHECKED:0),
             ID_TRAY_CLOSE_OUTSIDE,tr(L"Close by clicking outside",L"Fechar ao clicar fora").c_str(),
             nightlight::MenuIcon::Window);
@@ -2303,8 +2307,11 @@ private:
         return menu;
     }
     void popupTray() {
+        // Query Task Scheduler only when the user opens the menu.
+        bool startupEnabled=false;
+        const HRESULT startupStatus=nightlight::queryStartupTask(startupEnabled);
         std::vector<HBITMAP> icons;
-        HMENU menu=buildTrayMenu(icons);
+        HMENU menu=buildTrayMenu(icons,startupEnabled,startupStatus);
         POINT point{}; GetCursorPos(&point);
         SetForegroundWindow(window_);
         trayMenuOpen_=true;
@@ -2346,6 +2353,19 @@ private:
         } else if (cmd>=ID_TRAY_THEME_BASE && cmd<=ID_TRAY_THEME_BASE+2) {
             setTheme(cmd==ID_TRAY_THEME_BASE?L"light":
                 cmd==ID_TRAY_THEME_BASE+1?L"dark":L"system");
+        } else if (cmd==ID_TRAY_STARTUP) {
+            // Recheck just before toggling in case an external tool changed it.
+            bool enabled=false;
+            HRESULT hr=nightlight::queryStartupTask(enabled);
+            if(SUCCEEDED(hr)) hr=nightlight::setStartupTask(!enabled);
+            if(FAILED(hr)) {
+                wchar_t code[32]{};
+                swprintf_s(code,L"0x%08lX",static_cast<unsigned long>(hr));
+                const auto message=tr(L"Could not change Windows startup. Task Scheduler returned ",
+                    L"Não foi possível alterar o arranque com o Windows. O Agendador de Tarefas devolveu ")+
+                    std::wstring(code);
+                MessageBoxW(window_,message.c_str(),L"NightLight",MB_OK|MB_ICONERROR);
+            }
         } else if (cmd==ID_TRAY_CLOSE_OUTSIDE) {
             Preferences pref=model_.preferences();
             pref.closeByClickingOutside=!pref.closeByClickingOutside;

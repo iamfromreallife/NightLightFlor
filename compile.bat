@@ -30,7 +30,7 @@ mkdir "%STAGE%\s" || goto failed
 set "SRC=%STAGE%\s"
 set "BUILD=%STAGE%\b"
 echo Building in: "%STAGE%"
-for %%F in (CMakeLists.txt main.cpp core.cpp core.hpp display_identity.cpp display_identity.hpp ddc.cpp ddc.hpp wmi_brightness.cpp wmi_brightness.hpp json.hpp menu_icons.hpp motion.hpp paint_surface.hpp tests.cpp icon.ico icon-dark.ico icon-light.ico app.manifest resources.rc.in) do (
+for %%F in (CMakeLists.txt main.cpp startup_task.cpp startup_task.hpp core.cpp core.hpp display_identity.cpp display_identity.hpp ddc.cpp ddc.hpp wmi_brightness.cpp wmi_brightness.hpp json.hpp menu_icons.hpp motion.hpp paint_surface.hpp tests.cpp icon.ico icon-dark.ico icon-light.ico app.manifest resources.rc.in) do (
     if not exist "%ROOT%\%%F" (
         echo ERROR: Missing source file %%F
         goto failed
@@ -56,7 +56,7 @@ copy /b /y "%BUILD%\Release\NightLight.exe" "%ROOT%\NightLight.exe" >nul
 if errorlevel 1 goto failed
 rmdir /s /q "%STAGE%"
 echo.
-echo SUCCESS: NightLight v1.0.2 - "%ROOT%\NightLight.exe"
+echo SUCCESS: NightLight v1.0.3 - "%ROOT%\NightLight.exe"
 popd
 pause
 exit /b 0
