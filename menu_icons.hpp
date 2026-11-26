@@ -2,9 +2,18 @@
 #include <windows.h>
 #include <gdiplus.h>
 #include <cstring>
+#include <vector>
 
 namespace nightlight {
 enum class MenuIcon { Language,Theme,Light,Dark,Start,Window,Minimize,Tray,Adjust,Monitor,Disable,Exit };
+// GDI+ 1.1's 8x8 antialiasing mode is enum value 6. Some older SDK
+// headers omit the symbolic name, so use the value and retain a fallback.
+inline void configureIconGraphics(Gdiplus::Graphics& g) {
+    if(g.SetSmoothingMode(static_cast<Gdiplus::SmoothingMode>(6))!=Gdiplus::Ok)
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    g.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+}
 // Premultiplied transparent bitmaps work with native menu layout, checkmarks,
 // keyboard navigation and screen readers; there is no owner-drawn menu text.
 inline HBITMAP menuIconBitmap(MenuIcon icon,UINT dpi,COLORREF foreground,bool checked=false) {
@@ -15,12 +24,17 @@ inline HBITMAP menuIconBitmap(MenuIcon icon,UINT dpi,COLORREF foreground,bool ch
     void* pixels=nullptr;
     HBITMAP handle=CreateDIBSection(nullptr,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
     if (!handle || !pixels) return handle;
-    std::memset(pixels,0,width*size*4);
+    // Render menu glyphs into a temporary 4x premultiplied-alpha surface,
+    // then integrate exact pixel coverage. No extra work while in the tray.
+    constexpr int samples=4;
+    const int hiWidth=width*samples,hiHeight=size*samples;
+    std::vector<BYTE> hi(static_cast<size_t>(hiWidth)*hiHeight*4,0);
     {
-        Gdiplus::Bitmap bitmap(width,size,width*4,PixelFormat32bppPARGB,static_cast<BYTE*>(pixels));
-        Gdiplus::Graphics g(&bitmap); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        const float scale=static_cast<float>(size)/20; g.ScaleTransform(scale,scale);
-        g.TranslateTransform(static_cast<float>(MulDiv(16,dpi,96)),0,Gdiplus::MatrixOrderAppend);
+        Gdiplus::Bitmap bitmap(hiWidth,hiHeight,hiWidth*4,PixelFormat32bppPARGB,hi.data());
+        Gdiplus::Graphics g(&bitmap); configureIconGraphics(g);
+        const float scale=static_cast<float>(hiHeight)/20;
+        g.ScaleTransform(scale,scale);
+        g.TranslateTransform(static_cast<float>(MulDiv(16,dpi,96)*samples),0,Gdiplus::MatrixOrderAppend);
         Gdiplus::Pen pen(Gdiplus::Color(255,GetRValue(foreground),GetGValue(foreground),GetBValue(foreground)),1.25f);
         pen.SetStartCap(Gdiplus::LineCapRound); pen.SetEndCap(Gdiplus::LineCapRound); pen.SetLineJoin(Gdiplus::LineJoinRound);
         auto line=[&](float x,float y,float u,float v){g.DrawLine(&pen,x,y,u,v);};
@@ -68,6 +82,17 @@ inline HBITMAP menuIconBitmap(MenuIcon icon,UINT dpi,COLORREF foreground,bool ch
             g.ResetTransform(); g.ScaleTransform(scale,scale);
             line(2,10,6,14);line(6,14,13,6);
         }
+    }
+    auto* dst=static_cast<BYTE*>(pixels);
+    constexpr unsigned count=samples*samples;
+    for(int y=0;y<size;++y) for(int x=0;x<width;++x) {
+        unsigned sum[4]{};
+        for(int sy=0;sy<samples;++sy) for(int sx=0;sx<samples;++sx) {
+            const auto offset=(static_cast<size_t>(y*samples+sy)*hiWidth+x*samples+sx)*4;
+            for(int c=0;c<4;++c) sum[c]+=hi[offset+c];
+        }
+        const auto offset=(static_cast<size_t>(y)*width+x)*4;
+        for(int c=0;c<4;++c) dst[offset+c]=static_cast<BYTE>((sum[c]+count/2)/count);
     }
     return handle;
 }

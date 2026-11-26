@@ -64,3 +64,5 @@ The NVIDIA target gamma interface is based on independently documented reverse-e
 The tray icon automatically switches between light- and dark-taskbar variants using the Windows system theme, independently of NightLight's app theme.
 
 The monochrome circular sun icon has inverted light/dark tray variants rasterized and antialiased at native small-icon sizes, and a full-size executable icon up to 256×256 pixels.
+
+The tray artwork fills the available icon square edge to edge, with independently antialiased frames at every even size from 16 to 64 pixels. Native menu glyphs use supersampled premultiplied-alpha rendering. The earlier local-build branch's legacy cursor repair is included: only the old `MouseTrails=-1` override is cleared, while ordinary mouse-trail preferences are left unchanged.

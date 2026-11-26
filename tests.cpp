@@ -239,6 +239,15 @@ int main() {
         bool invalid=false;
         try { Json::parse("{\"a\":}"); } catch(...) {invalid=true;}
         check(invalid,"Reject invalid JSON");
+        check(legacySoftwareCursorOverride(L"-1") &&
+              legacySoftwareCursorOverride(L"  -1  "),
+              "Recognize the old NightLight -1 software-cursor workaround");
+        check(!legacySoftwareCursorOverride(L"0") &&
+              !legacySoftwareCursorOverride(L"1") &&
+              !legacySoftwareCursorOverride(L"5") &&
+              !legacySoftwareCursorOverride(L"") &&
+              !legacySoftwareCursorOverride(L"-10"),
+              "Hardware pointer repair must preserve ordinary mouse settings");
         const Ramp ruby=buildKelvinRamp(1000);
         const Ramp midday=buildKelvinRamp(6500);
         const Ramp dusk=buildKelvinRamp(3800);

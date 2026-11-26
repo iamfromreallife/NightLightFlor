@@ -57,8 +57,8 @@ constexpr UINT TIMER_DISPLAYS = 10;
 constexpr UINT TIMER_TRAY_RETRY = 21;
 constexpr wchar_t CLASS_NAME[] = L"NightLight.Native.Win32";
 constexpr int ICON_RESOURCE = 101; // full-size Explorer and application icon
-constexpr int ICON_RESOURCE_DARK_TASKBAR = 102; // bright tray artwork
-constexpr int ICON_RESOURCE_LIGHT_TASKBAR = 103; // deeper tray colors
+constexpr int ICON_RESOURCE_DARK_TASKBAR = 102; // white circle, black sun
+constexpr int ICON_RESOURCE_LIGHT_TASKBAR = 103; // black circle, white sun
 constexpr UINT TRAY_ID = 100;
 
 // Standalone adaptation of the supplied Windhawk mod's input protection.
@@ -367,6 +367,11 @@ public:
                         MB_ICONERROR | MB_OK);
             return 2;
         }
+        // Previous NightLight cursor-test scripts set MouseTrails=-1,
+        // deliberately forcing software pointer composition. Undo ONLY that
+        // particular workaround; regular pointer preferences remain intact.
+        // The Windows compositor/GPU ultimately chooses hardware vs software.
+        nightlight::clearLegacySoftwareCursorOverride();
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES};
         InitCommonControlsEx(&common);
@@ -1335,7 +1340,7 @@ private:
         SelectObject(dc, old);
     }
     void drawSectionIcon(HDC dc,int kind,int x,int y,COLORREF color) {
-        Gdiplus::Graphics g(dc); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Graphics g(dc); nightlight::configureIconGraphics(g);
         g.TranslateTransform(static_cast<float>(x),static_cast<float>(y));
         const float scale=static_cast<float>(dpi_)/96; g.ScaleTransform(scale,scale);
         Gdiplus::Pen pen(drawingColor(color),1.3f);
@@ -1508,7 +1513,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.3";
+        const std::wstring version=L"NightLight v1.0.4";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -1693,8 +1698,7 @@ private:
         centerInk.Translate(-ink.X-ink.Width/2.0f,-ink.Y-ink.Height/2.0f);
         path.Transform(&centerInk);
         Gdiplus::Graphics g(dc);
-        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        nightlight::configureIconGraphics(g);
         g.TranslateTransform(static_cast<Gdiplus::REAL>(center.x),
             static_cast<Gdiplus::REAL>(center.y));
         Gdiplus::SolidBrush brush(drawingColor(foreground));
@@ -1873,8 +1877,7 @@ private:
                     -ink.Y-ink.Height/2.0f);
                 glyph.Transform(&zeroInkOrigin);
                 Gdiplus::Graphics g(dc);
-                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+                nightlight::configureIconGraphics(g);
                 g.TranslateTransform(static_cast<float>(rc.left+rc.right)/2.0f,
                     static_cast<float>(rc.top+rc.bottom)/2.0f);
                 // Positive angles rotate clockwise in Windows' y-down space.
