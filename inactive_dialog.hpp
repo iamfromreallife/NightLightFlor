@@ -567,6 +567,7 @@ public:
         palette_(std::move(palette)),dark_(std::move(dark)),highContrast_(std::move(hc)) {}
     ~InactiveSettingsWindow() {close();if(font_) DeleteObject(font_);if(bold_) DeleteObject(bold_);}
     HWND hwnd() const {return window_;}
+    void savePlacement() {persistGeometry();}
     void close() {if(window_) DestroyWindow(window_);}
     void activate() {if(window_) {if(IsIconic(window_)) ShowWindow(window_,SW_RESTORE);SetForegroundWindow(window_);}}
     void cancelTest() {
@@ -605,20 +606,33 @@ public:
         dpi_=GetDpiForSystem();if(!dpi_)dpi_=96;
         RECT r{0,0,px(490),px(std::clamp(420+static_cast<int>(monitors_.size())*30,474,620))};
         AdjustWindowRectExForDpi(&r,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
-        RECT minimum{0,0,px(428),px(444)};
-        AdjustWindowRectExForDpi(&minimum,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
         const int workW=static_cast<int>(mi.rcWork.right-mi.rcWork.left);
         const int workH=static_cast<int>(mi.rcWork.bottom-mi.rcWork.top);
         if(workW<=0 || workH<=0) return false;
-        const int wantedW=savedGeometry_?static_cast<int>(savedGeometry_->right-savedGeometry_->left):static_cast<int>(r.right-r.left);
-        const int wantedH=savedGeometry_?static_cast<int>(savedGeometry_->bottom-savedGeometry_->top):static_cast<int>(r.bottom-r.top);
-        const int w=std::min(workW,std::max(wantedW,static_cast<int>(minimum.right-minimum.left)));
-        const int h=std::min(workH,std::max(wantedH,static_cast<int>(minimum.bottom-minimum.top)));
-        const int x=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->left),static_cast<int>(mi.rcWork.left),static_cast<int>(mi.rcWork.right)-w):mi.rcWork.left+(workW-w)/2;
-        const int y=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->top),static_cast<int>(mi.rcWork.top),static_cast<int>(mi.rcWork.bottom)-h):mi.rcWork.top+(workH-h)/2;
+        const auto placement=[&]() {
+            RECT minimum{0,0,px(428),px(444)};
+            AdjustWindowRectExForDpi(&minimum,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
+            const int wantedW=savedGeometry_?static_cast<int>(savedGeometry_->right-savedGeometry_->left):static_cast<int>(r.right-r.left);
+            const int wantedH=savedGeometry_?static_cast<int>(savedGeometry_->bottom-savedGeometry_->top):static_cast<int>(r.bottom-r.top);
+            const int w=std::min(workW,std::max(wantedW,static_cast<int>(minimum.right-minimum.left)));
+            const int h=std::min(workH,std::max(wantedH,static_cast<int>(minimum.bottom-minimum.top)));
+            const int x=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->left),static_cast<int>(mi.rcWork.left),static_cast<int>(mi.rcWork.right)-w):mi.rcWork.left+(workW-w)/2;
+            const int y=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->top),static_cast<int>(mi.rcWork.top),static_cast<int>(mi.rcWork.bottom)-h):mi.rcWork.top+(workH-h)/2;
+            return RECT{x,y,x+w,y+h};
+        };
+        const RECT initial=placement();
         HWND created=CreateWindowExW(0,ClassName,tr(L"Dim when inactive",L"Reduzir brilho quando inativo"),
-            WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,x,y,w,h,owner_,nullptr,instance_,this);
+            WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,initial.left,initial.top,initial.right-initial.left,initial.bottom-initial.top,owner_,nullptr,instance_,this);
         if(!created) return false;
+        // WM_CREATE now knows the target monitor DPI. Re-evaluate the saved
+        // rectangle before showing the window, without a visible resize.
+        if(savedGeometry_) {
+            const RECT restored=placement();
+            RECT actual{};
+            if(GetWindowRect(created,&actual) && !EqualRect(&actual,&restored))
+                SetWindowPos(created,nullptr,restored.left,restored.top,restored.right-restored.left,
+                    restored.bottom-restored.top,SWP_NOZORDER|SWP_NOACTIVATE);
+        }
         const BOOL disable=FALSE;
         DwmSetWindowAttribute(created,DWMWA_TRANSITIONS_FORCEDISABLED,&disable,sizeof(disable));
         ShowWindow(created,SW_SHOW);

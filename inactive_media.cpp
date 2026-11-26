@@ -38,9 +38,18 @@ ProcessIdentity identity(DWORD pid) {
     if(!pid) return id;
     const HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
     if(!process) return id;
-    std::vector<wchar_t> path(32768);
-    DWORD length=static_cast<DWORD>(path.size());
-    if(QueryFullProcessImageNameW(process,0,path.data(),&length)) id.path=lower(std::wstring(path.data(),length));
+    // Most executable paths fit in this small buffer. Keep support for
+    // long Win32 paths without allocating and clearing 64 KiB per process.
+    wchar_t path[512];
+    DWORD length=static_cast<DWORD>(sizeof(path)/sizeof(path[0]));
+    if(QueryFullProcessImageNameW(process,0,path,&length)) {
+        id.path=lower(std::wstring(path,length));
+    } else if(GetLastError()==ERROR_INSUFFICIENT_BUFFER) {
+        std::vector<wchar_t> longPath(32768);
+        length=static_cast<DWORD>(longPath.size());
+        if(QueryFullProcessImageNameW(process,0,longPath.data(),&length))
+            id.path=lower(std::wstring(longPath.data(),length));
+    }
     UINT32 count=0;
     if(GetApplicationUserModelId(process,&count,nullptr)==ERROR_INSUFFICIENT_BUFFER && count>0 && count<=32768) {
         std::vector<wchar_t> name(count);

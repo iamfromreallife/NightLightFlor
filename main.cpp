@@ -3602,6 +3602,7 @@ private:
             }
             return 0;
         case WM_QUERYENDSESSION:
+            if(dimSettings_) dimSettings_->savePlacement();
             noteWindowPosition(true); commitDrag(); model_.save(); return TRUE;
         case WM_ENDSESSION:
             if (wParam) {
