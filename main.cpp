@@ -305,9 +305,19 @@ COLORREF mix(COLORREF a, COLORREF b, double f) {
 void fill(HDC dc, RECT rect, COLORREF color) {
     // A stock brush is owned by GDI; avoid allocating a new brush for
     // every parent/child background on every animation frame.
+    const auto brush=static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
+    const auto old=SelectObject(dc,brush);
     const COLORREF previous=SetDCBrushColor(dc,color);
-    FillRect(dc,&rect,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    if(old && old!=HGDI_ERROR && previous!=CLR_INVALID) {
+        FillRect(dc,&rect,brush);
+    } else {
+        // Preserve the original rendering path if the device context
+        // does not support a DC brush.
+        HBRUSH fallback=CreateSolidBrush(color);
+        if(fallback) { FillRect(dc,&rect,fallback); DeleteObject(fallback); }
+    }
     if(previous!=CLR_INVALID) SetDCBrushColor(dc,previous);
+    if(old && old!=HGDI_ERROR) SelectObject(dc,old);
 }
 Gdiplus::Color drawingColor(COLORREF c) {
     return Gdiplus::Color(255,GetRValue(c),GetGValue(c),GetBValue(c));
@@ -492,6 +502,9 @@ private:
     bool ddcVisible_ = true;
     struct ReorderPosition { nightlight::Motion x,y; };
     std::map<HWND,ReorderPosition> reorderPositions_;
+    // Successful region assignments only. USER owns actual HRGNs after
+    // SetWindowRgn; the cache holds geometry, never GDI handles.
+    std::map<HWND,std::optional<RECT>> controlRegions_;
     bool reorderInProgress_=false,screenDragArmed_=false,screenDragActive_=false;
     std::wstring screenDragDevice_;
     POINT screenDragStart_{};
@@ -815,6 +828,7 @@ private:
             (msg==WM_KEYUP && isEnterOrSpace(wp))) app->animate(state.press,0,160);
         if (msg==WM_NCDESTROY) {
             app->reorderPositions_.erase(control);
+            app->controlRegions_.erase(control);
             app->interactions_.erase(control); RemoveWindowSubclass(control,interactionProc,id);
         }
         return DefSubclassProc(control,msg,wp,lp);
@@ -843,7 +857,10 @@ private:
             }
             CloseClipboard();
         }
-        if(msg==WM_NCDESTROY)RemoveWindowSubclass(control,editFieldProc,id);
+        if(msg==WM_NCDESTROY) {
+            app->controlRegions_.erase(control);
+            RemoveWindowSubclass(control,editFieldProc,id);
+        }
         return DefSubclassProc(control,msg,wp,lp);
     }
     void watchInteraction(HWND control) {
@@ -889,6 +906,7 @@ private:
         if (window_ && windowPresented()) InvalidateRect(window_, nullptr, FALSE);
     }
     void updateFonts() {
+        controlRegions_.clear();
         textWidths_.clear();
         glyphPaths_.clear();
         for (HFONT font : fonts_) if (font) DeleteObject(font);
@@ -1185,6 +1203,18 @@ private:
             SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS);
         return true;
     }
+    void setControlRegion(HWND control,const std::optional<RECT>& desired) {
+        const auto found=controlRegions_.find(control);
+        if(found!=controlRegions_.end()) {
+            const auto& previous=found->second;
+            if(previous.has_value()==desired.has_value() &&
+               (!desired || EqualRect(&*previous,&*desired))) return;
+        }
+        HRGN region=desired?CreateRectRgn(desired->left,desired->top,desired->right,desired->bottom):nullptr;
+        if(desired && !region) return;
+        if(SetWindowRgn(control,region,FALSE)) controlRegions_[control]=desired;
+        else if(region) DeleteObject(region);
+    }
     void layout() {
         if (!window_ || layingOut_ || IsIconic(window_)) return;
         if (!layoutDepth_) layoutTime_=uiTime();
@@ -1353,16 +1383,16 @@ private:
                 clip={0,hardwareTop_,width_,hardwareTop_+hardwareVisibleHeight_}; clipped=hardwareProgress<1;
             }
             if (placement.control==editName_ && editingName_) {
-                SetWindowRgn(placement.control,nullptr,FALSE);
+                setControlRegion(placement.control,std::nullopt);
             } else if (composedTransition_ && placement.control!=editName_) {
-                HRGN empty=CreateRectRgn(0,0,0,0);
-                if (!SetWindowRgn(placement.control,empty,FALSE)) DeleteObject(empty);
+                setControlRegion(placement.control,RECT{0,0,0,0});
             } else if (clipped) {
                 RECT local{std::clamp(static_cast<int>(clip.left)-placement.x,0,placement.w),std::clamp(static_cast<int>(clip.top)-placement.y,0,placement.h),
                     std::clamp(static_cast<int>(clip.right)-placement.x,0,placement.w),std::clamp(static_cast<int>(clip.bottom)-placement.y,0,placement.h)};
-                HRGN region=CreateRectRgn(local.left,local.top,std::max(local.left,local.right),std::max(local.top,local.bottom));
-                if (!SetWindowRgn(placement.control,region,FALSE)) DeleteObject(region);
-            } else SetWindowRgn(placement.control,nullptr,FALSE);
+                local.right=std::max(local.left,local.right);
+                local.bottom=std::max(local.top,local.bottom);
+                setControlRegion(placement.control,local);
+            } else setControlRegion(placement.control,std::nullopt);
         }
         layingOut_=false;
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_FRAME|RDW_NOERASE);
@@ -2158,6 +2188,7 @@ private:
         // tabs, and interaction maps. Re-register only frame-owned tooltips.
         if(gammaTooltip_) { DestroyWindow(gammaTooltip_); gammaTooltip_=nullptr; }
         window_=fresh;
+        controlRegions_.clear(); // child regions remain valid; reassert once
         DestroyWindow(old); // staticWindowProc ignores retiring frames
         replacingFrame_=false;
         const UINT newDpi=GetDpiForWindow(window_);

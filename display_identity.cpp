@@ -43,6 +43,16 @@ bool wakeTopologyIsUsable(const std::vector<Monitor>& previous,
                          })) return false;
     return true;
 }
+const DisplayTarget* matchPhysicalTarget(const DisplayTargetSnapshot& snapshot,
+                                         const std::wstring& device,
+                                         const std::wstring& physicalId) {
+    if(!snapshot.complete || physicalId.empty()) return nullptr;
+    const auto it=snapshot.bySource.find(normalizedDisplayId(device));
+    if(it==snapshot.bySource.end() || it->second.size()!=1) return nullptr;
+    const auto& target=it->second.front();
+    return normalizedDisplayId(target.physicalId)==normalizedDisplayId(physicalId)?
+        &target:nullptr;
+}
 DisplayTargetSnapshot queryPhysicalDisplayTargets() {
     DisplayTargetSnapshot result;
     constexpr UINT32 flags=QDC_ONLY_ACTIVE_PATHS|QDC_VIRTUAL_MODE_AWARE;
@@ -92,7 +102,9 @@ DisplayTargetSnapshot queryPhysicalDisplayTargets() {
         }
         result.bySource[normalizedDisplayId(source.viewGdiDeviceName)].push_back({
             normalizedDisplayId(target.monitorDevicePath),
-            target.monitorFriendlyDeviceName
+            target.monitorFriendlyDeviceName,
+            path.targetInfo.adapterId,
+            path.targetInfo.id
         });
     }
     return result;

@@ -333,10 +333,7 @@ void DdcController::run() {
             bool correctTarget=true;
             if(job.restoring && !job.physicalId.empty()) {
                 const auto snapshot=queryPhysicalDisplayTargets();
-                const auto it=snapshot.bySource.find(normalizedDisplayId(key.first));
-                correctTarget=snapshot.complete && it!=snapshot.bySource.end() &&
-                    it->second.size()==1 &&
-                    normalizedDisplayId(it->second.front().physicalId)==normalizedDisplayId(job.physicalId);
+                correctTarget=matchPhysicalTarget(snapshot,key.first,job.physicalId)!=nullptr;
             }
             bool usedWmi=false;
             bool ok=correctTarget && writePhysical(api,monitor,key.second,job.percent,job.restoring);

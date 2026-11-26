@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "display_identity.hpp"
 #include "ddc.hpp"
 #include "motion.hpp"
 #include "wmi_brightness.hpp"
@@ -17,6 +18,27 @@ void check(bool ok,const char* message) {
 }
 int main() {
     try {
+        {
+            DisplayTargetSnapshot snapshot;
+            snapshot.complete=true;
+            DisplayTarget target;
+            target.physicalId=L"PHYSICAL-A";
+            target.targetId=7;
+            target.adapterId.LowPart=42;
+            snapshot.bySource[L"DISPLAY-A"].push_back(target);
+            const auto* matched=matchPhysicalTarget(snapshot,L"display-a",L"physical-a");
+            check(matched && matched->targetId==7 && matched->adapterId.LowPart==42,
+                "Shared identity/SDR snapshot retains exact adapter and target");
+            check(!matchPhysicalTarget(snapshot,L"display-a",L"physical-b"),
+                "Renumbered or mismatched physical target is rejected");
+            snapshot.complete=false;
+            check(!matchPhysicalTarget(snapshot,L"display-a",L"physical-a"),
+                "Incomplete topology cannot authorize hardware writes");
+            snapshot.complete=true;
+            snapshot.bySource[L"DISPLAY-A"].push_back(target);
+            check(!matchPhysicalTarget(snapshot,L"display-a",L"physical-a"),
+                "Ambiguous or mirrored target cannot authorize hardware writes");
+        }
         {
             Monitor mon;
             check(monitorNeedsColorWatchdog(mon),"GDI retains its periodic watchdog");

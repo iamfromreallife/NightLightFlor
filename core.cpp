@@ -842,9 +842,7 @@ void Model::queueGamma(const Monitor& monitor, const Ramp& ramp, GammaRefresh re
 static bool uniquePhysicalTarget(const Monitor& mon) {
     if (mon.physicalId.empty()) return false;
     const auto topology=queryPhysicalDisplayTargets();
-    const auto it=topology.bySource.find(normalizedDisplayId(mon.device));
-    return topology.complete && it!=topology.bySource.end() && it->second.size()==1 &&
-        normalizedDisplayId(it->second.front().physicalId)==normalizedDisplayId(mon.physicalId);
+    return matchPhysicalTarget(topology,mon.device,mon.physicalId)!=nullptr;
 }
 struct HardwareFind { const std::wstring& device; HMONITOR handle=nullptr; };
 static BOOL CALLBACK findHardwareDisplay(HMONITOR monitor,HDC,LPRECT,LPARAM param) {
@@ -985,28 +983,21 @@ void logNvidiaStatus(const wchar_t* operation,int status) {
     OutputDebugStringW(message.c_str());
 }
 } // namespace
-// Conservatively require a uniquely identified SDR output. Advanced Color
-// (HDR or automatic colour management) is not modified by this experiment.
+// Conservatively require a uniquely identified SDR output. Use the same
+// fresh display topology to check physical identity AND Advanced Color.
+// Retain both the preflight and final checks around journal/driver work.
 static bool targetGammaSdr(const Monitor& mon) {
-    UINT32 n=0,m=0;
-    constexpr UINT32 flags=QDC_ONLY_ACTIVE_PATHS|QDC_VIRTUAL_MODE_AWARE;
-    if(GetDisplayConfigBufferSizes(flags,&n,&m)!=ERROR_SUCCESS) return false;
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(n);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(m);
-    if(QueryDisplayConfig(flags,&n,paths.data(),&m,modes.data(),nullptr)!=ERROR_SUCCESS) return false;
-    for(size_t i=0;i<n;++i) {
-        const auto& p=paths[i];
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
-        source.header.type=DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-        source.header.size=sizeof(source); source.header.adapterId=p.sourceInfo.adapterId;
-        source.header.id=p.sourceInfo.id;
-        if(DisplayConfigGetDeviceInfo(&source.header)!=ERROR_SUCCESS || mon.device!=source.viewGdiDeviceName) continue;
-        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info{};
-        info.header.type=DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-        info.header.size=sizeof(info); info.header.adapterId=p.targetInfo.adapterId; info.header.id=p.targetInfo.id;
-        return DisplayConfigGetDeviceInfo(&info.header)==ERROR_SUCCESS && !info.advancedColorEnabled;
-    }
-    return false;
+    if(mon.physicalId.empty()) return false;
+    const auto topology=queryPhysicalDisplayTargets();
+    const auto* target=matchPhysicalTarget(topology,mon.device,mon.physicalId);
+    if(!target) return false;
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info{};
+    info.header.type=DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+    info.header.size=sizeof(info);
+    info.header.adapterId=target->adapterId;
+    info.header.id=target->targetId;
+    return DisplayConfigGetDeviceInfo(&info.header)==ERROR_SUCCESS &&
+        !info.advancedColorEnabled;
 }
 bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh refresh) {
     // No reliable target-gamma getter has been established. Only opt in
@@ -1033,7 +1024,7 @@ bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh r
     if(!owned && !active) { cleanTarget_.insert(key); return true; }
     cleanTarget_.erase(key);
     if(owned && !journal.get(jsonKey).get("restore_neutral").boolean(false)) return false;
-    if(!uniquePhysicalTarget(mon) || !targetGammaSdr(mon)) return false;
+    if(!targetGammaSdr(mon)) return false;
     static NvidiaTargetApi api;
     if(!api.available()) {
         logNvidiaStatus(L"target gamma unavailable",-104); return false;
@@ -1048,7 +1039,7 @@ bool Model::applyNvidiaTargetColor(const Monitor& mon,bool active,GammaRefresh r
     }
     NvidiaTargetV1 target;
     target.rgb=buildNvidiaTargetRamp(kelvin);
-    if(!uniquePhysicalTarget(mon) || !targetGammaSdr(mon)) return false;
+    if(!targetGammaSdr(mon)) return false;
     const int status=api.setTarget(id,&target);
     logNvidiaStatus(L"SetTargetGammaCorrection",status);
     if(status!=0) { targetGammaAccepted_.erase(key); return false; }
