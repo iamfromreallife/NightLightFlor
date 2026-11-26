@@ -5,7 +5,7 @@
 #include <string_view>
 namespace nightlight {
 #ifndef NIGHTLIGHT_VERSION
-#define NIGHTLIGHT_VERSION "1.0.20"
+#define NIGHTLIGHT_VERSION "1.0.21"
 #endif
 #define NIGHTLIGHT_WIDE_IMPL(x) L##x
 #define NIGHTLIGHT_WIDE(x) NIGHTLIGHT_WIDE_IMPL(x)

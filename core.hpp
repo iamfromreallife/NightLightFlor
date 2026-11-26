@@ -81,7 +81,7 @@ inline constexpr std::uint64_t kDimFadeInMs=2000,kDimFadeOutMs=200;
 inline constexpr std::uint64_t dimFadeDuration(BYTE from,BYTE to) {
     return to>from?kDimFadeInMs:kDimFadeOutMs;
 }
-inline constexpr std::uint64_t kStartupColorMs=3000;
+inline constexpr std::uint64_t kStartupColorMs=1000;
 // Smoothstep in Kelvin: zero slope at both endpoints, exact saved target.
 inline constexpr int startupColorKelvin(int target,std::uint64_t elapsed) {
     target=(std::max)(1000,(std::min)(6500,target));

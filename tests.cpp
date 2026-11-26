@@ -41,12 +41,12 @@ int main() {
                   dimFadeAlpha(0,230,2000)==230 && dimFadeAlpha(230,0,100)==115 &&
                   dimFadeAlpha(230,0,200)==0 && dimFadeAlpha(230,0,999)==0,
                   "Black overlay fades in over 2 seconds and out over 200 ms");
-            check(startupColorKelvin(2500,0)==6500 && startupColorKelvin(2500,1500)==4500 &&
-                  startupColorKelvin(2500,3000)==2500 && startupColorKelvin(2500,9000)==2500 &&
-                  startupColorKelvin(6500,1500)==6500,
+            check(kStartupColorMs==1000 && startupColorKelvin(2500,0)==6500 && startupColorKelvin(2500,500)==4500 &&
+                  startupColorKelvin(2500,1000)==2500 && startupColorKelvin(2500,9000)==2500 &&
+                  startupColorKelvin(6500,500)==6500,
                   "Launch color transition begins neutral and reaches the exact saved target");
             int previous=6500;
-            for(unsigned ms=0;ms<=3000;++ms) {
+            for(unsigned ms=0;ms<=1000;++ms) {
                 const int next=startupColorKelvin(1000,ms);
                 check(next<=previous && next>=1000,"Startup color warms monotonically without overshoot");
                 previous=next;
