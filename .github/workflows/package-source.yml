@@ -1,0 +1,37 @@
+name: Package source ZIP
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage compilation files
+        id: stage
+        shell: python
+        run: |
+          import os, pathlib, re, shutil
+          root = pathlib.Path.cwd()
+          version = re.search(r'project\(NightLightNative VERSION (\d+\.\d+\.\d+)', (root / 'CMakeLists.txt').read_text(encoding='utf-8')).group(1)
+          inputs = re.search(r'for %%F in \(([^)]+)\)', (root / 'compile.bat').read_text(encoding='utf-8'), re.I).group(1).split()
+          inputs.append('compile.bat')
+          dest = pathlib.Path(os.environ['RUNNER_TEMP']) / 'nightlight-source'
+          dest.mkdir()
+          for name in inputs:
+              source = root / name
+              assert source.is_file(), f'Missing {name}'
+              shutil.copyfile(source, dest / name)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              print(f'name=NightLight_v{version}', file=output)
+              print(f'path={dest}', file=output)
+      - name: Upload compilation-only source ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: ${{ steps.stage.outputs.path }}/*
+          if-no-files-found: error
+          retention-days: 30
