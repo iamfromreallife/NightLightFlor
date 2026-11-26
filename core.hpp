@@ -89,9 +89,8 @@ inline constexpr int kCardInnerInsetDip = 16;
 // GDI+ rounded() takes a DIAMETER; a radius of 8 DIP is 16 DIP.
 inline constexpr int kCardCornerRadiusDip = 8;
 
-// Hide-to-tray must not request activation of Explorer/Start or alter the
-// window's size/position. ShowWindow(SW_HIDE) explicitly activates another
-// window; this SetWindowPos combination avoids that activation request.
+// Initial silent startup: keep the window hidden without activation or
+// geometry changes. Interactive show/hide uses native DWM transitions.
 inline constexpr UINT kHideToTrayFlags =
     SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE |
     SWP_NOZORDER | SWP_NOOWNERZORDER;
@@ -106,14 +105,8 @@ inline constexpr unsigned kScreenOffMinCorrectionIntervalMs = 450;
 inline constexpr unsigned kScreenOffMaxCorrections = 8;
 bool shouldCorrectScreenWake(std::uint64_t nowMs,std::uint64_t previousMs,
                              unsigned correctionCount);
-// The entrance uses one shared 150-ms motion for both opacity and the
-// upward slide. A small initial alpha makes the first frame perceptible.
 // Compact action (28 DIP) fits within the 32-DIP monitor-tab row.
 inline constexpr int kScreenOffButtonSizeDip = 28;
-inline constexpr unsigned kWindowOpeningDurationMs = 150;
-inline constexpr int kWindowOpeningSlideDip = 12;
-inline constexpr unsigned char kWindowOpeningInitialAlpha = 24;
-int windowOpeningSlideOffset(int dpi,double progress);
 
 // DDC/CI row geometry: the native trackbar keeps its own thumb inset.
 // Percentages use the measured "100 %" width and share 6500 K's right edge.

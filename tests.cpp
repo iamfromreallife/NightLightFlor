@@ -452,33 +452,6 @@ int main() {
         check(!shouldCorrectScreenWake(3000,1000,8) &&
               shouldCorrectScreenWake(3000,1000,7),
             "At most eight reactive corrections are permitted per screen-off activation");
-        check(kWindowOpeningDurationMs==150 &&
-              kWindowOpeningSlideDip==12 &&
-              kWindowOpeningInitialAlpha>0 &&
-              kWindowOpeningInitialAlpha<64,
-            "Fast 150ms opening slide/fade and perceptible first frame");
-        for(int dpi:{96,120,144,192}) {
-            const int fullOffset=MulDiv(kWindowOpeningSlideDip,dpi,96);
-            const double initialProgress=kWindowOpeningInitialAlpha/255.0;
-            check(windowOpeningSlideOffset(dpi,0)==fullOffset &&
-                  windowOpeningSlideOffset(dpi,1)==0,
-                "Slide begins lower and finishes exactly at resting position");
-            check(windowOpeningSlideOffset(dpi,initialProgress)>0,
-                "Window opens below target before first visible fade frame");
-            check(windowOpeningSlideOffset(dpi,0.5)>0 &&
-                  windowOpeningSlideOffset(dpi,0.5)<fullOffset &&
-                  windowOpeningSlideOffset(dpi,-1)==fullOffset &&
-                  windowOpeningSlideOffset(dpi,2)==0,
-                "Slide offset decreases smoothly and clamps at both ends");
-            Motion opening;
-            opening.snap(initialProgress);
-            opening.to(1,1000,kWindowOpeningDurationMs,true);
-            check(opening.active(1000) && opening.active(1075) &&
-                  !opening.active(1150) && opening.value(1150)==1,
-                "Both fade and slide share a single 150ms animation clock");
-            check(windowOpeningSlideOffset(dpi,opening.value(1075))>0,
-                "Window continues rising while alpha increases");
-        }
         check(Preferences{}.theme==L"system",
             "Fresh installations default to following Windows");
         check(effectiveDarkTheme(L"system",true) &&
@@ -660,12 +633,11 @@ int main() {
             check(percent.right==(width-sliderWidth)/2+sliderWidth,
                 "Odd window sizes keep percentages exactly aligned with Kelvin labels");
         }
-        // Close (X), minimize-to-tray, and tray-icon toggles use one
-        // nonactivating hide operation. SW_HIDE would request activation of
-        // Explorer and can cause its Start tooltip to appear unexpectedly.
+        // Initial silent startup must not activate another window.
+        // Interactive show/hide is handled by Win32/DWM.
         check((kHideToTrayFlags&SWP_HIDEWINDOW)!=0 &&
               (kHideToTrayFlags&SWP_NOACTIVATE)!=0,
-            "Closing to tray hides without activating another window");
+            "Initial tray-only launch hides without activating another window");
         check((kHideToTrayFlags&SWP_NOMOVE)!=0 &&
               (kHideToTrayFlags&SWP_NOSIZE)!=0 &&
               (kHideToTrayFlags&SWP_NOZORDER)!=0 &&
@@ -708,6 +680,19 @@ int main() {
               !swapped.shouldToggle(Click::Select,5001) &&
               !swapped.shouldToggle(Click::MouseUp,5015),
             "Reordered Shell selection and release stay deduplicated");
+        // A burst of physical clicks must not be gated by a prior animation.
+        nightlight::TrayClickFilter burst;
+        bool shown=false;
+        for(unsigned long i=0;i<100;++i) {
+            const unsigned long time=6000+i*8;
+            const auto press=(i%2)?Click::MouseDoubleClick:Click::MouseDown;
+            if(burst.shouldToggle(press,time)) shown=!shown;
+            check(shown==(i%2==0),"Every rapid tray press reverses desired visibility");
+            check(!burst.shouldToggle(Click::MouseUp,time+2) &&
+                  !burst.shouldToggle(Click::Select,time+3),
+                  "Rapid releases and Shell selects never undo the press");
+        }
+        check(!shown,"An even burst of clicks ends at the original visibility");
         wchar_t tmp[MAX_PATH]{};
         check(GetTempPathW(MAX_PATH,tmp)>0,"Temp path");
         const fs::path root=fs::path(tmp)/

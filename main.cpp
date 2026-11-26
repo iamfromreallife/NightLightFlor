@@ -536,13 +536,14 @@ private:
         std::unique_ptr<nightlight::PaintSurface> surface;
     };
     std::map<HWND,Interaction> interactions_;
-    nightlight::Motion temperaturePosition_,temperatureEngagement_{0},entrance_{0};
+    nightlight::Motion temperaturePosition_,temperatureEngagement_{0};
     nightlight::Motion hardwareReveal_{1},refreshTurn_{0};
     int hardwareVisibleHeight_=0;
     bool animations_=true,highContrast_=false,systemDark_=false,
-        opening_=false,temperatureHover_=false;
-    bool entranceAddedLayer_=false,entranceMove_=true,parentAnimating_=false,reflowAnimating_=false,composedTransition_=false;
-    RECT entranceBounds_{};
+        temperatureHover_=false;
+    bool parentAnimating_=false,reflowAnimating_=false,composedTransition_=false;
+    bool visibilityChanging_=false;
+    std::uintptr_t visibilityGeneration_=0;
 
     bool pt() const { return model_.preferences().locale == L"pt-PT"; }
     std::wstring tr(const wchar_t* english, const wchar_t* portuguese) const {
@@ -569,7 +570,7 @@ private:
         animations_=enabled && !highContrast_ && !GetSystemMetrics(SM_REMOTESESSION);
         if (!animations_) {
             refreshTurn_.finish();
-            finishEntrance();finishReordering();
+            finishReordering();
             temperaturePosition_.finish(); temperatureEngagement_.finish();
             hardwareReveal_.finish();
             for (auto& item:interactions_) {
@@ -824,32 +825,12 @@ private:
     void watchInteraction(HWND control) {
         if (control) { interactions_.try_emplace(control); SetWindowSubclass(control,interactionProc,1,reinterpret_cast<DWORD_PTR>(this)); }
     }
-    void finishEntrance() {
-        if (!opening_) return;
-        opening_=false; entrance_.snap(1);
-        if (entranceMove_) SetWindowPos(window_,nullptr,entranceBounds_.left,entranceBounds_.top,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
-        SetLayeredWindowAttributes(window_,0,255,LWA_ALPHA);
-        if (entranceAddedLayer_) SetWindowLongPtrW(window_,GWL_EXSTYLE,GetWindowLongPtrW(window_,GWL_EXSTYLE)&~WS_EX_LAYERED);
-        RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_FRAME);
-    }
     void tickAnimations() {
-        // Start work just after a compositor present, leaving a full frame
-        // budget to resize, lay out and paint a coherent replacement surface.
-        // Avoid blocking the short opening motion on DWM presentation.
-        // Position and opacity are sampled together every animation tick.
-        if (IsWindowVisible(window_) && animations_ && !opening_) DwmFlush();
+        // Only internal control motions are timer-driven; DWM handles the
+        // main window transitions without an application animation timer.
+        if (IsWindowVisible(window_) && animations_) DwmFlush();
         const auto now=uiTime();
         bool active=false;
-        if (opening_) {
-            const double progress=entrance_.value(now);
-            SetLayeredWindowAttributes(window_,0,static_cast<BYTE>(std::round(255*progress)),LWA_ALPHA);
-            if (entranceMove_) SetWindowPos(window_,nullptr,entranceBounds_.left,
-                entranceBounds_.top+nightlight::windowOpeningSlideOffset(
-                    static_cast<int>(dpi_),progress),
-                0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
-            if (!entrance_.active(now)) finishEntrance();
-            else active=true;
-        }
         const bool reflow=hardwareReveal_.active(now) || reorderInProgress_;
         if (reflow || reflowAnimating_) layout();
         reflowAnimating_=reflow;
@@ -967,6 +948,10 @@ private:
         if (!trayReady_) SetTimer(window_,TIMER_TRAY_RETRY,1000,nullptr);
         model_.setStatusWindow(window_);
         model_.collectGammaResults();
+        // Permit native DWM transitions while respecting OS animation settings.
+        const BOOL forceDisableTransitions=FALSE;
+        DwmSetWindowAttribute(window_,DWMWA_TRANSITIONS_FORCEDISABLED,
+            &forceDisableTransitions,sizeof(forceDisableTransitions));
         // Run on every launch, not just after a Windows power notification.
         // This is essential when the logon task starts before DDC/CI is ready.
         restoreDdcAfterWake_=true;
@@ -1519,7 +1504,7 @@ private:
         // The minimum window height reserves a 30-DIP strip for this label.
         RECT statusRect{px(12),std::max(0L,client.bottom-px(30)),
             std::max(static_cast<LONG>(px(12)),client.right-px(12)),client.bottom};
-        const std::wstring version=L"NightLight v1.0.6";
+        const std::wstring version=L"NightLight v1.0.7";
         const int versionWidth=textWidth(version,smallFont_)+px(4);
         RECT backendRect=statusRect;
         backendRect.right=std::max(backendRect.left,statusRect.right-versionWidth-px(10));
@@ -2016,10 +2001,9 @@ private:
         updateTheme();
     }
     void noteWindowPosition(bool flush=false) {
-        // Do not capture startup, minimized, maximized or entrance-animation
-        // coordinates, which are not the user's chosen normal window location.
+        // Persist normal geometry only; DWM does not change this rectangle.
         if (model_.isReady() && window_ && IsWindowVisible(window_) &&
-            !IsIconic(window_) && !IsZoomed(window_) && !opening_) {
+            !IsIconic(window_) && !IsZoomed(window_)) {
             RECT current{};
             if (GetWindowRect(window_,&current)) {
                 const bool moved=model_.rememberWindowPosition(current.left,current.top);
@@ -2070,78 +2054,38 @@ private:
                 L"NightLight",MB_OK|MB_ICONWARNING);
         }
     }
-    void openWindow(bool fromTray=false) {
-        // Keep the fast tray-click path free of slow registry checks while
-        // restoring the same animated entrance for all show requests.
-        syncGammaButton();
-        if (!fromTray) updateMotionPreference();
+    void openWindow() {
+        // Ordinary Win32 show/restore every time. No layered window, alpha
+        // ramp, custom geometry, sleeps or animation-completion gate.
         const bool reveal=!IsWindowVisible(window_) || IsIconic(window_);
-        if (reveal && animations_) {
-            const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
-            entranceAddedLayer_=(style&WS_EX_LAYERED)==0;
-            SetWindowLongPtrW(window_,GWL_EXSTYLE,style|WS_EX_LAYERED);
-            // First capture the resting position and move below it BEFORE
-            // showing the window. Otherwise the first visible frame appears
-            // at the final position and seems to jump when the slide begins.
-            // Restoring a minimized window happens at zero alpha for the
-            // same reason. Fade and slide then share one 150ms clock.
-            if (SetLayeredWindowAttributes(window_,0,0,LWA_ALPHA)) {
-                if (IsIconic(window_)) ShowWindow(window_,SW_RESTORE);
-                GetWindowRect(window_,&entranceBounds_);
-                entranceMove_=!IsZoomed(window_);
-                opening_=true;
-                constexpr BYTE initialAlpha=
-                    nightlight::kWindowOpeningInitialAlpha;
-                const double initialProgress=initialAlpha/255.0;
-                entrance_.snap(initialProgress);
-                if (entranceMove_) {
-                    const int startY=entranceBounds_.top+
-                        nightlight::windowOpeningSlideOffset(
-                            static_cast<int>(dpi_),initialProgress);
-                    SetWindowPos(window_,nullptr,entranceBounds_.left,startY,0,0,
-                        SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
-                }
-                SetLayeredWindowAttributes(window_,0,initialAlpha,LWA_ALPHA);
-                if (!IsWindowVisible(window_)) ShowWindow(window_,SW_SHOW);
-                animate(entrance_,1,nightlight::kWindowOpeningDurationMs);
-                startAnimationTimer();
-            } else {
-                if (entranceAddedLayer_) SetWindowLongPtrW(window_,GWL_EXSTYLE,style);
-                ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
-            }
-        } else {
+        if(reveal) {
+            ++visibilityGeneration_;
+            visibilityChanging_=true;
             ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
-        }
-        SetForegroundWindow(window_);
-        if(reveal) repaint();
-        if (reveal && ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
-            if (!hardwareDiscovered_) refreshHardware();
-            else pollHardware();
-        }
+            // The first call may inherit STARTUPINFO from Task Scheduler.
+            if(!IsWindowVisible(window_) || IsIconic(window_))
+                ShowWindow(window_,IsIconic(window_)?SW_RESTORE:SW_SHOW);
+            SetForegroundWindow(window_);
+            visibilityChanging_=false;
+            repaint();
+            if(ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
+                if(!hardwareDiscovered_) refreshHardware();
+                else pollHardware();
+            }
+        } else SetForegroundWindow(window_);
         syncHardwarePoll();
     }
     void hideWindowToTray() {
-        // Minimize, Close (X) and tray-click dismissal share this path.
-        // ShowWindow(SW_HIDE) asks Windows to activate another window; with
-        // our hidden tool-window owner that can activate Explorer / Start
-        // and spuriously display the Start-button tooltip.
-        // SetWindowPos(SWP_HIDEWINDOW | SWP_NOACTIVATE) instead keeps the
-        // focus transfer out of NightLight's control without requesting
-        // another activation or changing its saved window geometry.
-        if (trayReady_ && !shuttingDown_) {
-            // If closed during the 150ms entrance, restore the normal
-            // geometry and layered state before capturing its position.
-            finishEntrance();
-            // Dismiss only our own tooltip, not Explorer's taskbar tooltips.
-            if (gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
-            noteWindowPosition();
-            SetWindowPos(window_,nullptr,0,0,0,0,nightlight::kHideToTrayFlags);
-            if(!IsWindowVisible(window_)) {
-                pageSurface_.reset();
-                for(auto& item:interactions_) item.second.surface.reset();
-            }
-            syncHardwarePoll();
-        }
+        if(!trayReady_ || shuttingDown_ || !IsWindowVisible(window_)) return;
+        ++visibilityGeneration_;
+        // Ignore recursive deactivation caused by the native hide, not
+        // physical tray clicks. DWM owns the visual transition.
+        visibilityChanging_=true;
+        if(gammaTooltip_) SendMessageW(gammaTooltip_,TTM_POP,0,0);
+        noteWindowPosition();
+        ShowWindow(window_,SW_HIDE);
+        visibilityChanging_=false;
+        syncHardwarePoll();
     }
     bool cursorIsOverTrayIcon() const {
         // During a tray click Explorer can take foreground activation BEFORE
@@ -2163,7 +2107,7 @@ private:
         if (IsWindowVisible(window_) && !IsIconic(window_)) {
             hideWindowToTray();
         } else {
-            openWindow(true);
+            openWindow();
         }
     }
     void handleTrayActivation() {
@@ -2421,7 +2365,7 @@ private:
                 // into WM_SHOWWINDOW/layout while the client is minimized.
                 // Defer hiding until the current system command returns.
                 // No nested WM_SHOWWINDOW or layout inside the system handler.
-                PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,TRUE,0);
+                PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,TRUE,static_cast<LPARAM>(visibilityGeneration_));
                 return 0;
             }
             break;
@@ -2431,19 +2375,20 @@ private:
                 // minimize requests that bypass WM_SYSCOMMAND. Never hide
                 // synchronously inside WM_SIZE.
                 if (trayReady_ && !shuttingDown_)
-                    PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,0,0);
+                    PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,0,static_cast<LPARAM>(visibilityGeneration_));
             } else layout();
             return 0;
         case WM_MINIMIZE_TO_TRAY:
             // wParam=TRUE is a queued SC_MINIMIZE, intercepted before iconify.
             // wParam=FALSE is an external minimize, which may have been restored.
             if (trayReady_ && !shuttingDown_ && IsWindowVisible(hwnd) &&
+                static_cast<std::uintptr_t>(lParam)==visibilityGeneration_ &&
                 (wParam != FALSE || IsIconic(hwnd)))
                 hideWindowToTray();
             return 0;
         case WM_ACTIVATE:
             if (LOWORD(wParam)==WA_INACTIVE && model_.preferences().closeByClickingOutside &&
-                trayReady_ && !shuttingDown_ && !trayMenuOpen_ &&
+                trayReady_ && !shuttingDown_ && !trayMenuOpen_ && !visibilityChanging_ &&
                 IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                 // Avoid hiding when switching to a modal/owned dialog of this app.
                 const HWND next=reinterpret_cast<HWND>(lParam);
@@ -2513,7 +2458,7 @@ private:
             paintClient(reinterpret_cast<HDC>(wParam),client); return 0;
         }
         case WM_ENTERSIZEMOVE:
-            finishEntrance();finishReordering(); hardwareReveal_.finish();
+            finishReordering(); hardwareReveal_.finish();
             layout(); return 0;
         case WM_EXITSIZEMOVE:
             noteWindowPosition(true);
@@ -2528,7 +2473,7 @@ private:
         }
         case WM_SHOWWINDOW:
             if (!wParam) {
-                finishEntrance();finishReordering(); hardwareReveal_.finish();
+                finishReordering(); hardwareReveal_.finish();
                 // Minimized windows have zero/invalid client geometry.
                 // Reflow after restore, not while Windows is minimizing.
                 if (!IsIconic(hwnd)) layout();
@@ -2914,7 +2859,7 @@ private:
             noteWindowPosition(true);
             shuttingDown_=true;
             endHardwareDrag();finishScreenDrag();
-            finishEntrance(); stopAnimationTimer();
+             stopAnimationTimer();
             KillTimer(hwnd,TIMER_VERIFY_COLOR); KillTimer(hwnd,TIMER_READ_DDC); KillTimer(hwnd,TIMER_DISPLAYS);
             if (displayPowerNotification_) { UnregisterPowerSettingNotification(displayPowerNotification_); displayPowerNotification_=nullptr; }
             KillTimer(hwnd,TIMER_GAMMA);
