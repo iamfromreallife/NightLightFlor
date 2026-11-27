@@ -22,6 +22,7 @@
 #include "json.hpp"
 #include "automation.hpp"
 #include "media_policy.hpp"
+#include "dim_timeout.hpp"
 
 namespace nightlight {
 struct Ramp {
@@ -64,7 +65,7 @@ struct Preferences {
     HotkeyBindings hotkeys,hotkeySteps;
     bool dimInactive=false;
     int dimAmount=90; // black overlay opacity percentage
-    int dimMinutes=5;
+    int dimSeconds=300;
     bool dimAll=true;
     std::set<std::wstring> dimDisplays; // stable physical profile keys
     bool dims(const Monitor& monitor) const {
@@ -75,7 +76,6 @@ struct Preferences {
             (dimAll || dimDisplays.count(monitorProfileKey(monitor))!=0);
     }
 };
-inline constexpr std::array<int,6> kDimMinutePresets{2,5,10,15,30,60};
 inline constexpr BYTE dimOverlayAlpha(int amount) {
     return static_cast<BYTE>(((std::max)(0,(std::min)(99,amount))*255+50)/100);
 }
@@ -105,9 +105,6 @@ inline constexpr BYTE dimFadeAlpha(BYTE from,BYTE to,std::uint64_t elapsed) {
     if(elapsed>=duration) return to;
     const auto remaining=duration-elapsed;
     return static_cast<BYTE>((from*remaining+to*elapsed+duration/2)/duration);
-}
-inline bool displayIdleLongEnough(std::uint64_t now,std::uint64_t last,int minutes) {
-    return now>=last && now-last>=static_cast<std::uint64_t>((std::max)(1,minutes))*60000;
 }
 
 // System app mode is AppsUseLightTheme (not the separate system/taskbar mode).
@@ -312,6 +309,8 @@ public:
     bool rememberWindowSize(int width, int height);
     std::optional<POINT> windowPosition() const { return windowPosition_; }
     std::optional<SIZE> windowSize() const { return windowSize_; }
+    bool rememberSettingsWindowPosition(int x,int y);
+    std::optional<POINT> settingsWindowPosition() const { return settingsWindowPosition_; }
     bool rememberInactiveWindowGeometry(const RECT& rect);
     std::optional<RECT> inactiveWindowGeometry() const { return inactiveWindowGeometry_; }
     void restoreOriginals();
@@ -358,7 +357,7 @@ private:
     std::filesystem::path configPath_;
     portable::Json root_ = portable::Json::object();
     Preferences preferences_;
-    std::optional<POINT> windowPosition_;
+    std::optional<POINT> windowPosition_,settingsWindowPosition_;
     std::optional<SIZE> windowSize_;
     std::optional<RECT> inactiveWindowGeometry_;
     std::vector<Monitor> monitors_;

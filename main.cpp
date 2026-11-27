@@ -2526,7 +2526,7 @@ private:
             // audible foreground media retains its original per-display scope.
             const bool playing=nightlight::mediaExemptsDisplay(globalVideo,foregroundPlaying,mon.device==foregroundDevice);
             if(playing) it->second=now;
-            if(playing || !nightlight::displayIdleLongEnough(now,it->second,pref.dimMinutes))
+            if(playing || !nightlight::displayIdleLongEnough(now,it->second,pref.dimSeconds))
                 dimOverlays_.remove(mon.device);
             else dimOverlays_.set(mon.device,pref.dimAmount);
         }
@@ -2719,9 +2719,9 @@ private:
         return false;
     }
     void openSettings() {
-        if(settingsWindow_ && settingsWindow_->hwnd()){settingsWindow_->activate();syncFocusToTray();return;}
+        if(settingsWindow_ && settingsWindow_->hwnd()){settingsWindow_->setOwner(windowPresented()?window_:taskbarOwner_);settingsWindow_->activate();syncFocusToTray();return;}
         settingsWindow_.reset();
-        settingsWindow_=std::make_unique<NightLightSettingsDialog>(instance_,taskbarOwner_,
+        settingsWindow_=std::make_unique<NightLightSettingsDialog>(instance_,windowPresented()?window_:taskbarOwner_,
             [this]() -> const Preferences& {return model_.preferences();},
             [this]() -> const std::vector<Monitor>& {return model_.monitors();},
             [this](int kind,int value)->bool {
@@ -2756,7 +2756,8 @@ private:
             [this]{return highContrast_;},
             [this](int action,const std::wstring& key,const std::wstring& value){return settingsDisplayAction(action,key,value);},
             [this]{return hasMonitor()?nightlight::monitorProfileKey(*selectedMonitor()):std::wstring{};},
-            [this]{return animations_;});
+            [this]{return animations_;},model_.settingsWindowPosition(),
+            [this](POINT p){if(model_.rememberSettingsWindowPosition(p.x,p.y))model_.save();});
         if(!settingsWindow_->open())settingsWindow_.reset();
         syncFocusToTray();
     }
@@ -2828,7 +2829,7 @@ private:
                 auto merged=model_.preferences();
                 merged.dimInactive=updated->dimInactive;
                 merged.dimAmount=updated->dimAmount;
-                merged.dimMinutes=updated->dimMinutes;
+                merged.dimSeconds=updated->dimSeconds;
                 merged.dimAll=updated->dimAll;
                 merged.dimDisplays=updated->dimDisplays;
                 model_.updatePreferences(merged);
@@ -3288,6 +3289,7 @@ private:
         // entrance effect while reused show/restore windows do not.
         const HWND old=window_;
         if(!old || windowPresented() || replacingFrame_) return false;
+        if(settingsWindow_)settingsWindow_->setOwner(taskbarOwner_);
         RECT rect{};
         if(!GetWindowRect(old,&rect)) return false;
         if(IsIconic(old) || IsZoomed(old)) {
@@ -3374,7 +3376,7 @@ private:
         hideWindowToTray(false);
     }
     void openWindow() {
-        if(windowPresented()) { SetForegroundWindow(window_);syncFocusToTray(); return; }
+        if(windowPresented()) { if(settingsWindow_)settingsWindow_->setOwner(window_);SetForegroundWindow(window_);syncFocusToTray(); return; }
         ++visibilityGeneration_;
         visibilityChanging_=true;
         const bool maximize=IsZoomed(window_)!=FALSE;
@@ -3387,6 +3389,7 @@ private:
         if(!windowPresented()) ShowWindow(window_,showMode);
         if(windowPresented()) {
             frameHasOpened_=true;
+            if(settingsWindow_)settingsWindow_->setOwner(window_);
             SetForegroundWindow(window_);
             repaint();
             if(ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
@@ -3408,7 +3411,10 @@ private:
         finishInlineRename(true);
         noteWindowPosition();
         // Automatic focus-loss dismissal affects only the main window.
-        if(hideSettings && settingsWindow_)settingsWindow_->hideToTray();
+        if(settingsWindow_){
+            if(hideSettings)settingsWindow_->hideToTray();
+            settingsWindow_->setOwner(taskbarOwner_);
+        }
         // Native hide, not iconification; no taskbar or desktop icon.
         ShowWindow(window_,SW_HIDE);
         if(IsWindowVisible(window_))
@@ -3772,11 +3778,15 @@ private:
             break;
         case WM_SIZE:
             if (wParam==SIZE_MINIMIZED) {
+                if(settingsWindow_)settingsWindow_->setOwner(taskbarOwner_);
                 suspendWindowRendering();
                 // Win+M and external minimize can bypass our tray path.
                 if (trayReady_ && !shuttingDown_ && !visibilityChanging_)
                     PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,FALSE,static_cast<LPARAM>(visibilityGeneration_));
-            } else layout();
+            } else {
+                if(settingsWindow_ && windowPresented())settingsWindow_->setOwner(window_);
+                layout();
+            }
             return 0;
         case WM_MINIMIZE_TO_TRAY:
             if (trayReady_ && !shuttingDown_ &&
@@ -4260,10 +4270,12 @@ private:
             }
             return 0;
         case WM_QUERYENDSESSION:
+            if(settingsWindow_)settingsWindow_->savePlacement();
             if(dimSettings_) dimSettings_->savePlacement();
             noteWindowPosition(true); commitDrag(); model_.save(); return TRUE;
         case WM_ENDSESSION:
             if (wParam) {
+                if(settingsWindow_)settingsWindow_->savePlacement();
                 noteWindowPosition(true);
                 model_.save();
                 if(dimSettings_) dimSettings_->cancelTest();

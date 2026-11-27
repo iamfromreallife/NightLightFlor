@@ -25,6 +25,9 @@ private:
     static constexpr wchar_t cls_[]=L"NightLight.Settings.Native";
     HINSTANCE instance_;
     HWND owner_,window_=nullptr,refreshTooltip_=nullptr;
+    std::optional<POINT> savedPosition_;
+    std::function<void(POINT)> rememberPosition_;
+    bool placementReady_=false;
     HFONT font_=nullptr,bold_=nullptr;
     int fontLanguage_=-1;
     UINT dpi_=96,frameDpi_=96;
@@ -1277,6 +1280,7 @@ private:
                 SetWindowTextW(ctrl(DimStatus),p.dimInactive?tr(L"Enabled",L"Ativo"):tr(L"Disabled",L"Inativo"));
             }
             break;
+        case WM_EXITSIZEMOVE:savePlacement();return 0;
         case WM_CLOSE:close();return 0;
         case WM_NCDESTROY:{
             closing_=true;closeChoice();destroyRefreshTooltip();
@@ -1296,17 +1300,37 @@ public:
     NightLightSettingsDialog(HINSTANCE instance,HWND owner,Read read,Monitors monitors,General general,Backend backend,
         Hotkeys hotkeys,Schedule schedule,std::function<void(std::optional<int>)> preview,std::function<void()> dim,std::function<bool()> startup,
         std::function<int()> language,std::function<Palette()> palette,std::function<bool()> dark,std::function<bool()> hc,
-        DisplayAction displayAction,std::function<std::wstring()> selectedDisplay,std::function<bool()> animations)
-        :instance_(instance),owner_(owner),animations_(std::move(animations)),displayAction_(std::move(displayAction)),selectedDisplay_(std::move(selectedDisplay)),
+        DisplayAction displayAction,std::function<std::wstring()> selectedDisplay,std::function<bool()> animations,
+        std::optional<POINT> savedPosition,std::function<void(POINT)> rememberPosition)
+        :instance_(instance),owner_(owner),savedPosition_(savedPosition),rememberPosition_(std::move(rememberPosition)),animations_(std::move(animations)),displayAction_(std::move(displayAction)),selectedDisplay_(std::move(selectedDisplay)),
         read_(std::move(read)),monitors_(std::move(monitors)),general_(std::move(general)),
         backend_(std::move(backend)),hotkeys_(std::move(hotkeys)),schedule_(std::move(schedule)),preview_(std::move(preview)),dim_(std::move(dim)),
         startup_(std::move(startup)),language_(std::move(language)),dark_(std::move(dark)),hc_(std::move(hc)),palette_(std::move(palette)){}
     ~NightLightSettingsDialog(){close();if(font_)DeleteObject(font_);if(bold_)DeleteObject(bold_);}
     HWND hwnd()const{return window_;}
+    // Real Win32 ownership keeps Settings above its main window, not above
+    // unrelated apps. Detach to the stable service owner before hiding or
+    // destroying/recreating the main frame.
+    void setOwner(HWND owner){
+        if(!owner || !IsWindow(owner) || owner==owner_)return;
+        if(window_){
+            SetLastError(ERROR_SUCCESS);
+            const auto previous=SetWindowLongPtrW(window_,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(owner));
+            if(!previous && GetLastError()!=ERROR_SUCCESS)return;
+        }
+        owner_=owner;
+    }
+    void savePlacement(){
+        if(!placementReady_ || !window_ || !IsWindowVisible(window_) || IsIconic(window_) || IsZoomed(window_))return;
+        RECT r{};if(!GetWindowRect(window_,&r))return;
+        POINT p{r.left,r.top};
+        if(savedPosition_ && savedPosition_->x==p.x && savedPosition_->y==p.y)return;
+        savedPosition_=p;if(rememberPosition_)rememberPosition_(p);
+    }
     void repaintDisplays(){if(window_ && tab_==1)for(size_t i=0;i<displayKeys_.size();++i)if(HWND h=ctrl(DisplayFirst+static_cast<int>(i)))InvalidateRect(h,nullptr,FALSE);}
     void displaysChanged(){if(window_ && tab_==1 && !closing_ && !building_ && !displayRefreshPending_){displayRefreshPending_=true;PostMessageW(window_,WM_APP+2,0,0);}}
-    void hideToTray(){if(window_ && IsWindowVisible(window_)){if(refreshTooltip_)SendMessageW(refreshTooltip_,TTM_POP,0,0);closeChoice();KillTimer(window_,DisplaySpinTimer);displayRefreshTurn_.finish();finishRename(true);if(dragChip_ && GetCapture()==dragChip_)ReleaseCapture();if(activeSlider_>=0 && GetCapture()==ctrl(activeSlider_))ReleaseCapture();KillTimer(window_,PreviewTimer);preview_(std::nullopt);ShowWindow(window_,SW_HIDE);}}
-    void close(){closing_=true;if(window_){destroyRefreshTooltip();closeChoice();KillTimer(window_,DisplaySpinTimer);finishRename(true);KillTimer(window_,PreviewTimer);preview_(std::nullopt);DestroyWindow(window_);}}
+    void hideToTray(){if(window_ && IsWindowVisible(window_)){savePlacement();if(refreshTooltip_)SendMessageW(refreshTooltip_,TTM_POP,0,0);closeChoice();KillTimer(window_,DisplaySpinTimer);displayRefreshTurn_.finish();finishRename(true);if(dragChip_ && GetCapture()==dragChip_)ReleaseCapture();if(activeSlider_>=0 && GetCapture()==ctrl(activeSlider_))ReleaseCapture();KillTimer(window_,PreviewTimer);preview_(std::nullopt);ShowWindow(window_,SW_HIDE);}}
+    void close(){closing_=true;if(window_){savePlacement();destroyRefreshTooltip();closeChoice();KillTimer(window_,DisplaySpinTimer);finishRename(true);KillTimer(window_,PreviewTimer);preview_(std::nullopt);DestroyWindow(window_);}}
     void activate(){if(window_){if(IsIconic(window_))ShowWindow(window_,SW_RESTORE);else if(!IsWindowVisible(window_))ShowWindow(window_,SW_SHOW);SetForegroundWindow(window_);}}
     void refreshTheme(){
         if(!window_)return;
@@ -1347,17 +1371,24 @@ public:
         wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=LoadIconW(instance_,MAKEINTRESOURCEW(101));wc.hIconSm=wc.hIcon;
         if(!RegisterClassExW(&wc) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return false;
         POINT cursor{};GetCursorPos(&cursor);
+        const HMONITOR monitor=MonitorFromPoint(savedPosition_.value_or(cursor),MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{sizeof(mi)};
-        if(!GetMonitorInfoW(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),&mi))return false;
-        fitToMonitor(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),GetDpiForSystem());
-        const auto initial=frameSize(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST));const int w=initial.cx,h=initial.cy;
+        if(!GetMonitorInfoW(monitor,&mi))return false;
+        fitToMonitor(monitor,GetDpiForSystem());
+        auto position=[&](SIZE size){
+            const POINT requested=savedPosition_.value_or(POINT{
+                mi.rcWork.left+std::max(0L,(mi.rcWork.right-mi.rcWork.left-size.cx)/2),
+                mi.rcWork.top+std::max(0L,(mi.rcWork.bottom-mi.rcWork.top-size.cy)/2)});
+            return POINT{std::clamp(requested.x,mi.rcWork.left,std::max(mi.rcWork.left,mi.rcWork.right-size.cx)),
+                         std::clamp(requested.y,mi.rcWork.top,std::max(mi.rcWork.top,mi.rcWork.bottom-size.cy))};
+        };
+        const auto initial=frameSize(monitor);const auto first=position(initial);
         HWND created=CreateWindowExW(0,cls_,tr(L"NightLight settings",L"Definições do NightLight"),frameStyle_,
-            mi.rcWork.left+(mi.rcWork.right-mi.rcWork.left-w)/2,mi.rcWork.top+(mi.rcWork.bottom-mi.rcWork.top-h)/2,
-            w,h,owner_,nullptr,instance_,this);
+            first.x,first.y,initial.cx,initial.cy,owner_,nullptr,instance_,this);
         if(!created)return false;
-        const auto actual=frameSize(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST));const int dw=actual.cx,dh=actual.cy;
-        SetWindowPos(created,nullptr,mi.rcWork.left+std::max(0L,(mi.rcWork.right-mi.rcWork.left-dw)/2),
-            mi.rcWork.top+std::max(0L,(mi.rcWork.bottom-mi.rcWork.top-dh)/2),dw,dh,SWP_NOZORDER|SWP_NOACTIVATE);
+        const auto actual=frameSize(monitor);const auto restored=position(actual);
+        SetWindowPos(created,nullptr,restored.x,restored.y,actual.cx,actual.cy,SWP_NOZORDER|SWP_NOACTIVATE);
+        placementReady_=true;
         ShowWindow(created,SW_SHOW);SetFocus(ctrl(GeneralTab));SetForegroundWindow(created);return true;
     }
 };

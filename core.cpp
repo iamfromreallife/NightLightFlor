@@ -492,7 +492,7 @@ Model::~Model() { save(); restoreOriginals(); }
 bool Model::load() {
     lastError_.clear();
     loaded_=false; savedStampValid_=false; windowPosition_.reset(); windowSize_.reset();
-    inactiveWindowGeometry_.reset();
+    inactiveWindowGeometry_.reset();settingsWindowPosition_.reset();
     std::error_code ec;
     const bool exists=fs::exists(configPath_,ec);
     if (ec) { lastError_=L"Cannot access config.json; your file has not been modified."; return false; }
@@ -579,7 +579,7 @@ bool Model::load() {
     }
     preferences_.dimInactive=general.get("dim_inactive").boolean(false);
     preferences_.dimAmount=std::clamp(general.get("dim_amount").integer(90),1,99);
-    preferences_.dimMinutes=std::clamp(general.get("dim_minutes").integer(5),1,1440);
+    preferences_.dimSeconds=normalizeDimSeconds(general.get("dim_seconds").integer(legacyDimSeconds(general.get("dim_minutes").integer(5))));
     preferences_.dimAll=general.get("dim_all").boolean(true);
     preferences_.dimDisplays.clear();
     if(const auto* values=std::get_if<portable::Json::Array>(&general.get("dim_displays").value))
@@ -598,6 +598,12 @@ bool Model::load() {
         const int height=position.get("height").integer(-1);
         if (width>=200 && width<=10000 && height>=260 && height<=10000)
             windowSize_=SIZE{width,height};
+    }
+    const auto& settingsPosition=general.get("settings_window_position");
+    if(settingsPosition.isObject()) {
+        const int x=settingsPosition.get("x").integer(INT_MIN),y=settingsPosition.get("y").integer(INT_MIN);
+        if(x>=-1000000 && x<=1000000 && y>=-1000000 && y<=1000000)
+            settingsWindowPosition_=POINT{x,y};
     }
     const auto& inactivePosition=general.get("inactive_window_position");
     if(inactivePosition.isObject()) {
@@ -654,6 +660,11 @@ bool Model::rememberWindowSize(int width,int height) {
     windowSize_=SIZE{width,height};
     return true;
 }
+bool Model::rememberSettingsWindowPosition(int x,int y) {
+    if(!loaded_ || x < -1000000 || x > 1000000 || y < -1000000 || y > 1000000) return false;
+    if(settingsWindowPosition_ && settingsWindowPosition_->x==x && settingsWindowPosition_->y==y) return false;
+    settingsWindowPosition_=POINT{x,y};return true;
+}
 bool Model::rememberInactiveWindowGeometry(const RECT& rect) {
     const auto width=static_cast<std::int64_t>(rect.right)-rect.left;
     const auto height=static_cast<std::int64_t>(rect.bottom)-rect.top;
@@ -698,7 +709,9 @@ bool Model::save() {
     root_["general"]["hotkey_steps"]=std::move(hotkeySteps);
     root_["general"]["dim_inactive"]=preferences_.dimInactive;
     root_["general"]["dim_amount"]=preferences_.dimAmount;
-    root_["general"]["dim_minutes"]=preferences_.dimMinutes;
+    root_["general"]["dim_seconds"]=preferences_.dimSeconds;
+    // Retain a rounded-up minute value for older builds.
+    root_["general"]["dim_minutes"]=legacyDimMinutes(preferences_.dimSeconds);
     root_["general"]["dim_all"]=preferences_.dimAll;
     portable::Json::Array dimDisplays;dimDisplays.reserve(preferences_.dimDisplays.size());
     for(const auto& key:preferences_.dimDisplays) dimDisplays.emplace_back(toUtf8(key));
@@ -717,7 +730,7 @@ bool Model::save() {
     auto clean=portable::Json::object();
     clean["screen"]["kelvin"]=std::clamp(root_.get("screen").get("kelvin").integer(5000),1000,6500);
     clean["general"]=portable::Json::object();
-    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_all","dim_displays","ddc_controls","color_schedule","hotkeys","hotkey_steps"})
+    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_seconds","dim_all","dim_displays","ddc_controls","color_schedule","hotkeys","hotkey_steps"})
         clean["general"][key]=root_.get("general").get(key);
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
@@ -726,6 +739,11 @@ bool Model::save() {
     if (windowSize_) {
         clean["general"]["window_position"]["width"]=windowSize_->cx;
         clean["general"]["window_position"]["height"]=windowSize_->cy;
+    }
+    if(settingsWindowPosition_) {
+        auto& pos=clean["general"]["settings_window_position"];
+        pos["x"]=static_cast<int>(settingsWindowPosition_->x);
+        pos["y"]=static_cast<int>(settingsWindowPosition_->y);
     }
     if(inactiveWindowGeometry_) {
         const auto& r=*inactiveWindowGeometry_;
@@ -1448,7 +1466,7 @@ void Model::updatePreferences(const Preferences& updated) {
     preferences_.hotkeySteps=updated.hotkeySteps;
     preferences_.dimInactive=updated.dimInactive;
     preferences_.dimAmount=std::clamp(updated.dimAmount,1,99);
-    preferences_.dimMinutes=std::clamp(updated.dimMinutes,1,1440);
+    preferences_.dimSeconds=normalizeDimSeconds(updated.dimSeconds);
     preferences_.dimAll=updated.dimAll;
     preferences_.dimDisplays=updated.dimDisplays;
     save();

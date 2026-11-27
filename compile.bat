@@ -32,7 +32,7 @@ mkdir "%STAGE%\s" || goto failed
 set "SRC=%STAGE%\s"
 set "BUILD=%STAGE%\b"
 echo Building in: "%STAGE%"
-for %%F in (CMakeLists.txt main.cpp startup_task.cpp startup_task.hpp inactive_media.cpp inactive_media.hpp media_policy.hpp inactive_dialog.hpp settings_dialog.hpp localization.hpp automation.hpp solar_time.hpp location_service.hpp location_search_state.hpp map_view.hpp location_dialog.hpp update_version.hpp update_checker.hpp release_markdown.hpp update_dialog.hpp core.cpp core.hpp display_identity.cpp display_identity.hpp ddc.cpp ddc.hpp wmi_brightness.cpp wmi_brightness.hpp json.hpp menu_icons.hpp motion.hpp paint_surface.hpp tests.cpp icon.ico icon-dark.ico icon-light.ico app.manifest resources.rc.in) do (
+for %%F in (CMakeLists.txt main.cpp startup_task.cpp startup_task.hpp inactive_media.cpp inactive_media.hpp media_policy.hpp dim_timeout.hpp inactive_dialog.hpp settings_dialog.hpp localization.hpp automation.hpp solar_time.hpp location_service.hpp location_search_state.hpp map_view.hpp location_dialog.hpp update_version.hpp update_checker.hpp release_markdown.hpp update_dialog.hpp core.cpp core.hpp display_identity.cpp display_identity.hpp ddc.cpp ddc.hpp wmi_brightness.cpp wmi_brightness.hpp json.hpp menu_icons.hpp motion.hpp paint_surface.hpp tests.cpp icon.ico icon-dark.ico icon-light.ico app.manifest resources.rc.in) do (
     if not exist "%ROOT%\%%F" (
         echo ERROR: Missing source file %%F
         goto failed

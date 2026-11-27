@@ -25,6 +25,20 @@ void check(bool ok,const char* message) {
 int main() {
     try {
         {
+            // Match separately rounded Win32 layout coordinates and row height.
+            for(int dpi : {96,120,144,168,192,240,288}) {
+                auto px=[&](int n){return (n*dpi+48)/96;};
+                const int fixed=px(56)+px(378),row=px(30),minimum=px(475);
+                for(std::size_t count=0;count<=64;++count) {
+                    const int needed=dimDialogClientHeight(count,row,fixed,minimum);
+                    check(needed-fixed>=static_cast<int>(std::max<std::size_t>(1,count))*row,
+                        "Inactivity display panel fits every row at each DPI");
+                    check(dimDialogClientHeight(count,row,fixed,minimum,needed-1)==needed-1,
+                        "Small monitor work area retains scrolling fallback");
+                }
+            }
+        }
+        {
             LocationSearchState q;
             q.changed(L"Li",0);check(!q.busy()&&!q.ready(1000),"Short queries do not trigger suggestions");
             q.changed(L"Lis",100);check(!q.ready(499)&&q.ready(500),"400 ms suggestion debounce");
@@ -132,8 +146,13 @@ int main() {
             check(dimOverlayAlpha(0)==0 && dimOverlayAlpha(50)==128 &&
                   dimOverlayAlpha(90)==230 && dimOverlayAlpha(99)==252 &&
                   dimOverlayAlpha(100)==252,"Black overlay opacity is bounded and never completely opaque");
-            check(!displayIdleLongEnough(119999,0,2) && displayIdleLongEnough(120000,0,2) &&
-                  !displayIdleLongEnough(1,100,2),"Timeout boundaries and monotonic activity");
+            check(!displayIdleLongEnough(119999,0,120) && displayIdleLongEnough(120000,0,120) &&
+                  !displayIdleLongEnough(1,100,120),"Timeout boundaries and monotonic activity");
+            check(!displayIdleLongEnough(4999,0,5) && displayIdleLongEnough(5000,0,5) &&
+                  !displayIdleLongEnough(999,0,1) && displayIdleLongEnough(1000,0,1),"Second-resolution dimming timeout");
+            check(legacyDimSeconds(7)==420 && legacyDimSeconds(0)==60 && legacyDimSeconds(2000)==86400 &&
+                  normalizeDimSeconds(0)==1 && normalizeDimSeconds(999999)==86400 && legacyDimMinutes(17)==1,
+                  "Legacy minute migration and seconds limits");
             check(sessionInputAge(0x20u,0xfffffff0u)==48 &&
                   sessionInputAge(1000u,900u)==100 &&
                   sessionInputAge(1000u,1001u)==0,
@@ -157,7 +176,7 @@ int main() {
             // renew last input. The system idle time reaches the timeout.
             const auto now=120000ull;
             const auto last=now-sessionInputAge(120000u,0u);
-            check(displayIdleLongEnough(now,last,2),
+            check(displayIdleLongEnough(now,last,120),
                 "A parked mouse does not prevent screen-saver-style inactivity");
             Monitor fallback;fallback.device=L"DISPLAY-FALLBACK";
             Preferences dim;
@@ -499,7 +518,7 @@ int main() {
             check(target.percent==100 && !target.failed,
                 "Normal hardware readback remains authoritative after recovery");
         }
-        const std::string legacy=R"({"version":"2.1.1","screen":{"kelvin":4200,"brightness":25,"monitor_profiles":{"\\\\.\\DISPLAY1":{"enabled":false,"kelvin":3120,"brightness":85,"custom_name":"Meu ecr\u00e3"}}},"general":{"language":"pt-PT","appearance":"light","startup_mode":"tray","color_schedule":{"enabled":true,"day_start":480,"night_start":1200,"day_kelvin":6200,"night_kelvin":3200,"transition_minutes":45}},"old_module":{"preserve_me":[1,"ok",false]}})";
+        const std::string legacy=R"({"version":"2.1.1","screen":{"kelvin":4200,"brightness":25,"monitor_profiles":{"\\\\.\\DISPLAY1":{"enabled":false,"kelvin":3120,"brightness":85,"custom_name":"Meu ecr\u00e3"}}},"general":{"language":"pt-PT","appearance":"light","startup_mode":"tray","dim_minutes":7,"color_schedule":{"enabled":true,"day_start":480,"night_start":1200,"day_kelvin":6200,"night_kelvin":3200,"transition_minutes":45}},"old_module":{"preserve_me":[1,"ok",false]}})";
         auto data=Json::parse(legacy);
         check(data.get("screen").get("kelvin").integer()==4200,"Read old Kelvin");
         check(data.get("old_module").get("preserve_me").isArray(),"Preserve unknown fields");
@@ -986,6 +1005,7 @@ int main() {
             check(model.load(),"Load local portable config");
             check(model.preferences().locale==L"pt-PT","PT language");
             check(model.preferences().theme==L"light","Light theme");
+            check(model.preferences().dimSeconds==420,"Migrate existing seven-minute timeout");
             const auto& migratedSchedule=model.preferences().colorSchedule;
             check(migratedSchedule.enabled && migratedSchedule.mode==ScheduleMode::Custom &&
                   migratedSchedule.points.size()==2 && migratedSchedule.points[0].minute==480 &&
@@ -995,6 +1015,10 @@ int main() {
             check(!model.windowPosition().has_value(),"Legacy config without a window position keeps default placement");
             check(!model.windowSize().has_value(),"Legacy config without dimensions keeps automatic first-run sizing");
             check(!model.inactiveWindowGeometry(),"Legacy config has no inactivity window geometry");
+            check(!model.settingsWindowPosition(),"Legacy config has no settings window position");
+            check(model.rememberSettingsWindowPosition(-1450,220),"Remember settings on a left-hand monitor");
+            check(!model.rememberSettingsWindowPosition(-1450,220),"Identical settings position is not dirty");
+            check(!model.rememberSettingsWindowPosition(INT_MIN,0) && !model.rememberSettingsWindowPosition(0,1000001),"Reject invalid settings coordinates");
             const RECT dimRect{-1700,180,-1100,720};
             check(model.rememberInactiveWindowGeometry(dimRect),"Remember independent inactivity window geometry on left monitor");
             check(!model.rememberInactiveWindowGeometry(dimRect),"Identical inactivity window geometry is not dirty");
@@ -1022,7 +1046,7 @@ int main() {
             updated.hotkeySteps[L""]={7,8,150,200};updated.hotkeySteps[L"MONITOR-A"]={2,3,50,80};
             updated.colorSchedule.locationName=L"Lisbon, Portugal";updated.colorSchedule.latitude=38.722;updated.colorSchedule.longitude=-9.139;
             updated.colorSchedule.points[0].kind=SchedulePointKind::Sunrise;updated.colorSchedule.points[0].customTime=true;
-            updated.dimInactive=true;updated.dimAmount=65;updated.dimMinutes=7;
+            updated.dimInactive=true;updated.dimAmount=65;updated.dimSeconds=17;
             updated.dimAll=false;updated.dimDisplays.insert(L"PHYSICAL-A");
             model.updatePreferences(updated);
             check(model.preferences().theme==L"system",
@@ -1054,13 +1078,15 @@ int main() {
             check(model.preferences().theme==L"system",
                 "System-following theme round-trips through portable config");
             check(model.preferences().dimInactive && model.preferences().dimAmount==65 &&
-                  model.preferences().dimMinutes==7 && !model.preferences().dimAll &&
+                  model.preferences().dimSeconds==17 && !model.preferences().dimAll &&
                   model.preferences().dimDisplays.count(L"PHYSICAL-A")==1,
                   "Inactivity settings and physical monitor selection round-trip");
             const auto dimRect=model.inactiveWindowGeometry();
             check(dimRect && dimRect->left==-1700 && dimRect->top==180 &&
                   dimRect->right==-1100 && dimRect->bottom==720,
                   "Restore independent inactivity geometry through a restart");
+            const auto settingsPosition=model.settingsWindowPosition();
+            check(settingsPosition && settingsPosition->x==-1450 && settingsPosition->y==220,"Restore independent settings window position");
             const auto restoredWindow=model.windowPosition();
             check(restoredWindow && restoredWindow->x==-1900 && restoredWindow->y==235,
                 "Persist and restore screen position across application starts");
@@ -1082,6 +1108,7 @@ int main() {
             check(ReadFile(handle,content.data(),size,&received,nullptr),"Read bytes");
             CloseHandle(handle);
             auto saved=Json::parse(content);
+            check(saved.get("general").get("dim_seconds").integer()==17 && saved.get("general").get("dim_minutes").integer()==1,"Persist exact seconds with backwards-compatible minutes");
             check(saved.get("general").get("appearance").str()=="system",
                 "Portable config retains system theme mode");
             check(std::holds_alternative<std::nullptr_t>(

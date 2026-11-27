@@ -7,7 +7,7 @@ class InactiveSettingsWindow {
     using Closed=std::function<void(const std::optional<Preferences>&)>;
     using SaveGeometry=std::function<void(const RECT&)>;
     enum : int { Enable=101,Amount=102,Percent=103,TestButton=104,All=105,
-        Displays=106,Preset=110,Custom=116,Minutes=117 };
+        Displays=106,Preset=110,Custom=119,CustomSeconds=120,Minutes=121 };
     static constexpr UINT_PTR TestTimer=1;
     static constexpr wchar_t ClassName[]=L"NightLight.InactiveSettings";
     HINSTANCE instance_;
@@ -44,6 +44,24 @@ class InactiveSettingsWindow {
     nightlight::PaintSurface surface_,sliderSurface_;
     const wchar_t* tr(const wchar_t* en,const wchar_t* pt) const {return nightlight::translate(language_,en,pt);}
     int px(int n) const {return MulDiv(n,static_cast<int>(dpi_),96);}
+    int minimumClientHeight() const {
+        return nightlight::dimDialogClientHeight(monitors_.size(),px(30),px(56)+px(378),px(475));
+    }
+    RECT minimumFrame() const {
+        RECT r{0,0,px(428),minimumClientHeight()};
+        AdjustWindowRectExForDpi(&r,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
+        return r;
+    }
+    RECT fitFrame(RECT r,const RECT& work) const {
+        const RECT minimum=minimumFrame();
+        const int workW=std::max(1,static_cast<int>(work.right-work.left));
+        const int workH=std::max(1,static_cast<int>(work.bottom-work.top));
+        const int w=std::min(workW,std::max(static_cast<int>(r.right-r.left),static_cast<int>(minimum.right-minimum.left)));
+        const int h=std::min(workH,std::max(static_cast<int>(r.bottom-r.top),static_cast<int>(minimum.bottom-minimum.top)));
+        const int x=std::clamp(static_cast<int>(r.left),static_cast<int>(work.left),static_cast<int>(work.right)-w);
+        const int y=std::clamp(static_cast<int>(r.top),static_cast<int>(work.top),static_cast<int>(work.bottom)-h);
+        return RECT{x,y,x+w,y+h};
+    }
     HWND control(int id) const {
         const auto it=controls_.find(id);
         return it==controls_.end()?nullptr:it->second;
@@ -67,8 +85,9 @@ class InactiveSettingsWindow {
         }
         return DefSubclassProc(hwnd,msg,wp,lp);
     }
+    bool customTime() const {return chosenTime_==Custom || chosenTime_==CustomSeconds;}
     COLORREF minutesBackground(const Palette& p) const {
-        return chosenTime_==Custom?p.chip:mix(p.card,p.chip,0.5);
+        return customTime()?p.chip:mix(p.card,p.chip,0.5);
     }
     void invalidateMinutesFrame() {
         if(window_) InvalidateRect(window_,&minutesFrame_,FALSE);
@@ -227,11 +246,18 @@ class InactiveSettingsWindow {
         }
     }
     void setTime(int id) {
+        if(id>=Preset && id<Custom) {
+            const int seconds=nightlight::kDimSecondPresets[id-Preset];
+            SetWindowTextW(control(Minutes),std::to_wstring(seconds<60?seconds:seconds/60).c_str());
+        } else if(chosenTime_>=Preset && chosenTime_<Custom) {
+            const int seconds=nightlight::kDimSecondPresets[chosenTime_-Preset];
+            SetWindowTextW(control(Minutes),std::to_wstring(id==CustomSeconds?seconds:nightlight::legacyDimMinutes(seconds)).c_str());
+        }
         chosenTime_=id;
-        EnableWindow(control(Minutes),id==Custom);
+        EnableWindow(control(Minutes),customTime());
         invalidateMinutesFrame();
         InvalidateRect(control(Minutes),nullptr,FALSE);
-        for(int i=Preset;i<=Custom;++i) InvalidateRect(control(i),nullptr,FALSE);
+        for(int i=Preset;i<=CustomSeconds;++i) InvalidateRect(control(i),nullptr,FALSE);
     }
     void createControls() {
         button(Enable,tr(L"Enable inactivity dimming",L"Ativar escurecimento por inatividade"));
@@ -239,13 +265,16 @@ class InactiveSettingsWindow {
         if(slider) SetWindowSubclass(slider,sliderProc,1,reinterpret_cast<DWORD_PTR>(this));
         child(Percent,L"STATIC",L"",SS_RIGHT|SS_CENTERIMAGE);
         button(TestButton,tr(L"Test",L"Testar"));
-        for(size_t i=0;i<nightlight::kDimMinutePresets.size();++i) {
-            const int min=nightlight::kDimMinutePresets[i];
-            const auto label=min==60?std::wstring(tr(L"1 hour",L"1 hora")):std::to_wstring(min)+nightlight::translate(language_,L" min");
+        chosenTime_=draft_.dimSeconds%60?CustomSeconds:Custom;
+        for(size_t i=0;i<nightlight::kDimSecondPresets.size();++i) {
+            const int seconds=nightlight::kDimSecondPresets[i];
+            const auto label=seconds<60?std::to_wstring(seconds)+nightlight::translate(language_,L" sec"):
+                seconds==3600?std::wstring(tr(L"1 hour",L"1 hora")):std::to_wstring(seconds/60)+nightlight::translate(language_,L" min");
             button(Preset+static_cast<int>(i),label.c_str());
-            if(min==draft_.dimMinutes) chosenTime_=Preset+static_cast<int>(i);
+            if(seconds==draft_.dimSeconds) chosenTime_=Preset+static_cast<int>(i);
         }
         button(Custom,tr(L"Custom (min)",L"Personalizado (min)"));
+        button(CustomSeconds,tr(L"Custom (sec)",L"Personalizado (seg)"));
         const HWND minutes=child(Minutes,L"EDIT",L"",WS_TABSTOP|ES_NUMBER|ES_AUTOHSCROLL);
         if(minutes) SetWindowSubclass(minutes,minutesProc,1,reinterpret_cast<DWORD_PTR>(this));
         button(All,tr(L"All displays",L"Todos os ecrãs"));
@@ -257,8 +286,8 @@ class InactiveSettingsWindow {
         SendMessageW(slider,TBM_SETPOS,TRUE,draft_.dimAmount);
         SendMessageW(slider,TBM_SETPAGESIZE,0,10);
         updateAmount();
-        SetWindowTextW(control(Minutes),std::to_wstring(draft_.dimMinutes).c_str());
-        SendMessageW(control(Minutes),EM_SETLIMITTEXT,4,0);
+        SetWindowTextW(control(Minutes),std::to_wstring(chosenTime_==CustomSeconds?draft_.dimSeconds:nightlight::legacyDimMinutes(draft_.dimSeconds)).c_str());
+        SendMessageW(control(Minutes),EM_SETLIMITTEXT,5,0);
         setTime(chosenTime_);
         for(const auto& mon:monitors_) {
             const auto label=mon.displayName();
@@ -267,7 +296,7 @@ class InactiveSettingsWindow {
         }
         EnableWindow(control(Displays),!draft_.dimAll);
         ready_=control(IDOK) && control(Displays) && slider && control(Minutes) &&
-            controls_.size()==16;
+            controls_.size()==20;
         // Count is validated below rather than letting an incomplete
         // configuration frame accept or test settings.
     }
@@ -278,8 +307,8 @@ class InactiveSettingsWindow {
         const int pad=px(12),left=pad+px(14),right=w-pad-px(14);
         const int content=std::max(px(100),right-left);
         amountCard_={pad,pad,w-pad,px(128)};
-        timeCard_={pad,px(140),w-pad,px(278)};
-        displaysCard_={pad,px(290),w-pad,std::max(px(373),h-px(56))};
+        timeCard_={pad,px(140),w-pad,px(309)};
+        displaysCard_={pad,px(321),w-pad,std::max(px(404),h-px(56))};
         auto place=[&](int id,int x,int y,int width,int height) {
             if(HWND hwnd=control(id)) SetWindowPos(hwnd,nullptr,x,y,std::max(1,width),std::max(1,height),
                 SWP_NOZORDER|SWP_NOACTIVATE);
@@ -290,19 +319,21 @@ class InactiveSettingsWindow {
         place(Percent,right-buttonW-percentW-px(8),px(84),percentW,px(30));
         place(Amount,left,px(84),content-buttonW-percentW-px(16),px(30));
         const int gap=px(8),cell=(content-gap*2)/3;
-        for(int i=0;i<6;++i) place(Preset+i,left+(i%3)*(cell+gap),
+        for(int i=0;i<static_cast<int>(nightlight::kDimSecondPresets.size());++i) place(Preset+i,left+(i%3)*(cell+gap),
             px(171+(i/3)*31),cell,px(26));
-        place(Custom,left,px(236),px(180),px(28));
-        minutesFrame_={left+px(188),px(236),left+px(270),px(264)};
+        const int fieldW=px(70),customW=(content-fieldW-2*gap)/2;
+        place(Custom,left,px(267),customW,px(28));
+        place(CustomSeconds,left+customW+gap,px(267),customW,px(28));
+        minutesFrame_={left+2*(customW+gap),px(267),right,px(295)};
         // A genuine native EDIT preserves selection, caret, keyboard input
         // and accessibility, but sits inside our antialiased rounded frame.
         const int editHeight=px(18);
         place(Minutes,minutesFrame_.left+px(8),
             (minutesFrame_.top+minutesFrame_.bottom-editHeight)/2,
             static_cast<int>(minutesFrame_.right-minutesFrame_.left)-px(16),editHeight);
-        place(All,right-px(194),px(301),px(194),px(28));
-        place(Displays,left,px(335),content,std::max(px(30),
-            static_cast<int>(displaysCard_.bottom)-px(347)));
+        place(All,right-px(194),px(332),px(194),px(28));
+        place(Displays,left,px(366),content,std::max(px(30),
+            static_cast<int>(displaysCard_.bottom)-px(378)));
         place(IDOK,right-px(184),h-px(44),px(88),px(32));
         place(IDCANCEL,right-px(88),h-px(44),px(88),px(32));
         InvalidateRect(window_,nullptr,FALSE);
@@ -315,13 +346,13 @@ class InactiveSettingsWindow {
         fill(dc,rc,p.page);
         for(RECT card:{amountCard_,timeCard_,displaysCard_})
             rounded(dc,card,px(2*nightlight::kCardCornerRadiusDip),p.card,p.border);
-        const bool minutesFocused=GetFocus()==control(Minutes) && chosenTime_==Custom;
+        const bool minutesFocused=GetFocus()==control(Minutes) && customTime();
         rounded(dc,minutesFrame_,px(8),minutesBackground(p),
             minutesFocused?mix(p.border,p.accent,0.65):p.border);
         const int left=px(26),right=rc.right-px(26);
         text(dc,tr(L"Dim amount",L"Escurecimento"),RECT{left,px(63),right,px(82)},bold_,p.text);
         text(dc,tr(L"Inactivity time",L"Tempo de inatividade"),RECT{left,px(148),right,px(170)},bold_,p.text);
-        text(dc,tr(L"Displays",L"Ecrãs"),RECT{left,px(301),right-px(202),px(329)},bold_,p.text);
+        text(dc,tr(L"Displays",L"Ecrãs"),RECT{left,px(332),right-px(202),px(360)},bold_,p.text);
         if(dc!=output) BitBlt(output,0,0,rc.right,rc.bottom,dc,0,0,SRCCOPY);
     }
     void paintButton(const DRAWITEMSTRUCT& item) {
@@ -334,7 +365,7 @@ class InactiveSettingsWindow {
         fill(dc,rc,footer?p.page:p.card);
         const bool push=(item.itemState&ODS_SELECTED)!=0;
         const bool hover=hovering_.count(item.hwndItem)!=0;
-        const bool selected=(id>=Preset && id<=Custom && id==chosenTime_);
+        const bool selected=(id>=Preset && id<=CustomSeconds && id==chosenTime_);
         const bool toggle=id==Enable || id==All;
         const bool on=id==Enable?draft_.dimInactive:draft_.dimAll;
         const bool focused=(item.itemState&ODS_FOCUS)!=0;
@@ -417,16 +448,20 @@ class InactiveSettingsWindow {
     }
     bool readTime() {
         if(chosenTime_>=Preset && chosenTime_<Custom) {
-            draft_.dimMinutes=nightlight::kDimMinutePresets[chosenTime_-Preset];return true;
+            draft_.dimSeconds=nightlight::kDimSecondPresets[chosenTime_-Preset];return true;
         }
         BOOL valid=FALSE;
-        const UINT minutes=GetDlgItemInt(window_,Minutes,&valid,FALSE);
-        if(!valid || minutes<1 || minutes>1440) {
-            MessageBoxW(window_,tr(L"Enter an inactivity time from 1 to 1440 minutes.",
+        const UINT value=GetDlgItemInt(window_,Minutes,&valid,FALSE);
+        const bool seconds=chosenTime_==CustomSeconds;
+        const UINT maximum=seconds?nightlight::kMaxDimSeconds:1440;
+        if(!valid || value<1 || value>maximum) {
+            MessageBoxW(window_,seconds?tr(L"Enter an inactivity time from 1 to 86400 seconds.",
+                L"Introduza um tempo de inatividade entre 1 e 86400 segundos."):
+                tr(L"Enter an inactivity time from 1 to 1440 minutes.",
                 L"Introduza um tempo de inatividade entre 1 e 1440 minutos."),L"NightLight",MB_OK|MB_ICONWARNING);
             SetFocus(control(Minutes));return false;
         }
-        draft_.dimMinutes=static_cast<int>(minutes);return true;
+        draft_.dimSeconds=static_cast<int>(value)*(seconds?1:60);return true;
     }
     void command(int id) {
         if(id==Enable) {
@@ -437,9 +472,9 @@ class InactiveSettingsWindow {
             EnableWindow(control(Displays),!draft_.dimAll);
             InvalidateRect(control(All),nullptr,FALSE);
             InvalidateRect(control(Displays),nullptr,FALSE);
-        } else if(id>=Preset && id<=Custom) {
+        } else if(id>=Preset && id<=CustomSeconds) {
             setTime(id);
-            if(id==Custom) SetFocus(control(Minutes));
+            if(customTime()) SetFocus(control(Minutes));
         } else if(id==TestButton) {
             if(testing_) {cancelTest();return;}
             readSelection();
@@ -477,17 +512,23 @@ class InactiveSettingsWindow {
         }
         case WM_EXITSIZEMOVE:persistGeometry();return 0;
         case WM_GETMINMAXINFO: {
-            RECT minimum{0,0,px(428),px(444)};
-            AdjustWindowRectExForDpi(&minimum,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
+            const RECT minimum=minimumFrame();
             auto* info=reinterpret_cast<MINMAXINFO*>(lp);
-            info->ptMinTrackSize={minimum.right-minimum.left,minimum.bottom-minimum.top};
+            MONITORINFO mi{sizeof(mi)};
+            if(GetMonitorInfoW(MonitorFromWindow(window_,MONITOR_DEFAULTTONEAREST),&mi)) {
+                // Prefer every row, but keep the frame within a short work area.
+                info->ptMinTrackSize={std::min(minimum.right-minimum.left,mi.rcWork.right-mi.rcWork.left),
+                    std::min(minimum.bottom-minimum.top,mi.rcWork.bottom-mi.rcWork.top)};
+            } else info->ptMinTrackSize={minimum.right-minimum.left,minimum.bottom-minimum.top};
             return 0;
         }
         case WM_DPICHANGED: {
             dpi_=HIWORD(wp);if(!dpi_)dpi_=96;
             fonts();surface_.reset();sliderSurface_.reset();
-            const auto* r=reinterpret_cast<const RECT*>(lp);
-            SetWindowPos(window_,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);
+            RECT r=*reinterpret_cast<const RECT*>(lp);
+            MONITORINFO mi{sizeof(mi)};
+            if(GetMonitorInfoW(MonitorFromRect(&r,MONITOR_DEFAULTTONEAREST),&mi)) r=fitFrame(r,mi.rcWork);
+            SetWindowPos(window_,nullptr,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOZORDER|SWP_NOACTIVATE);
             layout();return 0;
         }
         case WM_ERASEBKGND:return 1;
@@ -523,7 +564,7 @@ class InactiveSettingsWindow {
             const auto p=palette_();HDC dc=reinterpret_cast<HDC>(wp);
             const bool minutes=reinterpret_cast<HWND>(lp)==control(Minutes);
             const auto background=minutes?minutesBackground(p):p.card;
-            SetTextColor(dc,minutes && chosenTime_!=Custom?p.muted:p.text);
+            SetTextColor(dc,minutes && !customTime()?p.muted:p.text);
             SetBkColor(dc,background);SetDCBrushColor(dc,background);
             return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
         }
@@ -605,29 +646,27 @@ public:
         // Get initial DPI from the target monitor through a short-lived
         // ordinary window; the native frame adjusts on WM_DPICHANGED.
         dpi_=GetDpiForSystem();if(!dpi_)dpi_=96;
-        RECT r{0,0,px(490),px(std::clamp(420+static_cast<int>(monitors_.size())*30,474,620))};
-        AdjustWindowRectExForDpi(&r,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
         const int workW=static_cast<int>(mi.rcWork.right-mi.rcWork.left);
         const int workH=static_cast<int>(mi.rcWork.bottom-mi.rcWork.top);
         if(workW<=0 || workH<=0) return false;
         const auto placement=[&]() {
-            RECT minimum{0,0,px(428),px(444)};
-            AdjustWindowRectExForDpi(&minimum,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
-            const int wantedW=savedGeometry_?static_cast<int>(savedGeometry_->right-savedGeometry_->left):static_cast<int>(r.right-r.left);
-            const int wantedH=savedGeometry_?static_cast<int>(savedGeometry_->bottom-savedGeometry_->top):static_cast<int>(r.bottom-r.top);
-            const int w=std::min(workW,std::max(wantedW,static_cast<int>(minimum.right-minimum.left)));
-            const int h=std::min(workH,std::max(wantedH,static_cast<int>(minimum.bottom-minimum.top)));
-            const int x=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->left),static_cast<int>(mi.rcWork.left),static_cast<int>(mi.rcWork.right)-w):mi.rcWork.left+(workW-w)/2;
-            const int y=savedGeometry_?std::clamp(static_cast<int>(savedGeometry_->top),static_cast<int>(mi.rcWork.top),static_cast<int>(mi.rcWork.bottom)-h):mi.rcWork.top+(workH-h)/2;
-            return RECT{x,y,x+w,y+h};
+            // No arbitrary height cap: grow with the number of displays.
+            // A previously saved small rectangle must not reintroduce scrolling.
+            RECT r{0,0,px(490),std::max(px(505),minimumClientHeight()+px(17))};
+            AdjustWindowRectExForDpi(&r,WS_OVERLAPPEDWINDOW,FALSE,0,dpi_);
+            if(savedGeometry_) return fitFrame(*savedGeometry_,mi.rcWork);
+            const int w=std::min(workW,static_cast<int>(r.right-r.left));
+            const int h=std::min(workH,static_cast<int>(r.bottom-r.top));
+            const int x=mi.rcWork.left+(workW-w)/2,y=mi.rcWork.top+(workH-h)/2;
+            return fitFrame(RECT{x,y,x+w,y+h},mi.rcWork);
         };
         const RECT initial=placement();
         HWND created=CreateWindowExW(0,ClassName,tr(L"Dim screens on inactivity",L"Reduzir o brilho dos ecrãs por inatividade"),
             WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,initial.left,initial.top,initial.right-initial.left,initial.bottom-initial.top,owner_,nullptr,instance_,this);
         if(!created) return false;
-        // WM_CREATE now knows the target monitor DPI. Re-evaluate the saved
-        // rectangle before showing the window, without a visible resize.
-        if(savedGeometry_) {
+        // WM_CREATE now knows the target monitor DPI. Re-evaluate the
+        // rectangle before showing the window, even on the first opening.
+        {
             const RECT restored=placement();
             RECT actual{};
             if(GetWindowRect(created,&actual) && !EqualRect(&actual,&restored))
