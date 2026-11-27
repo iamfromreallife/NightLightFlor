@@ -20,7 +20,8 @@ private:
     HINSTANCE instance_;
     HWND owner_,window_=nullptr;
     HFONT font_=nullptr,bold_=nullptr;
-    UINT dpi_=96;
+    UINT dpi_=96,frameDpi_=96;
+    static constexpr DWORD frameStyle_=WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
     int tab_=0,behaviorPage_=0,scope_=0;
     bool building_=false,closing_=false;
     std::vector<std::wstring> scopeKeys_,backendKeys_;
@@ -41,6 +42,21 @@ private:
     nightlight::PaintSurface surface_;
     int px(int value)const{return MulDiv(value,static_cast<int>(dpi_),96);}
     const wchar_t* tr(const wchar_t* en,const wchar_t* pt)const{return pt_()?pt:en;}
+    void fitToMonitor(HMONITOR monitor,UINT dpi){
+        frameDpi_=dpi?dpi:96;dpi_=frameDpi_;
+        MONITORINFO mi{sizeof(mi)};
+        if(GetMonitorInfoW(monitor,&mi)){
+            RECT borders{};AdjustWindowRectExForDpi(&borders,frameStyle_,FALSE,0,frameDpi_);
+            const int w=static_cast<int>(mi.rcWork.right-mi.rcWork.left-borders.right+borders.left);
+            const int h=static_cast<int>(mi.rcWork.bottom-mi.rcWork.top-borders.bottom+borders.top);
+            dpi_=static_cast<UINT>(std::max(48,std::min({static_cast<int>(frameDpi_),w*96/560,h*96/482})));
+        }
+    }
+    SIZE frameSize()const{
+        RECT r{0,0,px(560),px(482)};
+        AdjustWindowRectExForDpi(&r,frameStyle_,FALSE,0,frameDpi_);
+        return {r.right-r.left,r.bottom-r.top};
+    }
     HWND ctrl(int id)const{
         for(const auto& item:children_)if(item.id==id)return item.hwnd;
         return nullptr;
@@ -335,7 +351,7 @@ private:
     LRESULT dispatch(UINT msg,WPARAM wp,LPARAM lp){
         switch(msg){
         case WM_CREATE:
-            dpi_=GetDpiForWindow(window_);if(!dpi_)dpi_=96;fonts();
+            fitToMonitor(MonitorFromWindow(window_,MONITOR_DEFAULTTONEAREST),GetDpiForWindow(window_));fonts();
             button(GeneralTab,tr(L"General",L"Geral"),14,12,172,30,false);
             button(BehaviorTab,tr(L"Behavior",L"Comportamento"),194,12,172,30,false);
             button(AutomationTab,tr(L"Automation",L"Automatização"),374,12,172,30,false);
@@ -346,9 +362,16 @@ private:
         case WM_APP+1:rebuild();return 0;
         case WM_SIZE:if(wp!=SIZE_MINIMIZED)layout();else surface_.reset();return 0;
         case WM_DPICHANGED:{
-            dpi_=HIWORD(wp);if(!dpi_)dpi_=96;fonts();surface_.reset();
             const auto* r=reinterpret_cast<const RECT*>(lp);
-            SetWindowPos(window_,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);
+            const HMONITOR monitor=MonitorFromRect(r,MONITOR_DEFAULTTONEAREST);
+            fitToMonitor(monitor,HIWORD(wp));fonts();surface_.reset();
+            const auto size=frameSize();
+            MONITORINFO mi{sizeof(mi)};int x=r->left,y=r->top;
+            if(GetMonitorInfoW(monitor,&mi)){
+                x=std::clamp(x,static_cast<int>(mi.rcWork.left),static_cast<int>(std::max(mi.rcWork.left,mi.rcWork.right-size.cx)));
+                y=std::clamp(y,static_cast<int>(mi.rcWork.top),static_cast<int>(std::max(mi.rcWork.top,mi.rcWork.bottom-size.cy)));
+            }
+            SetWindowPos(window_,nullptr,x,y,size.cx,size.cy,SWP_NOZORDER|SWP_NOACTIVATE);
             layout();return 0;
         }
         case WM_ERASEBKGND:return 1;
@@ -414,16 +437,13 @@ public:
         POINT cursor{};GetCursorPos(&cursor);
         MONITORINFO mi{sizeof(mi)};
         if(!GetMonitorInfoW(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),&mi))return false;
-        constexpr DWORD style=WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
-        dpi_=GetDpiForSystem();if(!dpi_)dpi_=96;
-        RECT r{0,0,px(560),px(482)};AdjustWindowRectExForDpi(&r,style,FALSE,0,dpi_);
-        const int w=r.right-r.left,h=r.bottom-r.top;
-        HWND created=CreateWindowExW(0,cls_,tr(L"NightLight settings",L"Definições do NightLight"),style,
+        fitToMonitor(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),GetDpiForSystem());
+        const auto initial=frameSize();const int w=initial.cx,h=initial.cy;
+        HWND created=CreateWindowExW(0,cls_,tr(L"NightLight settings",L"Definições do NightLight"),frameStyle_,
             mi.rcWork.left+(mi.rcWork.right-mi.rcWork.left-w)/2,mi.rcWork.top+(mi.rcWork.bottom-mi.rcWork.top-h)/2,
             w,h,owner_,nullptr,instance_,this);
         if(!created)return false;
-        RECT actual{0,0,px(560),px(482)};AdjustWindowRectExForDpi(&actual,style,FALSE,0,dpi_);
-        const int dw=actual.right-actual.left,dh=actual.bottom-actual.top;
+        const auto actual=frameSize();const int dw=actual.cx,dh=actual.cy;
         SetWindowPos(created,nullptr,mi.rcWork.left+std::max(0L,(mi.rcWork.right-mi.rcWork.left-dw)/2),
             mi.rcWork.top+std::max(0L,(mi.rcWork.bottom-mi.rcWork.top-dh)/2),dw,dh,SWP_NOZORDER|SWP_NOACTIVATE);
         ShowWindow(created,SW_SHOW);SetFocus(ctrl(GeneralTab));SetForegroundWindow(created);return true;

@@ -2298,14 +2298,15 @@ private:
         const auto group=groups.find(key);if(group==groups.end())return;
         const int binding=group->second[action];
         // Ignore stale WM_HOTKEY messages queued before a settings change.
-        if(HIWORD(message)!=(binding&255) || LOWORD(message)!=(hotkeyModifiers(binding)&~MOD_NOREPEAT))return;
+        if(HIWORD(message)!=(binding&255) || (LOWORD(message)&(MOD_ALT|MOD_CONTROL|MOD_SHIFT|MOD_WIN))!=(hotkeyModifiers(binding)&~MOD_NOREPEAT))return;
         bool changed=false,brightnessChanged=false;
         for(size_t i=0;i<model_.monitors().size();++i){
             const auto& mon=model_.monitors()[i];
             if(!key.empty() && nightlight::monitorProfileKey(mon)!=key)continue;
             if(action<2){
                 const auto state=ddc_.state(mon.device);
-                if(state.loading || !state.brightness.supported || !state.brightness.hasValue){ddc_.refresh(mon.device);continue;}
+                if(state.loading)continue;
+                if(!state.brightness.supported || !state.brightness.hasValue){ddc_.refresh(mon.device);continue;}
                 const int next=std::clamp(state.brightness.percent+(action==0?5:-5),0,100);
                 if(next!=state.brightness.percent && ddc_.set(mon.device,nightlight::DdcFeature::Brightness,next)){
                     model_.rememberHardwarePercent(mon.device,false,next);brightnessChanged=true;
@@ -2323,7 +2324,7 @@ private:
     }
     void syncColorSchedule() {
         KillTimer(taskbarOwner_,TIMER_COLOR_SCHEDULE);
-        lastScheduledTargets_.clear();
+        lastScheduledTargets_.clear();lastScheduleSave_=0;
         if(model_.preferences().colorSchedule.enabled && !shuttingDown_)tickColorSchedule();
         else if(scheduleDirty_){model_.save();scheduleDirty_=false;}
     }
@@ -2351,7 +2352,7 @@ private:
         const auto now=GetTickCount64();
         scheduleDirty_=scheduleDirty_||changed;
         if(scheduleDirty_ && (!desired.transitioning || !lastScheduleSave_ || now-lastScheduleSave_>=60000)){
-            model_.save();scheduleDirty_=false;lastScheduleSave_=now;
+            if(model_.save()){scheduleDirty_=false;lastScheduleSave_=now;}
         }
         if(changed){syncColorWatchdog();updateTrayTooltip();repaint();}
         // No timer at all when disabled. During stable periods wake only at
@@ -2396,6 +2397,7 @@ private:
     }
     bool setMonitorBackend(size_t index,nightlight::ColorBackend backend) {
         if(index>=model_.monitors().size())return false;
+        const auto monitorKey=nightlight::monitorProfileKey(model_.monitors()[index]);
         bool proceed=true;
         const bool hardware=backend==nightlight::ColorBackend::MonitorHardware;
         const bool target=backend==nightlight::ColorBackend::NvidiaTargetGamma;
@@ -2411,7 +2413,12 @@ private:
                         L"Gama alvo NVIDIA experimental: restaure as predefinições de cor do ambiente de trabalho no Painel de Controlo NVIDIA ANTES de usar este modo. Requer SDR sem cor avançada. A API não permite ler a LUT original; o NightLight restaura uma LUT neutra, não a calibração personalizada. O navegador e o MPO não são alterados. Continuar?").c_str(),
                         L"NightLight",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES;
         if(!proceed)return false;
-        model_.updateColorBackend(index,backend);syncColorWatchdog();updateTrayTooltip();repaint();return true;
+        // A modal confirmation can pump display-change messages. Resolve
+        // the physical monitor again before applying the choice.
+        for(size_t i=0;i<model_.monitors().size();++i)if(nightlight::monitorProfileKey(model_.monitors()[i])==monitorKey){
+            model_.updateColorBackend(i,backend);syncColorWatchdog();updateTrayTooltip();repaint();return true;
+        }
+        return false;
     }
     void openInactiveSettings() {
         if(dimSettings_ && dimSettings_->hwnd()) {
