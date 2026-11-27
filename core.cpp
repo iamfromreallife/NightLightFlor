@@ -529,6 +529,28 @@ bool Model::load() {
     preferences_.theme=appearance=="light"?L"light":
         appearance=="dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = general.get("close_by_clicking_outside").boolean(true);
+    preferences_.ddcControls=general.get("ddc_controls").boolean(true);
+    const auto& schedule=general.get("color_schedule");
+    preferences_.colorSchedule=normalizedSchedule({
+        schedule.get("enabled").boolean(false),schedule.get("day_start").integer(420),
+        schedule.get("night_start").integer(1140),schedule.get("day_kelvin").integer(6500),
+        schedule.get("night_kelvin").integer(3500),schedule.get("transition_minutes").integer(30)});
+    preferences_.hotkeys.clear();
+    if(const auto* groups=std::get_if<portable::Json::Object>(&general.get("hotkeys").value)) {
+        for(const auto& item:*groups) {
+            if(preferences_.hotkeys.size()>=256 || item.first.size()>2048)break;
+            if(const auto* values=std::get_if<portable::Json::Array>(&item.second.value)) {
+                if(values->size()!=4)continue;
+                std::array<int,4> bindings{};
+                for(size_t i=0;i<4;++i) {
+                    const int value=(*values)[i].integer();
+                    if(validHotkey(value))bindings[i]=value;
+                }
+                if(std::any_of(bindings.begin(),bindings.end(),[](int v){return v!=0;}))
+                    preferences_.hotkeys[fromUtf8(item.first)]=bindings;
+            }
+        }
+    }
     preferences_.autoUpdates=general.get("auto_updates").boolean(false);
     preferences_.updateLastCheck=std::max(0,general.get("update_last_check").integer(0));
     preferences_.ignoredUpdate=general.get("ignored_update").str();
@@ -629,6 +651,22 @@ bool Model::save() {
     root_["general"]["language"] = toUtf8(preferences_.locale);
     root_["general"]["appearance"] = toUtf8(preferences_.theme);
     root_["general"]["close_by_clicking_outside"] = preferences_.closeByClickingOutside;
+    root_["general"]["ddc_controls"]=preferences_.ddcControls;
+    const auto& schedule=preferences_.colorSchedule;
+    auto& scheduleJson=root_["general"]["color_schedule"];
+    scheduleJson["enabled"]=schedule.enabled;
+    scheduleJson["day_start"]=schedule.dayStart;
+    scheduleJson["night_start"]=schedule.nightStart;
+    scheduleJson["day_kelvin"]=schedule.dayKelvin;
+    scheduleJson["night_kelvin"]=schedule.nightKelvin;
+    scheduleJson["transition_minutes"]=schedule.transitionMinutes;
+    portable::Json hotkeys=portable::Json::object();
+    for(const auto& group:preferences_.hotkeys) {
+        portable::Json::Array values;
+        for(int value:group.second)values.emplace_back(value);
+        hotkeys[toUtf8(group.first)]=portable::Json(values);
+    }
+    root_["general"]["hotkeys"]=hotkeys;
     root_["general"]["auto_updates"]=preferences_.autoUpdates;
     root_["general"]["update_last_check"]=preferences_.updateLastCheck;
     root_["general"]["ignored_update"]=preferences_.ignoredUpdate;
@@ -655,7 +693,7 @@ bool Model::save() {
     auto clean=portable::Json::object();
     clean["screen"]["kelvin"]=std::clamp(root_.get("screen").get("kelvin").integer(5000),1000,6500);
     clean["general"]=portable::Json::object();
-    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_all","dim_displays","auto_updates","update_last_check","ignored_update","available_update","update_notes"})
+    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_all","dim_displays","auto_updates","update_last_check","ignored_update","available_update","update_notes","ddc_controls","color_schedule","hotkeys"})
         clean["general"][key]=root_.get("general").get(key);
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
@@ -1371,6 +1409,9 @@ void Model::updatePreferences(const Preferences& updated) {
     preferences_.theme = updated.theme==L"light"?L"light":
         updated.theme==L"dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = updated.closeByClickingOutside;
+    preferences_.ddcControls=updated.ddcControls;
+    preferences_.colorSchedule=normalizedSchedule(updated.colorSchedule);
+    preferences_.hotkeys=updated.hotkeys;
     preferences_.autoUpdates=updated.autoUpdates;
     preferences_.updateLastCheck=updated.updateLastCheck;
     preferences_.ignoredUpdate=updated.ignoredUpdate;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(NightLightNative VERSION 1.0.21 LANGUAGES CXX RC)
+project(NightLightNative VERSION 1.0.22 LANGUAGES CXX RC)
 if(NOT WIN32)
     message(FATAL_ERROR "Native NightLight requires Windows.")
 endif()

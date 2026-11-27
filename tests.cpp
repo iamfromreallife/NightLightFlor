@@ -20,6 +20,21 @@ void check(bool ok,const char* message) {
 int main() {
     try {
         {
+            ColorSchedule schedule{true,420,1140,6500,3500,30};
+            check(scheduledColor(schedule,420*60).kelvin==3500 &&
+                  scheduledColor(schedule,435*60).kelvin==5000 &&
+                  scheduledColor(schedule,450*60).kelvin==6500 &&
+                  scheduledColor(schedule,1155*60).kelvin==5000 &&
+                  scheduledColor(schedule,0).kelvin==3500,"Local schedule and smooth transitions across midnight");
+            schedule.dayStart=1380;schedule.nightStart=60;
+            check(scheduledColor(schedule,0).kelvin==6500 && scheduledColor(schedule,7200).kelvin==3500,
+                  "Day period can cross midnight");
+            check(normalizedSchedule({true,1,2,900,7000,120}).transitionMinutes==1,
+                  "Prevent overlapping transitions and clamp configuration");
+            check(validHotkey(0) && validHotkey(0x0241) && !validHotkey(0x41) && !validHotkey(-1),
+                  "Hotkeys must use a modifier and a valid virtual key");
+        }
+        {
             check(newerThan("v1.0.20","1.0.19") && newerThan("2.0.0","1.0.19") && !newerThan("v1.0.19","1.0.19") && !newerThan("v1.0.4","1.0.19"),"Numeric release comparison");
             check(!newerThan("v1.0.20","1.0.19","1.0.20") && newerThan("v1.0.21","1.0.19","1.0.20"),"Ignore exactly one release version");
             check(!newerRelease(kAppVersion) && parseReleaseVersion(kAppVersion).has_value(),"Installed build version is valid and not offered as an update");
@@ -818,6 +833,8 @@ int main() {
             updated.theme=L"system";
             check(!updated.dimInactive,"Inactivity dimming defaults to disabled");
             check(!updated.autoUpdates && updated.updateLastCheck==0 && updated.ignoredUpdate.empty(),"Legacy config defaults to manual checking");
+            updated.ddcControls=false;updated.colorSchedule={true,360,1200,6000,3000,20};
+            updated.hotkeys[L""]={0x0241,0,0x0242,0};
             updated.autoUpdates=true;updated.updateLastCheck=12345;
             updated.ignoredUpdate="v1.0.20";updated.availableUpdate="v1.0.21";updated.updateNotes="Example release notes";
             updated.dimInactive=true;updated.dimAmount=65;updated.dimMinutes=7;
@@ -839,6 +856,9 @@ int main() {
             Model model(root);
             check(model.load(),"Reload from same folder");
             check(model.preferences().locale==L"en-US","Saved language");
+            check(!model.preferences().ddcControls && model.preferences().colorSchedule.enabled &&
+                  model.preferences().colorSchedule.dayStart==360 && model.preferences().colorSchedule.transitionMinutes==20 &&
+                  model.preferences().hotkeys.at(L"")[0]==0x0241,"Schedule and global hotkeys round-trip");
             check(model.preferences().autoUpdates && model.preferences().updateLastCheck==12345 &&
                   model.preferences().ignoredUpdate=="v1.0.20" && model.preferences().availableUpdate=="v1.0.21" &&
                   model.preferences().updateNotes=="Example release notes","Update settings, ignored version and cached notes round-trip");

@@ -20,6 +20,7 @@
 #include <array>
 #include <thread>
 #include "json.hpp"
+#include "automation.hpp"
 
 namespace nightlight {
 struct Ramp {
@@ -57,6 +58,9 @@ struct Preferences {
     std::wstring locale = L"en-US";
     std::wstring theme = L"system"; // system, light, dark
     bool closeByClickingOutside = true;
+    bool ddcControls=true;
+    ColorSchedule colorSchedule;
+    HotkeyBindings hotkeys;
     bool autoUpdates=false;
     int updateLastCheck=0;
     std::string ignoredUpdate,availableUpdate,updateNotes;
