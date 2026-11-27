@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "localization.hpp"
 #include "display_identity.hpp"
 #include "ddc.hpp"
 #include <physicalmonitorenumerationapi.h>
@@ -48,7 +49,7 @@ std::string toUtf8(const std::wstring& input) {
         static_cast<int>(input.size()), result.data(), size, nullptr, nullptr);
     return result;
 }
-bool systemAppsUseDarkTheme() {
+static bool readWindowsDarkTheme(const wchar_t* valueName) {
     // The Windows *app* theme is independent of the taskbar/system theme.
     // A missing or unreadable value defaults to Windows' usual light mode.
     constexpr wchar_t key[]=
@@ -57,12 +58,14 @@ bool systemAppsUseDarkTheme() {
     HKEY handle=nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER,key,0,KEY_QUERY_VALUE,&handle)!=ERROR_SUCCESS)
         return false;
-    const LSTATUS result=RegQueryValueExW(handle,L"AppsUseLightTheme",
+    const LSTATUS result=RegQueryValueExW(handle,valueName,
         nullptr,&type,reinterpret_cast<LPBYTE>(&useLight),&bytes);
     RegCloseKey(handle);
     return result==ERROR_SUCCESS && type==REG_DWORD &&
         bytes==sizeof(useLight) && useLight==0;
 }
+bool systemAppsUseDarkTheme() { return readWindowsDarkTheme(L"AppsUseLightTheme"); }
+bool systemTaskbarUsesDarkTheme() { return readWindowsDarkTheme(L"SystemUsesLightTheme"); }
 bool effectiveDarkTheme(const std::wstring& preference,bool systemDark) {
     return preference==L"dark" ||
         (preference==L"system" && systemDark);
@@ -458,10 +461,7 @@ WindowContentMinimum calculateWindowContentMinimum(int dpi, int clientWidth,
         if (x>tabStart && x+tabWidth>tabsRight) { x=tabStart; ++rows; }
         x+=tabWidth+tabGap;
     }
-    // The screen-off button follows all monitor tabs. Count its wrap in the
-    // required minimum height, exactly as in NativeApp::layout(), so a narrow
-    // window never clips the last row or DDC controls.
-    if (x>tabStart && x+px(kScreenOffButtonSizeDip)>tabsRight) ++rows;
+    // Header actions do not consume space or cause an extra monitor row.
     const int panelTop=px(kCardsTopMarginDip);
     const int panelHeight=px(46+rows*38);
     const int secondPanelTop=panelTop+panelHeight+px(kCardsGapDip);
@@ -524,17 +524,34 @@ bool Model::load() {
     }
     const auto& general = root_.get("general");
     const std::string lang = general.get("language").str("en-US");
-    preferences_.locale = (lang == "pt" || lang == "pt-PT") ? L"pt-PT" : L"en-US";
+    preferences_.locale = languageAt(languageIndex(fromUtf8(lang))).code;
     const std::string appearance=general.get("appearance").str("system");
     preferences_.theme=appearance=="light"?L"light":
         appearance=="dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = general.get("close_by_clicking_outside").boolean(true);
     preferences_.ddcControls=general.get("ddc_controls").boolean(true);
     const auto& schedule=general.get("color_schedule");
-    preferences_.colorSchedule=normalizedSchedule({
-        schedule.get("enabled").boolean(false),schedule.get("day_start").integer(420),
-        schedule.get("night_start").integer(1140),schedule.get("day_kelvin").integer(6500),
-        schedule.get("night_kelvin").integer(3500),schedule.get("transition_minutes").integer(30)});
+    ColorSchedule loadedSchedule;
+    loadedSchedule.enabled=schedule.get("enabled").boolean(false);
+    loadedSchedule.transitionMinutes=schedule.get("transition_minutes").integer(30);
+    loadedSchedule.locationName=fromUtf8(schedule.get("location_name").str());
+    loadedSchedule.latitude=schedule.get("latitude").integer(0)/1000.0;
+    loadedSchedule.longitude=schedule.get("longitude").integer(0)/1000.0;
+    if(const auto* values=std::get_if<portable::Json::Array>(&schedule.get("points").value)) {
+        loadedSchedule.points.clear();
+        for(const auto& point:*values) {
+            if(loadedSchedule.points.size()>=kMaxSchedulePoints)break;
+            if(point.isObject())loadedSchedule.points.push_back({point.get("minute").integer(420),point.get("kelvin").integer(6500),static_cast<SchedulePointKind>(point.get("kind").integer(0)),point.get("custom_time").boolean(false)});
+        }
+        loadedSchedule.mode=static_cast<ScheduleMode>(schedule.get("mode").integer(0));
+    } else if(schedule.isObject()) {
+        // Keep the original day/night targets and timing on migration.
+        // Adding a noon target would silently change an existing enabled schedule.
+        loadedSchedule.points={{schedule.get("day_start").integer(420),schedule.get("day_kelvin").integer(6500),SchedulePointKind::Sunrise,true},
+            {schedule.get("night_start").integer(1140),schedule.get("night_kelvin").integer(3500),SchedulePointKind::Sunset,true}};
+        loadedSchedule.mode=ScheduleMode::Custom;
+    }
+    preferences_.colorSchedule=normalizedSchedule(std::move(loadedSchedule));
     preferences_.hotkeys.clear();
     if(const auto* groups=std::get_if<portable::Json::Object>(&general.get("hotkeys").value)) {
         for(const auto& item:*groups) {
@@ -551,14 +568,15 @@ bool Model::load() {
             }
         }
     }
-    preferences_.autoUpdates=general.get("auto_updates").boolean(false);
-    preferences_.updateLastCheck=std::max(0,general.get("update_last_check").integer(0));
-    preferences_.ignoredUpdate=general.get("ignored_update").str();
-    preferences_.availableUpdate=general.get("available_update").str();
-    preferences_.updateNotes=general.get("update_notes").str();
-    if(preferences_.ignoredUpdate.size()>32)preferences_.ignoredUpdate.clear();
-    if(preferences_.availableUpdate.size()>32)preferences_.availableUpdate.clear();
-    if(preferences_.updateNotes.size()>262144)preferences_.updateNotes.clear();
+    preferences_.hotkeySteps.clear();
+    if(const auto* groups=std::get_if<portable::Json::Object>(&general.get("hotkey_steps").value))for(const auto& item:*groups){
+        if(preferences_.hotkeySteps.size()>=256 || item.first.size()>2048)break;
+        if(const auto* values=std::get_if<portable::Json::Array>(&item.second.value);values && values->size()==4){
+            auto steps=kDefaultHotkeySteps;
+            for(int i=0;i<4;++i){const int v=(*values)[i].integer();if(validHotkeyStep(i,v))steps[i]=v;}
+            preferences_.hotkeySteps[fromUtf8(item.first)]=steps;
+        }
+    }
     preferences_.dimInactive=general.get("dim_inactive").boolean(false);
     preferences_.dimAmount=std::clamp(general.get("dim_amount").integer(90),1,99);
     preferences_.dimMinutes=std::clamp(general.get("dim_minutes").integer(5),1,1440);
@@ -654,31 +672,37 @@ bool Model::save() {
     root_["general"]["ddc_controls"]=preferences_.ddcControls;
     const auto& schedule=preferences_.colorSchedule;
     auto& scheduleJson=root_["general"]["color_schedule"];
+    scheduleJson=portable::Json::object();
     scheduleJson["enabled"]=schedule.enabled;
-    scheduleJson["day_start"]=schedule.dayStart;
-    scheduleJson["night_start"]=schedule.nightStart;
-    scheduleJson["day_kelvin"]=schedule.dayKelvin;
-    scheduleJson["night_kelvin"]=schedule.nightKelvin;
+    scheduleJson["mode"]=static_cast<int>(schedule.mode);
     scheduleJson["transition_minutes"]=schedule.transitionMinutes;
+    scheduleJson["location_name"]=toUtf8(schedule.locationName);
+    scheduleJson["latitude"]=static_cast<int>(std::lround(schedule.latitude*1000.0));
+    scheduleJson["longitude"]=static_cast<int>(std::lround(schedule.longitude*1000.0));
+    portable::Json::Array schedulePoints;
+    schedulePoints.reserve(schedule.points.size());
+    for(const auto& point:schedule.points){
+        auto item=portable::Json::object();item["minute"]=point.minute;item["kelvin"]=point.kelvin;item["kind"]=static_cast<int>(point.kind);item["custom_time"]=point.customTime;
+        schedulePoints.push_back(std::move(item));
+    }
+    scheduleJson["points"]=portable::Json(std::move(schedulePoints));
     portable::Json hotkeys=portable::Json::object();
     for(const auto& group:preferences_.hotkeys) {
-        portable::Json::Array values;
+        portable::Json::Array values;values.reserve(group.second.size());
         for(int value:group.second)values.emplace_back(value);
-        hotkeys[toUtf8(group.first)]=portable::Json(values);
+        hotkeys[toUtf8(group.first)]=portable::Json(std::move(values));
     }
-    root_["general"]["hotkeys"]=hotkeys;
-    root_["general"]["auto_updates"]=preferences_.autoUpdates;
-    root_["general"]["update_last_check"]=preferences_.updateLastCheck;
-    root_["general"]["ignored_update"]=preferences_.ignoredUpdate;
-    root_["general"]["available_update"]=preferences_.availableUpdate;
-    root_["general"]["update_notes"]=preferences_.updateNotes;
+    root_["general"]["hotkeys"]=std::move(hotkeys);
+    portable::Json hotkeySteps=portable::Json::object();
+    for(const auto& group:preferences_.hotkeySteps){portable::Json::Array values;values.reserve(group.second.size());for(int v:group.second)values.emplace_back(v);hotkeySteps[toUtf8(group.first)]=portable::Json(std::move(values));}
+    root_["general"]["hotkey_steps"]=std::move(hotkeySteps);
     root_["general"]["dim_inactive"]=preferences_.dimInactive;
     root_["general"]["dim_amount"]=preferences_.dimAmount;
     root_["general"]["dim_minutes"]=preferences_.dimMinutes;
     root_["general"]["dim_all"]=preferences_.dimAll;
-    portable::Json::Array dimDisplays;
+    portable::Json::Array dimDisplays;dimDisplays.reserve(preferences_.dimDisplays.size());
     for(const auto& key:preferences_.dimDisplays) dimDisplays.emplace_back(toUtf8(key));
-    root_["general"]["dim_displays"]=portable::Json(dimDisplays);
+    root_["general"]["dim_displays"]=portable::Json(std::move(dimDisplays));
     for (const auto& mon : monitors_) {
         auto& profile = root_["screen"]["monitor_profiles"][toUtf8(monitorProfileKey(mon))];
         profile["kelvin"] = mon.kelvin;
@@ -693,7 +717,7 @@ bool Model::save() {
     auto clean=portable::Json::object();
     clean["screen"]["kelvin"]=std::clamp(root_.get("screen").get("kelvin").integer(5000),1000,6500);
     clean["general"]=portable::Json::object();
-    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_all","dim_displays","auto_updates","update_last_check","ignored_update","available_update","update_notes","ddc_controls","color_schedule","hotkeys"})
+    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_all","dim_displays","ddc_controls","color_schedule","hotkeys","hotkey_steps"})
         clean["general"][key]=root_.get("general").get(key);
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
@@ -718,13 +742,13 @@ bool Model::save() {
                 const auto& value=item.second.get(key);
                 if(!std::holds_alternative<std::nullptr_t>(value.value))profile[key]=value;
             }
-            if(!std::get<portable::Json::Object>(profile.value).empty())profiles[item.first]=profile;
+            if(!std::get<portable::Json::Object>(profile.value).empty())profiles[item.first]=std::move(profile);
         }
-    clean["screen"]["monitor_profiles"]=profiles;
+    clean["screen"]["monitor_profiles"]=std::move(profiles);
     if(root_.get("screen").get("monitor_order").isArray())
         clean["screen"]["monitor_order"]=root_.get("screen").get("monitor_order");
     root_=std::move(clean);
-    const std::string document=root_.dump();
+    std::string document=root_.dump();
     WIN32_FILE_ATTRIBUTE_DATA current{};
     if (savedStampValid_ && document==savedDocument_ &&
         GetFileAttributesExW(configPath_.c_str(),GetFileExInfoStandard,&current) &&
@@ -736,7 +760,7 @@ bool Model::save() {
         lastError_ = L"Cannot write config.json beside the EXE. Choose a writable folder.";
         return false;
     }
-    savedDocument_=document;
+    savedDocument_=std::move(document);
     savedStampValid_=GetFileAttributesExW(configPath_.c_str(),GetFileExInfoStandard,&current)!=FALSE;
     if (savedStampValid_) savedStamp_=current.ftLastWriteTime;
     lastError_.clear();
@@ -1360,6 +1384,15 @@ bool Model::persistProfile(size_t index) {
     profile["nvidia_target_color"] = mon.nvidiaTargetColor;
     return save();
 }
+void Model::previewScheduleColor(int kelvin) {
+    // Use the existing backend request pipeline without changing a monitor
+    // profile, root JSON, or the gamma ramp generation/validation algorithm.
+    if(!loaded_ || colorWritesPaused_ || startupColorActive())return;
+    for(const auto& monitor:monitors_)if(monitor.enabled){
+        Monitor temporary=monitor;temporary.kelvin=std::clamp(kelvin,1000,6500);
+        applyDisplay(temporary,GammaRefresh::Normal);
+    }
+}
 bool Model::previewKelvin(size_t index, int kelvin) {
     if (index >= monitors_.size() || !loaded_) return false;
     auto& monitor=monitors_[index];
@@ -1405,18 +1438,14 @@ bool Model::renameMonitor(size_t index, const std::wstring& alias) {
     return persistProfile(index);
 }
 void Model::updatePreferences(const Preferences& updated) {
-    preferences_.locale = updated.locale == L"pt-PT" ? L"pt-PT" : L"en-US";
+    preferences_.locale = languageAt(languageIndex(updated.locale)).code;
     preferences_.theme = updated.theme==L"light"?L"light":
         updated.theme==L"dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = updated.closeByClickingOutside;
     preferences_.ddcControls=updated.ddcControls;
     preferences_.colorSchedule=normalizedSchedule(updated.colorSchedule);
     preferences_.hotkeys=updated.hotkeys;
-    preferences_.autoUpdates=updated.autoUpdates;
-    preferences_.updateLastCheck=updated.updateLastCheck;
-    preferences_.ignoredUpdate=updated.ignoredUpdate;
-    preferences_.availableUpdate=updated.availableUpdate;
-    preferences_.updateNotes=updated.updateNotes;
+    preferences_.hotkeySteps=updated.hotkeySteps;
     preferences_.dimInactive=updated.dimInactive;
     preferences_.dimAmount=std::clamp(updated.dimAmount,1,99);
     preferences_.dimMinutes=std::clamp(updated.dimMinutes,1,1440);

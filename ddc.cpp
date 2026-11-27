@@ -7,6 +7,7 @@
 #include <lowlevelmonitorconfigurationapi.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <vector>
 
 namespace nightlight {
@@ -18,8 +19,19 @@ void applyDdcObservation(DdcValue& current,const DdcValue& observed,
     current.supported=observed.supported;
     current.readable=observed.readable;
     current.backend=observed.backend;
-    if (!protectUserValue && !current.restoring && observed.readable && observed.hasValue) {
-        current.percent=std::clamp(observed.percent,0,100);
+    if (!protectUserValue && !current.restoring) {
+        if(!observed.readable || !observed.hasValue){current.differingReadback=-1;return;}
+        const int percent=std::clamp(observed.percent,0,100);
+        if(current.awaitingWriteReadback){
+            // Some monitors report a stale/default value even after a write
+            // succeeds. A matching (or quantized) value confirms immediately;
+            // otherwise require two consecutive agreeing physical readings.
+            if(std::abs(percent-current.percent)>1 && current.differingReadback!=percent){
+                current.differingReadback=percent;return;
+            }
+            current.awaitingWriteReadback=false;current.differingReadback=-1;
+        }
+        current.percent=percent;
         current.hasValue=true;
         current.managed=true; // persist the actual hardware value as fallback
         current.failed=false;
@@ -100,14 +112,20 @@ struct Physical {
     HANDLE handle() const { return handles.empty()?nullptr:handles.front().hPhysicalMonitor; }
 };
 struct Reading { bool supported=false; bool vcp=false; DWORD lo=0,value=0,hi=0; };
-Reading read(Api& api,HANDLE handle,int feature) {
+Reading read(Api& api,HANDLE handle,int feature,bool forWrite=false) {
     Reading r;
     if (!handle) return r;
     const auto get=feature==0?api.getBrightness:api.getContrast;
-    if (get && get(handle,&r.lo,&r.value,&r.hi) && r.hi>r.lo) { r.supported=true; return r; }
-    r.lo=0;
-    if (api.getVcp && api.getVcp(handle,feature==0?0x10:0x12,nullptr,&r.value,&r.hi) && r.hi>0) {
-        r.supported=true; r.vcp=true;
+    if (get && get(handle,&r.lo,&r.value,&r.hi) && r.hi>r.lo) {
+        r.supported=true;
+        if(forWrite || validDdcReading(r.lo,r.hi,r.value))return r;
+    }
+    // A broken high-level getter may return a value outside its reported
+    // range. Try the VCP getter, but retain a known range for writes.
+    Reading vcp;
+    if (api.getVcp && api.getVcp(handle,feature==0?0x10:0x12,nullptr,&vcp.value,&vcp.hi) && vcp.hi>0) {
+        vcp.supported=true;vcp.vcp=true;
+        if(validDdcReading(vcp.lo,vcp.hi,vcp.value) || !r.supported)return vcp;
     }
     return r;
 }
@@ -118,7 +136,7 @@ DdcValue observe(Api& api,Physical& physical,WmiBrightness& wmi,const std::wstri
         value.supported=true; value.backend=DdcBackend::DdcCi;
         for (const auto& monitor:physical.handles) {
             const auto reading=read(api,monitor.hPhysicalMonitor,feature);
-            if (reading.supported) {
+            if (reading.supported && validDdcReading(reading.lo,reading.hi,reading.value)) {
                 value.readable=true; value.hasValue=true;
                 value.percent=ddcPercentage(reading.lo,reading.hi,reading.value); break;
             }
@@ -137,10 +155,10 @@ bool writePhysical(Api& api,Physical& physical,int feature,int percent,bool forc
     if (physical.handles.empty()) return false;
     bool allSucceeded=true;
     for (const auto& monitor:physical.handles) {
-        const auto reading=read(api,monitor.hPhysicalMonitor,feature);
+        const auto reading=read(api,monitor.hPhysicalMonitor,feature,true);
         // At boot a cached getter can already claim the desired percentage
         // while the actual panel is still using its power-on brightness.
-        if (!force && reading.supported && ddcPercentage(reading.lo,reading.hi,reading.value)==percent) continue;
+        if (!force && reading.supported && validDdcReading(reading.lo,reading.hi,reading.value) && ddcPercentage(reading.lo,reading.hi,reading.value)==percent) continue;
         const auto setter=feature==0?api.setBrightness:api.setContrast;
         const bool ok=writeDdcValue(reading.supported,reading.lo,reading.hi,percent,
             [&](DWORD raw){return setter && setter(monitor.hPhysicalMonitor,raw);},
@@ -176,6 +194,7 @@ void DdcController::restore(const std::wstring& device,int brightness,int contra
         if (!saved) return; // Never send a UI placeholder to hardware.
         percent=std::clamp(percent,0,100);
         value.restoring=true;
+        value.awaitingWriteReadback=false;value.differingReadback=-1;
         if (value.pending && value.percent==percent) return;
         value.percent=percent; value.hasValue=true; value.managed=true;
         value.pending=true; value.failed=false; ++value.generation;
@@ -232,6 +251,7 @@ bool DdcController::set(const std::wstring& device,DdcFeature feature,int percen
     percent=std::clamp(percent,0,100);
     if (value.managed && value.hasValue && value.percent==percent && !value.failed && !value.restoring) return true;
     value.restoring=false;
+    value.awaitingWriteReadback=false;value.differingReadback=-1;
     value.percent=percent; value.hasValue=true; value.managed=true; value.pending=true; value.failed=false; ++value.generation;
     jobs_[{device,static_cast<int>(feature)}]={percent,value.generation}; wake_.notify_one();
     return true;
@@ -350,6 +370,7 @@ void DdcController::run() {
             auto& value=key.second==0?state.brightness:state.contrast;
             if (value.generation==job.generation) {
                 value.pending=false; value.failed=!ok;
+                value.awaitingWriteReadback=ok && !job.restoring;value.differingReadback=-1;
                 if(job.restoring && ok && !restoreWindow_) value.restoring=false;
                 if (usedWmi) value.backend=DdcBackend::WindowsWmi;
                 // The next poll must not read a monitor's old value while
@@ -358,8 +379,10 @@ void DdcController::run() {
                     GetTickCount64()+(job.restoring?5000:kDdcPostWriteGraceMs):0;
                 value.hasValue=true;
                 value.percent=job.percent;
+                // A superseded write publishes no state. Its newer job
+                // will send the completion; avoid a redundant UI repaint.
+                if (window_ && !stopping_) PostMessageW(window_,WM_DDC_COMPLETE,0,0);
             }
-            if (window_ && !stopping_) PostMessageW(window_,WM_DDC_COMPLETE,0,0);
         }
         } // Destroy physical monitor handles before releasing DDC lock.
         // Bound DDC/CI traffic; pointer events overwrite pending writes.

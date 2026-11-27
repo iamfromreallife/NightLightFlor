@@ -14,7 +14,8 @@ class InactiveSettingsWindow {
     HWND owner_,window_=nullptr;
     Preferences draft_;
     std::vector<Monitor> monitors_;
-    bool portuguese_,testing_=false,accepted_=false,ready_=false,notified_=false;
+    int language_;
+    bool testing_=false,accepted_=false,ready_=false,notified_=false;
     UINT dpi_=96;
     HFONT font_=nullptr,bold_=nullptr;
     std::map<int,HWND> controls_;
@@ -41,7 +42,7 @@ class InactiveSettingsWindow {
     std::function<Palette()> palette_;
     std::function<bool()> dark_,highContrast_;
     nightlight::PaintSurface surface_,sliderSurface_;
-    const wchar_t* tr(const wchar_t* en,const wchar_t* pt) const {return portuguese_?pt:en;}
+    const wchar_t* tr(const wchar_t* en,const wchar_t* pt) const {return nightlight::translate(language_,en,pt);}
     int px(int n) const {return MulDiv(n,static_cast<int>(dpi_),96);}
     HWND control(int id) const {
         const auto it=controls_.find(id);
@@ -205,10 +206,10 @@ class InactiveSettingsWindow {
     void fonts() {
         HFONT normal=CreateFontW(-px(14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-            DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
+            DEFAULT_PITCH|FF_SWISS,nightlight::uiFontFace(language_));
         HFONT semibold=CreateFontW(-px(14),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-            DEFAULT_PITCH|FF_SWISS,L"Segoe UI Semibold");
+            DEFAULT_PITCH|FF_SWISS,nightlight::uiFontFace(language_,true));
         for(const auto& item:controls_) SendMessageW(item.second,WM_SETFONT,
             reinterpret_cast<WPARAM>(normal?normal:GetStockObject(DEFAULT_GUI_FONT)),FALSE);
         if(font_) DeleteObject(font_);
@@ -240,7 +241,7 @@ class InactiveSettingsWindow {
         button(TestButton,tr(L"Test",L"Testar"));
         for(size_t i=0;i<nightlight::kDimMinutePresets.size();++i) {
             const int min=nightlight::kDimMinutePresets[i];
-            const auto label=min==60?std::wstring(tr(L"1 hour",L"1 hora")):std::to_wstring(min)+L" min";
+            const auto label=min==60?std::wstring(tr(L"1 hour",L"1 hora")):std::to_wstring(min)+nightlight::translate(language_,L" min");
             button(Preset+static_cast<int>(i),label.c_str());
             if(min==draft_.dimMinutes) chosenTime_=Preset+static_cast<int>(i);
         }
@@ -250,7 +251,7 @@ class InactiveSettingsWindow {
         button(All,tr(L"All displays",L"Todos os ecrãs"));
         child(Displays,L"LISTBOX",L"",WS_TABSTOP|WS_VSCROLL|LBS_MULTIPLESEL|
             LBS_NOTIFY|LBS_NOINTEGRALHEIGHT|LBS_OWNERDRAWFIXED|LBS_HASSTRINGS);
-        button(IDOK,L"OK");button(IDCANCEL,tr(L"Cancel",L"Cancelar"));
+        button(IDOK,nightlight::translate(language_,L"OK"));button(IDCANCEL,tr(L"Cancel",L"Cancelar"));
         fonts();
         SendMessageW(slider,TBM_SETRANGE,TRUE,MAKELPARAM(1,99));
         SendMessageW(slider,TBM_SETPOS,TRUE,draft_.dimAmount);
@@ -558,11 +559,11 @@ class InactiveSettingsWindow {
     }
 public:
     InactiveSettingsWindow(HINSTANCE instance,HWND owner,const Preferences& current,
-        std::vector<Monitor> monitors,bool pt,Test test,Closed closed,
+        std::vector<Monitor> monitors,int language,Test test,Closed closed,
         std::optional<RECT> geometry,SaveGeometry saveGeometry,
         std::function<Palette()> palette,std::function<bool()> dark,std::function<bool()> hc)
         :instance_(instance),owner_(owner),draft_(current),monitors_(std::move(monitors)),
-        portuguese_(pt),test_(std::move(test)),closed_(std::move(closed)),
+        language_(language),test_(std::move(test)),closed_(std::move(closed)),
         savedGeometry_(geometry),saveGeometry_(std::move(saveGeometry)),
         palette_(std::move(palette)),dark_(std::move(dark)),highContrast_(std::move(hc)) {}
     ~InactiveSettingsWindow() {close();if(font_) DeleteObject(font_);if(bold_) DeleteObject(bold_);}
@@ -621,7 +622,7 @@ public:
             return RECT{x,y,x+w,y+h};
         };
         const RECT initial=placement();
-        HWND created=CreateWindowExW(0,ClassName,tr(L"Dim when inactive",L"Reduzir brilho quando inativo"),
+        HWND created=CreateWindowExW(0,ClassName,tr(L"Dim screens on inactivity",L"Reduzir o brilho dos ecrãs por inatividade"),
             WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,initial.left,initial.top,initial.right-initial.left,initial.bottom-initial.top,owner_,nullptr,instance_,this);
         if(!created) return false;
         // WM_CREATE now knows the target monitor DPI. Re-evaluate the saved

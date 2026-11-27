@@ -3,6 +3,7 @@
 // The model migrates legacy data and writes only the current settings schema.
 #include <algorithm>
 #include <cmath>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -29,8 +30,11 @@ struct Json {
     Json(double x) : value(x) {}
     Json(const char* x) : value(std::string(x)) {}
     Json(const std::string& x) : value(x) {}
+    Json(std::string&& x) : value(std::move(x)) {}
     Json(const Object& x) : value(x) {}
+    Json(Object&& x) : value(std::move(x)) {}
     Json(const Array& x) : value(x) {}
+    Json(Array&& x) : value(std::move(x)) {}
     static Json object() { return Json(Object{}); }
     static Json array() { return Json(Array{}); }
 
@@ -156,21 +160,21 @@ struct Json {
                 if (data[i] == '"') return Json(string());
                 if (take('{')) {
                     Object obj;
-                    if (take('}')) return Json(obj);
+                    if (take('}')) return Json(std::move(obj));
                     do {
                         std::string key = string();
                         require(':');
-                        obj[key] = value(depth+1);
-                        if (take('}')) return Json(obj);
+                        obj[std::move(key)] = value(depth+1);
+                        if (take('}')) return Json(std::move(obj));
                         require(',');
                     } while (true);
                 }
                 if (take('[')) {
                     Array arr;
-                    if (take(']')) return Json(arr);
+                    if (take(']')) return Json(std::move(arr));
                     do {
                         arr.push_back(value(depth+1));
-                        if (take(']')) return Json(arr);
+                        if (take(']')) return Json(std::move(arr));
                         require(',');
                     } while (true);
                 }
@@ -241,6 +245,15 @@ struct Json {
         if (std::holds_alternative<std::nullptr_t>(value)) out += "null";
         else if (auto p = std::get_if<bool>(&value)) out += *p ? "true" : "false";
         else if (auto p = std::get_if<double>(&value)) {
+            // All ordinary configuration integers have an identical
+            // representation without a locale/stream allocation. Preserve
+            // the existing floating-point path, including negative zero.
+            if(*p>=-2147483648.0 && *p<=2147483647.0 &&
+                std::trunc(*p)==*p && !(*p==0.0 && std::signbit(*p))) {
+                char buffer[16];
+                const auto result=std::to_chars(buffer,buffer+sizeof(buffer),static_cast<int>(*p));
+                if(result.ec==std::errc{}) {out.append(buffer,result.ptr);return;}
+            }
             std::ostringstream os;
             os.imbue(std::locale::classic());
             os << std::setprecision(15) << *p;

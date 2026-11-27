@@ -17,6 +17,7 @@ struct ForegroundMediaResult {
     DWORD pid=0;
     ULONGLONG sampled=0;
     bool playing=false;
+    bool videoPlaying=false;
 };
 class ForegroundMedia {
 public:

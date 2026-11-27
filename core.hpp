@@ -21,6 +21,7 @@
 #include <thread>
 #include "json.hpp"
 #include "automation.hpp"
+#include "media_policy.hpp"
 
 namespace nightlight {
 struct Ramp {
@@ -60,10 +61,7 @@ struct Preferences {
     bool closeByClickingOutside = true;
     bool ddcControls=true;
     ColorSchedule colorSchedule;
-    HotkeyBindings hotkeys;
-    bool autoUpdates=false;
-    int updateLastCheck=0;
-    std::string ignoredUpdate,availableUpdate,updateNotes;
+    HotkeyBindings hotkeys,hotkeySteps;
     bool dimInactive=false;
     int dimAmount=90; // black overlay opacity percentage
     int dimMinutes=5;
@@ -108,9 +106,6 @@ inline constexpr BYTE dimFadeAlpha(BYTE from,BYTE to,std::uint64_t elapsed) {
     const auto remaining=duration-elapsed;
     return static_cast<BYTE>((from*remaining+to*elapsed+duration/2)/duration);
 }
-inline bool confirmedForegroundMedia(bool playing,std::uint64_t sampled,std::uint64_t now) {
-    return playing && sampled!=0 && now>=sampled && now-sampled<=8000;
-}
 inline bool displayIdleLongEnough(std::uint64_t now,std::uint64_t last,int minutes) {
     return now>=last && now-last>=static_cast<std::uint64_t>((std::max)(1,minutes))*60000;
 }
@@ -118,6 +113,8 @@ inline bool displayIdleLongEnough(std::uint64_t now,std::uint64_t last,int minut
 // System app mode is AppsUseLightTheme (not the separate system/taskbar mode).
 // Read this only on startup and Windows setting-change notifications.
 bool systemAppsUseDarkTheme();
+// Windows shell/taskbar mode is independent of the app-mode setting.
+bool systemTaskbarUsesDarkTheme();
 bool effectiveDarkTheme(const std::wstring& preference,bool systemDark);
 
 std::wstring fromUtf8(const std::string& input);
@@ -131,6 +128,20 @@ bool sameRamp(const Ramp& a, const Ramp& b);
 
 // A generous, DPI-scaled mouse target independent of the narrow visual rail.
 int sliderPositionFromX(int x,int left,int right,int minimum,int maximum);
+// Pure, shared geometry for DDC mouse hit testing and custom thumb painting.
+inline int sliderXFromPosition(int position,int left,int right,int minimum,int maximum) {
+    if(right<=left || maximum<=minimum)return left;
+    const auto span=static_cast<std::int64_t>(right)-left;
+    const auto range=static_cast<std::int64_t>(maximum)-minimum;
+    const auto value=static_cast<std::int64_t>(std::clamp(position,minimum,maximum))-minimum;
+    return left+static_cast<int>((span*value+range/2)/range);
+}
+struct DdcTrackBounds { int left,right; };
+inline DdcTrackBounds ddcTrackBounds(int width,int inset) {
+    width=std::max(1,width);
+    const int padding=std::clamp(inset,0,(width-1)/2);
+    return {padding,std::max(padding+1,width-padding)};
+}
 RECT sliderHitRect(RECT visualTrack, int horizontalPadding, int verticalPadding);
 
 // DIP-based DDC/CI spacing shared by layout and minimum-size calculations.
@@ -170,8 +181,8 @@ inline constexpr unsigned kScreenOffMinCorrectionIntervalMs = 450;
 inline constexpr unsigned kScreenOffMaxCorrections = 8;
 bool shouldCorrectScreenWake(std::uint64_t nowMs,std::uint64_t previousMs,
                              unsigned correctionCount);
-// Compact action (28 DIP) fits within the 32-DIP monitor-tab row.
-inline constexpr int kScreenOffButtonSizeDip = 28;
+// Match the adjacent refresh button in the Displays card header.
+inline constexpr int kScreenOffButtonSizeDip = 32;
 
 // DDC/CI row geometry: the native trackbar keeps its own thumb inset.
 // Percentages use the measured "100 %" width and share 6500 K's right edge.
@@ -287,6 +298,7 @@ public:
     void setStatusWindow(HWND window);
     bool collectGammaResults();
     bool previewKelvin(size_t index, int kelvin);
+    void previewScheduleColor(int kelvin);
     bool updateKelvin(size_t index, int kelvin);
     bool updateEnabled(size_t index, bool enabled);
     bool updateColorBackend(size_t index,ColorBackend backend);

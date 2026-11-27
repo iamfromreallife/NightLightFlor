@@ -5,7 +5,7 @@
 #include <string_view>
 namespace nightlight {
 #ifndef NIGHTLIGHT_VERSION
-#define NIGHTLIGHT_VERSION "1.0.22"
+#define NIGHTLIGHT_VERSION "2.0"
 #endif
 #define NIGHTLIGHT_WIDE_IMPL(x) L##x
 #define NIGHTLIGHT_WIDE(x) NIGHTLIGHT_WIDE_IMPL(x)
@@ -26,6 +26,8 @@ inline std::optional<ReleaseVersion> parseReleaseVersion(std::string_view tag) {
         }
         if(!digits) return {};
         if(i+1<result.size()) {
+            // A two-component release such as 2.0 is equivalent to 2.0.0.
+            if(tag.empty() && i==1) return result;
             if(tag.empty() || tag.front()!='.') return {};
             tag.remove_prefix(1);
         }
@@ -33,15 +35,11 @@ inline std::optional<ReleaseVersion> parseReleaseVersion(std::string_view tag) {
     if(!tag.empty()) return {};
     return result;
 }
-inline bool newerThan(std::string_view tag,std::string_view current,std::string_view ignored={}) {
+inline bool newerThan(std::string_view tag,std::string_view current) {
     const auto candidate=parseReleaseVersion(tag), installed=parseReleaseVersion(current);
-    const auto skipped=parseReleaseVersion(ignored);
-    return candidate && installed && *candidate>*installed && (!skipped || *candidate!=*skipped);
+    return candidate && installed && *candidate>*installed;
 }
-inline bool newerRelease(std::string_view tag,std::string_view ignored={}) {
-    return newerThan(tag,kAppVersion,ignored);
-}
-inline bool updateDue(int now,int last) {
-    return now>0 && (last<=0 || now<last || now-last>=1440);
+inline bool newerRelease(std::string_view tag) {
+    return newerThan(tag,kAppVersion);
 }
 }

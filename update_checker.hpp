@@ -11,11 +11,6 @@ struct ReleaseResult {
     bool ok=false;
     std::string tag,notes;
 };
-inline int updateMinute() {
-    const auto n=std::chrono::duration_cast<std::chrono::minutes>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    return n>0 && n<=2147483647?static_cast<int>(n):0;
-}
 inline ReleaseResult fetchLatestRelease() {
     struct Http {
         HINTERNET value=nullptr;

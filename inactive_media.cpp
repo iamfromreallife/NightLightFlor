@@ -1,4 +1,5 @@
 #include "inactive_media.hpp"
+#include "media_policy.hpp"
 #include <mmdeviceapi.h>
 #include <audiopolicy.h>
 #include <endpointvolume.h>
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 #include <chrono>
@@ -17,6 +19,7 @@
 #define NIGHTLIGHT_MEDIA_WINRT 1
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Media.h>
 #include <winrt/Windows.Media.Control.h>
 #endif
 
@@ -77,6 +80,9 @@ bool audioPlaying(DWORD foreground,const ProcessIdentity& app) {
     if(FAILED(devices->EnumAudioEndpoints(eRender,DEVICE_STATE_ACTIVE,collection.out()))) return false;
     UINT count=0;
     if(FAILED(collection->GetCount(&count))) return false;
+    // A process may have many sessions/endpoints. Resolve it once per
+    // sample only; never cache across samples or PID reuse.
+    std::map<DWORD,bool> matchingProcesses;
     for(UINT i=0;i<count;++i) {
         Com<IMMDevice> device;
         Com<IAudioSessionManager2> manager;
@@ -98,9 +104,14 @@ bool audioPlaying(DWORD foreground,const ProcessIdentity& app) {
             if(FAILED(session->GetProcessId(&pid)) || !pid) continue;
             bool matches=pid==foreground;
             if(!matches) {
-                const auto other=identity(pid);
-                matches=(!app.path.empty() && app.path==other.path) ||
-                    (!app.appId.empty() && app.appId==other.appId);
+                if(app.path.empty() && app.appId.empty())continue;
+                auto entry=matchingProcesses.try_emplace(pid,false);
+                if(entry.second) {
+                    const auto other=identity(pid);
+                    entry.first->second=(!app.path.empty() && app.path==other.path) ||
+                        (!app.appId.empty() && app.appId==other.appId);
+                }
+                matches=entry.first->second;
             }
             if(!matches) continue;
             // A running audio stream is not proof of actual media playback:
@@ -128,24 +139,42 @@ bool sourceMatches(std::wstring source,const ProcessIdentity& app,const std::wst
         source==executable.filename().wstring() ||
         (sourcePath.has_extension() && sourcePath.filename()==executable.filename());
 }
-bool systemMediaPlaying(GlobalSystemMediaTransportControlsSessionManager& manager,
+struct SessionPlayback {bool foreground=false,video=false;};
+SessionPlayback systemMediaPlaying(GlobalSystemMediaTransportControlsSessionManager& manager,
                         const ProcessIdentity& app,const std::wstring& windowId) {
+    SessionPlayback result;
     try {
         if(!manager) {
             auto request=GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
             if(request.wait_for(std::chrono::milliseconds(750))!=winrt::Windows::Foundation::AsyncStatus::Completed) {
-                request.Cancel(); return false;
+                request.Cancel(); return {};
             }
             manager=request.GetResults();
         }
         for(const auto& session:manager.GetSessions()) {
-            const auto source=session.SourceAppUserModelId();
-            if(!sourceMatches(std::wstring(source.c_str()),app,windowId)) continue;
-            const auto playback=session.GetPlaybackInfo();
-            if(playback && playback.PlaybackStatus()==GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing) return true;
+            // One disappearing session must not invalidate other sessions.
+            try {
+                const auto playback=session.GetPlaybackInfo();
+                if(!playback || playback.PlaybackStatus()!=GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)continue;
+                auto kind=ReportedMediaKind::Unknown;
+                const auto type=playback.PlaybackType();
+                if(type) {
+                    using winrt::Windows::Media::MediaPlaybackType;
+                    switch(type.Value()) {
+                    case MediaPlaybackType::Video:kind=ReportedMediaKind::Video;break;
+                    case MediaPlaybackType::Music:kind=ReportedMediaKind::Music;break;
+                    case MediaPlaybackType::Image:kind=ReportedMediaKind::Image;break;
+                    default:break;
+                    }
+                }
+                if(videoMayBePlaying(true,kind))result.video=true;
+                if(result.video)break; // global exemption already covers every selected display
+                const auto source=session.SourceAppUserModelId();
+                if(sourceMatches(std::wstring(source.c_str()),app,windowId))result.foreground=true;
+            } catch(...) {continue;}
         }
     } catch(...) { manager=nullptr; }
-    return false;
+    return result;
 }
 #endif
 }
@@ -155,7 +184,7 @@ ForegroundMedia::~ForegroundMedia() {
     if(worker_.joinable()) worker_.join();
 }
 void ForegroundMedia::request(HWND window,DWORD pid) {
-    if(!window || !pid) return;
+    // Global media sessions are meaningful even without a foreground window.
     std::lock_guard<std::mutex> lock(mutex_);
     if(stopping_) return;
     if(!worker_.joinable()) {
@@ -198,20 +227,23 @@ void ForegroundMedia::run() {
             if(stopping_) break;
             window=wanted_; pid=pid_; generation=generation_; pending_=false;
         }
-        bool playing=false;
+        bool playing=false,videoPlaying=false;
         if(initialized) {
             try {
                 const auto app=identity(pid);
-                playing=audioPlaying(pid,app);
 #ifdef NIGHTLIGHT_MEDIA_WINRT
-                if(!playing) playing=systemMediaPlaying(manager,app,windowAppId(window));
+                const auto sessions=systemMediaPlaying(manager,app,window?windowAppId(window):std::wstring{});
+                videoPlaying=sessions.video;playing=sessions.foreground;
 #endif
+                // Existing audible foreground fallback for players that don't
+                // publish a Windows media session. No audio capture is used.
+                if(!videoPlaying && !playing && pid)playing=audioPlaying(pid,app);
             } catch(...) { playing=false; }
         }
         const auto now=GetTickCount64();
         std::lock_guard<std::mutex> lock(mutex_);
         if(!stopping_ && generation==generation_ && window==wanted_ && pid==pid_)
-            result_={window,pid,now,playing};
+            result_={window,pid,now,playing,videoPlaying};
     }
 #ifdef NIGHTLIGHT_MEDIA_WINRT
     manager=nullptr;

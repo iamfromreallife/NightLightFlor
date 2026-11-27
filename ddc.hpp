@@ -30,6 +30,8 @@ struct DdcValue {
     DdcBackend backend = DdcBackend::None;
     std::uint64_t generation = 0;
     std::uint64_t protectUntilTickMs = 0; // prevents stale reads right after our own write
+    bool awaitingWriteReadback = false;
+    int differingReadback = -1; // require a repeated mismatch after a successful local write
 };
 // Merge a hardware observation without overwriting an in-flight local slider
 // adjustment. A valid read is authoritative; an unsupported/unreadable read
@@ -44,6 +46,9 @@ struct DdcState {
     DdcValue brightness;
     DdcValue contrast;
 };
+inline bool validDdcReading(DWORD minimum,DWORD maximum,DWORD value) {
+    return maximum>minimum && value>=minimum && value<=maximum;
+}
 DWORD ddcRawValue(DWORD minimum, DWORD maximum, int percent);
 int ddcPercentage(DWORD minimum, DWORD maximum, DWORD value);
 using DdcWrite = std::function<bool(DWORD)>;

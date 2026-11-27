@@ -1,8 +1,13 @@
 #include "core.hpp"
+#include "localization.hpp"
+#include "location_search_state.hpp"
+#include "solar_time.hpp"
+#include "map_view.hpp"
 #include "display_identity.hpp"
 #include "ddc.hpp"
 #include "motion.hpp"
 #include "update_version.hpp"
+#include "release_markdown.hpp"
 #include "wmi_brightness.hpp"
 #include <windows.h>
 #include <filesystem>
@@ -20,26 +25,108 @@ void check(bool ok,const char* message) {
 int main() {
     try {
         {
-            ColorSchedule schedule{true,420,1140,6500,3500,30};
-            check(scheduledColor(schedule,420*60).kelvin==3500 &&
-                  scheduledColor(schedule,435*60).kelvin==5000 &&
-                  scheduledColor(schedule,450*60).kelvin==6500 &&
-                  scheduledColor(schedule,1155*60).kelvin==5000 &&
-                  scheduledColor(schedule,0).kelvin==3500,"Local schedule and smooth transitions across midnight");
-            schedule.dayStart=1380;schedule.nightStart=60;
-            check(scheduledColor(schedule,0).kelvin==6500 && scheduledColor(schedule,7200).kelvin==3500,
-                  "Day period can cross midnight");
-            check(normalizedSchedule({true,1,2,900,7000,120}).transitionMinutes==1,
-                  "Prevent overlapping transitions and clamp configuration");
+            LocationSearchState q;
+            q.changed(L"Li",0);check(!q.busy()&&!q.ready(1000),"Short queries do not trigger suggestions");
+            q.changed(L"Lis",100);check(!q.ready(499)&&q.ready(500),"400 ms suggestion debounce");
+            q.changed(L"Lisbon",450);check(!q.ready(500)&&q.ready(850),"Typing restarts debounce");
+            q.started();q.changed(L"London",900);check(!q.ready(2000),"At most one search in flight");
+            check(!q.finished()&&q.ready(2000),"Stale city search discarded; latest query queued");
+            q.started();q.manual(2001);check(q.explicitSelection&&!q.ready(2001),"Enter reuses running search");
+            check(q.finished()&&q.completed==L"London"&&!q.busy(),"Current search accepted without duplicate request");
+            q.changed(L"Paris",3000);q.started();q.changed(L"",3500);
+            check(!q.finished()&&!q.busy(),"Clearing search invalidates old results");
+            q.changed(L"LA",4000);q.manual(4000);check(q.ready(4000),"Explicit search allows two characters");
+        }
+        {
+            // Serialization must remain byte-identical to the old stream
+            // representation, even at signed limits and for negative zero.
+            for(double value : {-2147483648.0,-1000000.0,-1.0,-0.0,0.0,1.0,6500.0,2147483647.0,2147483648.0,1.25,1e20,1e-8}) {
+                std::ostringstream expected;expected.imbue(std::locale::classic());expected<<std::setprecision(15)<<value;
+                check(Json(value).dump()==expected.str(),"Fast JSON integer output matches legacy serialization");
+            }
+            const std::string nested=R"({"a":[1,{"b":"text"},true,null],"z":-5})";
+            check(Json::parse(nested).dump()==nested,"Move-based JSON parser preserves nested values");
+            check(Json::parse(R"({"a":1,"a":2})").dump()==R"({"a":2})","Duplicate JSON key retains last value");
+        }
+        {
+            check(uiLanguages.size()==10,"All ten UI languages are available");
+            check(std::wstring_view(languageAt(1).name)==L"Português" &&
+                  std::wstring_view(languageAt(1).code)==L"pt-PT","Short Portuguese label retains the PT-PT locale");
+            for(size_t i=0;i<uiLanguages.size();++i)check(languageIndex(uiLanguages[i].code)==static_cast<int>(i),"Locale ID round trip");
+            check(languageIndex(L"pt")==1 && languageIndex(L"invalid")==0,"Legacy and unknown locale mapping");
+            for(const auto& message:uiMessages)for(int language=1;language<10;++language){
+                check(std::wstring_view(translate(language,message.key.data()))==message.texts[language-1],"Complete translated string lookup");
+                check(message.texts[language-1][0]!=0,"Non-empty translation");
+            }
+        }
+        {
+            ReleaseMarkdown md;
+            const auto rtf=md.render(L"## Release\n- **Fixed** *italic* ~~old~~ `code`\n- ***Both***\n- `#ff0000`\n- <span style=\"color: #12ab34;\">colour</span>\n- [GitHub](https://github.com/x)\n- {literal} \\object \u00e7\n```cpp\n**not bold**\n```",0xf5f5f5,0xee4b23,21);
+            check(rtf.find("{\\b Fixed}")!=std::string::npos && rtf.find("{\\i italic}")!=std::string::npos &&
+                  rtf.find("{\\strike old}")!=std::string::npos && rtf.find("{\\b\\i Both}")!=std::string::npos,
+                  "Release Markdown emphasis and strikethrough");
+            check(rtf.find("\\red255\\green0\\blue0;")!=std::string::npos && rtf.find("\\red18\\green171\\blue52;")!=std::string::npos,
+                  "Release Markdown colour swatches and inline colour");
+            check(rtf.find("{\\f1 **not bold**}")!=std::string::npos && rtf.find("\\{literal\\}")!=std::string::npos &&
+                  rtf.find("\\\\object")!=std::string::npos && rtf.find("\\u231?")!=std::string::npos,
+                  "Release Markdown code and RTF escaping");
+        }
+        {
+            check(parseScheduleTime(L"7pm")==1140 && parseScheduleTime(L"7")==420 &&
+                  parseScheduleTime(L"7h00")==420 && parseScheduleTime(L"07h00")==420 &&
+                  parseScheduleTime(L"07h")==420 && parseScheduleTime(L"7.30")==450 &&
+                  parseScheduleTime(L"12am")==0 && parseScheduleTime(L"12pm")==720,
+                  "Common time-entry formats and noon/midnight");
+            check(!parseScheduleTime(L"25:00")&&!parseScheduleTime(L"7h72")&&!parseScheduleTime(L"7abc")&&
+                  !parseScheduleTime(L"13pm")&&!parseScheduleTime(L"7:30junk"),"Reject invalid time entries");
+            const auto eq=solarUtcMinutes(80,365,0,0);
+            check(eq[0]&&eq[1]&&eq[2]&&std::abs(*eq[0]-360)<20&&std::abs(*eq[2]-1080)<20&&
+                  *eq[0]<*eq[1]&&*eq[1]<*eq[2],"Equatorial sunrise, solar noon and sunset");
+            const auto polar=solarUtcMinutes(172,365,89,0);
+            check(!polar[0]&&polar[1]&&!polar[2],"Polar day has no fabricated rise or set event");
+            check(dayOfYear(2024,3,1)==61&&dayOfYear(2026,3,1)==60,"Leap-year solar date");
+            auto configured=ColorSchedule{};configured.points[2].customTime=true;
+            const auto daily=effectiveSolarPoints(configured,{410,730,1180});
+            check(daily.points[0].minute==410 && daily.points[1].minute==730 && daily.points[2].minute==1140,"Daily solar refresh respects manual overrides");
+            configured.points.push_back({410,2000,SchedulePointKind::Custom,true});
+            const auto coincident=effectiveSolarPoints(configured,{410,730,1180});
+            check(coincident.points.front().kelvin==2000 && configured.points.size()==4,"Custom point wins temporary solar overlap without losing configured points");
+            const auto city=projectMapPoint(37.74,-25.67,10),zoomed=projectMapPoint(37.74,-25.67,11);
+            check(std::abs(zoomed.x-2*city.x)<0.001 && std::abs(zoomed.y-2*city.y)<0.001,"Map zoom retains geographic centre");
+            const auto tiles=visibleMapTiles(10,city,452,424);
+            check(!tiles.empty()&&tiles.size()<=9,"Only visible map tiles requested");
+            check(wrappedMapDelta(1023,1024)==-1 && wrappedMapDelta(-1023,1024)==1,"Map wraps across the antimeridian");
+            HotkeyBindings steps;steps[L""]={10,15,250,500};steps[L"MONITOR-A"]={2,3,50,80};
+            check(hotkeyStepsFor(steps,L"")[3]==500&&hotkeyStepsFor(steps,L"MONITOR-A")[0]==2&&
+                  hotkeyStepsFor(steps,L"UNKNOWN")==kDefaultHotkeySteps&&
+                  !validHotkeyStep(0,101)&&!validHotkeyStep(2,0),"Independent configurable hotkey increments");
+        }
+        {
+            ColorSchedule schedule{true,{{420,6500},{720,1000},{1140,3500}},ScheduleMode::Automatic,30};
+            check(scheduledColor(schedule,420*60).kelvin==6500 &&
+                  scheduledColor(schedule,570*60).kelvin==3750 &&
+                  scheduledColor(schedule,720*60).kelvin==1000 &&
+                  scheduledColor(schedule,1140*60).kelvin==3500 &&
+                  scheduledColor(schedule,60*60).kelvin==5000,"Automatic interpolation reaches every point, including midnight");
+            schedule.mode=ScheduleMode::Custom;
+            check(scheduledColor(schedule,689*60).kelvin==6500 &&
+                  scheduledColor(schedule,705*60).kelvin==3750 && scheduledColor(schedule,720*60).kelvin==1000,
+                  "Custom transition reaches target at selected time");
+            schedule.mode=ScheduleMode::Instant;
+            check(scheduledColor(schedule,720*60-1).kelvin==6500 && scheduledColor(schedule,720*60).kelvin==1000,
+                  "Instant switches at the point");
+            check(!uniqueScheduleTimes({{1,1000},{1,6500}}) && uniqueScheduleTimes(schedule.points),"Reject duplicate times");
+            auto normalized=normalizedSchedule({true,{{1439,900},{1,7000}},ScheduleMode::Automatic,200});
+            check(normalized.points.front().minute==1 && normalized.points.front().kelvin==6500 &&
+                  normalized.points.back().kelvin==1000 && normalized.transitionMinutes==120,"Normalize and sort points");
             check(validHotkey(0) && validHotkey(0x0241) && !validHotkey(0x41) && !validHotkey(-1),
                   "Hotkeys must use a modifier and a valid virtual key");
         }
         {
             check(newerThan("v1.0.20","1.0.19") && newerThan("2.0.0","1.0.19") && !newerThan("v1.0.19","1.0.19") && !newerThan("v1.0.4","1.0.19"),"Numeric release comparison");
-            check(!newerThan("v1.0.20","1.0.19","1.0.20") && newerThan("v1.0.21","1.0.19","1.0.20"),"Ignore exactly one release version");
+            check(parseReleaseVersion("v2.0")==parseReleaseVersion("2.0.0") && newerThan("v2.0","1.0.41") && !newerThan("v2.0.0","2.0") && newerThan("2.1","2.0"),"Two-component release versions and zero patch equivalence");
             check(!newerRelease(kAppVersion) && parseReleaseVersion(kAppVersion).has_value(),"Installed build version is valid and not offered as an update");
-            check(!parseReleaseVersion("v1.0.20-beta") && !parseReleaseVersion("../2.0.0") && !parseReleaseVersion("1.2"),"Reject prerelease and unsafe tag syntax");
-            check(updateDue(2000,560) && !updateDue(1999,560) && updateDue(2000,0) && updateDue(100,200),"Daily check scheduling and backwards clock");
+            check(!parseReleaseVersion("v1.0.20-beta") && !parseReleaseVersion("../2.0.0") && !parseReleaseVersion("1") && !parseReleaseVersion("2.0."),"Reject prerelease and unsafe tag syntax");
         }
         {
             check(dimOverlayAlpha(0)==0 && dimOverlayAlpha(50)==128 &&
@@ -82,6 +169,14 @@ int main() {
                   !confirmedForegroundMedia(true,100,8101) &&
                   confirmedForegroundMedia(true,100,8100),
                   "Missing, failed or stale media checks cannot indefinitely prevent dimming");
+            check(videoMayBePlaying(true,ReportedMediaKind::Video) &&
+                  videoMayBePlaying(true,ReportedMediaKind::Unknown) &&
+                  !videoMayBePlaying(false,ReportedMediaKind::Video) &&
+                  !videoMayBePlaying(true,ReportedMediaKind::Music) &&
+                  !videoMayBePlaying(true,ReportedMediaKind::Image),"Only playing video or unknown media globally inhibits dimming");
+            check(mediaExemptsDisplay(true,false,false) && mediaExemptsDisplay(false,true,true) &&
+                  !mediaExemptsDisplay(false,true,false) && !mediaExemptsDisplay(false,false,true),
+                  "Video protection is global; foreground audio remains per display");
         }
         {
             DisplayTargetSnapshot snapshot;
@@ -132,6 +227,19 @@ int main() {
         check(sliderPositionFromX(1000,10,210,0,10000)==10000,"Captured dragging clamps beyond the right edge");
         check(sliderPositionFromX(110,10,210,0,10000)==5000,"Captured dragging maps the pointer continuously");
         check(sliderPositionFromX(110,10,10,0,10000)==0,"Degenerate slider geometry stays safe");
+        for(int width:{1,16,75,250,1000})for(int inset:{5,10,20}){
+            const auto track=ddcTrackBounds(width,inset);
+            check(track.right>track.left,"DDC rail has a positive span");
+            for(int x=track.left;x<=track.right;++x){
+                const auto position=sliderPositionFromX(x,track.left,track.right,0,10000);
+                check(sliderXFromPosition(position,track.left,track.right,0,10000)==x,
+                      "DDC thumb uses the same geometry as captured input");
+            }
+            check(sliderXFromPosition(0,track.left,track.right,0,10000)==track.left &&
+                  sliderXFromPosition(10000,track.left,track.right,0,10000)==track.right &&
+                  sliderXFromPosition(2500,track.left,track.right,0,10000)<=sliderXFromPosition(7500,track.left,track.right,0,10000),
+                  "DDC thumb coordinates remain monotonic with no native thumb rectangle");
+        }
         // The visual brightness and contrast icons must share the exact
         // middle Y of their native trackbars, at any screen position/DPI.
         const POINT brightIcon=ddcSliderIconCenter(52,134,28);
@@ -183,7 +291,8 @@ int main() {
             check(served==std::vector<int>({1,2,3,4}),"A hot slider cannot starve another monitor or feature");
         }
         bool tooDeep=false;
-        try { Json::parse(std::string(140,'[')+"0"+std::string(140,']')); } catch(const std::exception&) { tooDeep=true; }
+        try {
+ Json::parse(std::string(140,'[')+"0"+std::string(140,']')); } catch(const std::exception&) { tooDeep=true; }
         check(tooDeep,"Excessive JSON nesting is rejected before stack exhaustion");
         {
             Motion motion(0);
@@ -197,6 +306,29 @@ int main() {
             motion.to(1,400,200,true);
             motion.to(1,450,200,false);
             check(motion.value(450)==1 && !motion.active(450),"Reduced motion snaps to the final state immediately");
+        }
+        {
+            check(displayInsertionOrder(4,0,3)==std::vector<std::size_t>({1,2,3,0}),"Display drag forward preserves identities");
+            check(displayInsertionOrder(4,3,1)==std::vector<std::size_t>({0,3,1,2}),"Display drag backward preserves identities");
+            check(displayInsertionOrder(3,0,0)==std::vector<std::size_t>({0,1,2}),"Display drag returning to original slot");
+            const std::vector<int> widths{210,300,150};
+            const auto before=settingsDisplaySlots(widths,displayInsertionOrder(3,0,0));
+            const auto after=settingsDisplaySlots(widths,displayInsertionOrder(3,0,2));
+            check(before[0].x==26 && before[1].y==124 && before[2].x==332,"Display wrapping before drag");
+            check(after[1].x==26 && after[2].x==332 && after[0].y==124,"Display wrapping after drag");
+            Motion position(before[0].y);position.to(after[0].y,100,kDisplayReorderMs,true);
+            check(position.active(100) && position.value(190)>86 && position.value(280)==124 && !position.active(280),"Settings display animation uses shared 180 ms duration");
+        }
+        {
+            Motion spin(0);
+            startRefreshSpin(spin,100,true);
+            check(spin.active(100) && spin.value(100)==0 && spin.value(560)==360 && !spin.active(560),"Refresh spin is exactly 460 ms and one revolution");
+            startRefreshSpin(spin,600,true);
+            const auto midway=spin.value(700);
+            startRefreshSpin(spin,700,true);
+            check(std::abs(spin.value(700)-midway)<0.000001 && std::fmod(spin.value(1160),360.0)==0,"Repeated refresh preserves angle and returns to neutral");
+            startRefreshSpin(spin,1200,false);
+            check(!spin.active(1200) && std::fmod(spin.value(1200),360.0)==0,"Refresh respects reduced motion");
         }
         DWORD settingWritten=0; int directCalls=0,vcpCalls=0;
         check(writeDdcValue(false,0,0,37,[&](DWORD value){settingWritten=value;++directCalls;return true;},
@@ -256,6 +388,30 @@ int main() {
             check(saved.percent==100,
                 "Out-of-range monitor percentages are safely clamped");
         }
+        {
+            DdcValue target;target.percent=25;target.hasValue=true;target.managed=true;
+            target.awaitingWriteReadback=true;
+            DdcValue reported;reported.supported=true;reported.readable=true;reported.hasValue=true;reported.percent=100;
+            applyDdcObservation(target,reported,true);
+            check(target.percent==25 && target.differingReadback==-1,"Grace period ignores stale readback");
+            applyDdcObservation(target,reported,false);
+            check(target.percent==25 && target.awaitingWriteReadback,"First post-write mismatch cannot jump to full brightness");
+            reported.percent=25;applyDdcObservation(target,reported,false);
+            check(target.percent==25 && !target.awaitingWriteReadback,"Matching hardware readback confirms target");
+            reported.percent=60;applyDdcObservation(target,reported,false);
+            check(target.percent==60,"External changes still update confirmed sliders");
+            target.percent=25;target.awaitingWriteReadback=true;reported.percent=100;
+            applyDdcObservation(target,reported,false);applyDdcObservation(target,reported,false);
+            check(target.percent==100 && !target.awaitingWriteReadback,"Repeated real mismatch is eventually reflected");
+            target.percent=25;target.awaitingWriteReadback=true;reported.percent=100;
+            applyDdcObservation(target,reported,false);reported.readable=false;
+            applyDdcObservation(target,reported,false);reported.readable=true;
+            applyDdcObservation(target,reported,false);
+            check(target.percent==25,"Unreadable sample breaks mismatch confirmation");
+        }
+        check(validDdcReading(0,100,100) && validDdcReading(20,220,120) &&
+              !validDdcReading(0,100,65535) && !validDdcReading(20,220,0) && !validDdcReading(50,50,50),
+              "Invalid firmware readbacks are rejected, not clamped to slider endpoints");
         check(normalizeMonitorInstance(L"\\\\?\\DISPLAY#AUO1234#4&ABC&0&UID100#{GUID}")==
               normalizeMonitorInstance(L"DISPLAY\\AUO1234\\4&ABC&0&UID100_0"),
             "WMI panel identity must match its Windows display interface");
@@ -343,7 +499,7 @@ int main() {
             check(target.percent==100 && !target.failed,
                 "Normal hardware readback remains authoritative after recovery");
         }
-        const std::string legacy=R"({"version":"2.1.1","screen":{"kelvin":4200,"brightness":25,"monitor_profiles":{"\\\\.\\DISPLAY1":{"enabled":false,"kelvin":3120,"brightness":85,"custom_name":"Meu ecr\u00e3"}}},"general":{"language":"pt-PT","appearance":"light","startup_mode":"tray"},"old_module":{"preserve_me":[1,"ok",false]}})";
+        const std::string legacy=R"({"version":"2.1.1","screen":{"kelvin":4200,"brightness":25,"monitor_profiles":{"\\\\.\\DISPLAY1":{"enabled":false,"kelvin":3120,"brightness":85,"custom_name":"Meu ecr\u00e3"}}},"general":{"language":"pt-PT","appearance":"light","startup_mode":"tray","color_schedule":{"enabled":true,"day_start":480,"night_start":1200,"day_kelvin":6200,"night_kelvin":3200,"transition_minutes":45}},"old_module":{"preserve_me":[1,"ok",false]}})";
         auto data=Json::parse(legacy);
         check(data.get("screen").get("kelvin").integer()==4200,"Read old Kelvin");
         check(data.get("old_module").get("preserve_me").isArray(),"Preserve unknown fields");
@@ -352,7 +508,8 @@ int main() {
         check(Json::parse(R"("\uD83D\uDE80")").str()==std::string("\xF0\x9F\x9A\x80"),
               "JSON surrogate pairs");
         bool invalid=false;
-        try { Json::parse("{\"a\":}"); } catch(...) {invalid=true;}
+        try {
+ Json::parse("{\"a\":}"); } catch(...) {invalid=true;}
         check(invalid,"Reject invalid JSON");
         check(legacySoftwareCursorOverride(L"-1") &&
               legacySoftwareCursorOverride(L"  -1  "),
@@ -524,9 +681,8 @@ int main() {
         // 150ms motion, ending at the saved resting window coordinates.
         check(kScreenOffActionDelayMs==250 && kScreenOffInputGuardMs==3000,
             "Screen-off waits 250ms for the click release then protects input for 3 seconds");
-        check(kScreenOffButtonSizeDip==28 &&
-              kScreenOffButtonSizeDip<32,
-            "Screen-off button is a smaller 28-DIP square centred beside 32-DIP monitor tabs");
+        check(kScreenOffButtonSizeDip==32,
+            "Screen-off header action matches the refresh button size");
         check(kScreenOffMinCorrectionIntervalMs==450 &&
               kScreenOffMaxCorrections==8,
             "Event-driven screen-wake corrections are capped at 8 and 450ms apart");
@@ -575,15 +731,19 @@ int main() {
             "Hidden DDC removes only its card and the intervening 12-DIP gap");
         const auto noButtonWrap=calculateWindowContentMinimum(
             96,450,{160,160},1,false,true);
-        const auto wrappedButton=calculateWindowContentMinimum(
+        const auto headerButton=calculateWindowContentMinimum(
             96,418,{160,160},1,false,true);
+        const auto wrappedDisplays=calculateWindowContentMinimum(
+            96,380,{160,160},1,false,true);
         const auto compactFits=calculateWindowContentMinimum(
             96,424,{160,160},1,false,true);
         check(noButtonWrap.screenRows==1 &&
               compactFits.screenRows==1 &&
-              wrappedButton.screenRows==2 &&
-              wrappedButton.clientHeight-noButtonWrap.clientHeight==38,
-            "Compact 28-DIP button fits narrower rows without overlapping monitor tabs");
+              headerButton.screenRows==1 &&
+              headerButton.clientHeight==noButtonWrap.clientHeight &&
+              wrappedDisplays.screenRows==2 &&
+              wrappedDisplays.clientHeight-noButtonWrap.clientHeight==38,
+            "Header actions do not cause monitor-row wrapping; actual displays still wrap");
         const auto wide=calculateWindowContentMinimum(96,980,tabs,2,false,true);
         const auto narrow=calculateWindowContentMinimum(96,420,tabs,2,false,true);
         check(wide.screenRows==1 && narrow.screenRows>=2,
@@ -672,11 +832,30 @@ int main() {
             "Minimum dimensions scale with display DPI");
         const auto oversized=calculateWindowContentMinimum(96,420,
             {1500},0,false,false);
-        check(oversized.clientWidth==420 && oversized.screenRows==2,
-            "Long monitor names ellipsize, and screen-off wraps rather than enlarging width");
+        check(oversized.clientWidth==420 && oversized.screenRows==1,
+            "Long monitor names ellipsize within one row; screen-off stays in the header");
         const auto tiny=calculateWindowContentMinimum(96,180,tabs,2,false,true);
-        check(tiny.clientWidth==180 && tiny.screenRows==4,
-            "At minimum width the screen-off button wraps after three monitor rows");
+        check(tiny.clientWidth==180 && tiny.screenRows==3,
+            "At minimum width only the three monitor tabs wrap; header actions stay above them");
+        // Both header actions are independent of the monitor rows, even at
+        // narrow widths and fractional DPI scales. Long names must not add
+        // an extra row or enlarge the window when their text is clipped.
+        for (int dpi:{96,120,144,192}) {
+            for (int widthDip:{180,200,420,980}) {
+                const int width=MulDiv(widthDip,dpi,96);
+                const auto one=calculateWindowContentMinimum(dpi,width,
+                    {MulDiv(1500,dpi,96)},0,false,false);
+                const auto empty=calculateWindowContentMinimum(dpi,width,{},0,false,false);
+                const auto three=calculateWindowContentMinimum(dpi,width,
+                    {MulDiv(1500,dpi,96),MulDiv(1500,dpi,96),MulDiv(1500,dpi,96)},0,false,false);
+                check(one.clientWidth==width && one.screenRows==1 &&
+                      one.clientHeight==empty.clientHeight,
+                    "Header actions do not add a row at any supported DPI or width");
+                check(three.clientWidth==width && three.screenRows==3 &&
+                      three.clientHeight-one.clientHeight==MulDiv(46+3*38,dpi,96)-MulDiv(46+38,dpi,96),
+                    "Only actual monitor tabs contribute additional rows at any DPI");
+            }
+        }
         check(tiny.clientHeight>narrow.clientHeight,
             "Compact temperature layout receives additional vertical clearance");
         check(temperatureSliderWidth(96,200)==128 &&
@@ -807,6 +986,12 @@ int main() {
             check(model.load(),"Load local portable config");
             check(model.preferences().locale==L"pt-PT","PT language");
             check(model.preferences().theme==L"light","Light theme");
+            const auto& migratedSchedule=model.preferences().colorSchedule;
+            check(migratedSchedule.enabled && migratedSchedule.mode==ScheduleMode::Custom &&
+                  migratedSchedule.points.size()==2 && migratedSchedule.points[0].minute==480 &&
+                  migratedSchedule.points[0].kelvin==6200 && migratedSchedule.points[1].minute==1200 &&
+                  migratedSchedule.points[1].kelvin==3200 && migratedSchedule.transitionMinutes==45,
+                  "Migrate legacy day/night schedule into editable points");
             check(!model.windowPosition().has_value(),"Legacy config without a window position keeps default placement");
             check(!model.windowSize().has_value(),"Legacy config without dimensions keeps automatic first-run sizing");
             check(!model.inactiveWindowGeometry(),"Legacy config has no inactivity window geometry");
@@ -832,11 +1017,11 @@ int main() {
             updated.locale=L"en-US";
             updated.theme=L"system";
             check(!updated.dimInactive,"Inactivity dimming defaults to disabled");
-            check(!updated.autoUpdates && updated.updateLastCheck==0 && updated.ignoredUpdate.empty(),"Legacy config defaults to manual checking");
-            updated.ddcControls=false;updated.colorSchedule={true,360,1200,6000,3000,20};
+            updated.ddcControls=false;updated.colorSchedule={true,{{360,6000},{720,4500},{1200,3000}},ScheduleMode::Custom,20};
             updated.hotkeys[L""]={0x0241,0,0x0242,0};
-            updated.autoUpdates=true;updated.updateLastCheck=12345;
-            updated.ignoredUpdate="v1.0.20";updated.availableUpdate="v1.0.21";updated.updateNotes="Example release notes";
+            updated.hotkeySteps[L""]={7,8,150,200};updated.hotkeySteps[L"MONITOR-A"]={2,3,50,80};
+            updated.colorSchedule.locationName=L"Lisbon, Portugal";updated.colorSchedule.latitude=38.722;updated.colorSchedule.longitude=-9.139;
+            updated.colorSchedule.points[0].kind=SchedulePointKind::Sunrise;updated.colorSchedule.points[0].customTime=true;
             updated.dimInactive=true;updated.dimAmount=65;updated.dimMinutes=7;
             updated.dimAll=false;updated.dimDisplays.insert(L"PHYSICAL-A");
             model.updatePreferences(updated);
@@ -857,11 +1042,15 @@ int main() {
             check(model.load(),"Reload from same folder");
             check(model.preferences().locale==L"en-US","Saved language");
             check(!model.preferences().ddcControls && model.preferences().colorSchedule.enabled &&
-                  model.preferences().colorSchedule.dayStart==360 && model.preferences().colorSchedule.transitionMinutes==20 &&
+                  model.preferences().colorSchedule.points.size()==3 && model.preferences().colorSchedule.points.front().minute==360 &&
+                  model.preferences().colorSchedule.mode==ScheduleMode::Custom && model.preferences().colorSchedule.transitionMinutes==20 &&
                   model.preferences().hotkeys.at(L"")[0]==0x0241,"Schedule and global hotkeys round-trip");
-            check(model.preferences().autoUpdates && model.preferences().updateLastCheck==12345 &&
-                  model.preferences().ignoredUpdate=="v1.0.20" && model.preferences().availableUpdate=="v1.0.21" &&
-                  model.preferences().updateNotes=="Example release notes","Update settings, ignored version and cached notes round-trip");
+            check(hotkeyStepsFor(model.preferences().hotkeySteps,L"")[2]==150 &&
+                  hotkeyStepsFor(model.preferences().hotkeySteps,L"MONITOR-A")[3]==80 &&
+                  model.preferences().colorSchedule.locationName==L"Lisbon, Portugal" &&
+                  std::abs(model.preferences().colorSchedule.latitude-38.722)<0.001 &&
+                  model.preferences().colorSchedule.points.front().kind==SchedulePointKind::Sunrise &&
+                  model.preferences().colorSchedule.points.front().customTime,"Location, solar overrides and hotkey increments round-trip");
             check(model.preferences().theme==L"system",
                 "System-following theme round-trips through portable config");
             check(model.preferences().dimInactive && model.preferences().dimAmount==65 &&
@@ -950,6 +1139,11 @@ int main() {
             check(locked!=INVALID_HANDLE_VALUE,"Lock config fixture");
             { Model model(root);check(!model.load(),"Sharing violations cannot reset a valid configuration"); }
             CloseHandle(locked);
+        }
+        // Every supported language must survive a complete save and reload.
+        for(const auto& l:uiLanguages){
+            { Model model(root);check(model.load(),"Load before locale switch");auto p=model.preferences();p.locale=l.code;model.updatePreferences(p);check(model.preferences().locale==l.code,"Apply locale"); }
+            { Model model(root);check(model.load() && model.preferences().locale==l.code,"Persist locale across restart"); }
         }
         fs::remove_all(root,ec);
         std::wcout<<L"All native regressions passed.\n";

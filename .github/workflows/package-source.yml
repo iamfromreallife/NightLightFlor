@@ -16,9 +16,9 @@ jobs:
         run: |
           import os, pathlib, re, shutil
           root = pathlib.Path.cwd()
-          version = re.search(r'project\(NightLightNative VERSION (\d+\.\d+\.\d+)', (root / 'CMakeLists.txt').read_text(encoding='utf-8')).group(1)
+          version = re.search(r'project\(NightLightNative VERSION (\d+\.\d+(?:\.\d+)?)', (root / 'CMakeLists.txt').read_text(encoding='utf-8')).group(1)
           inputs = re.search(r'for %%F in \(([^)]+)\)', (root / 'compile.bat').read_text(encoding='utf-8'), re.I).group(1).split()
-          inputs.append('compile.bat')
+          inputs.extend(['compile.bat', 'LICENSE'])
           dest = pathlib.Path(os.environ['RUNNER_TEMP']) / 'nightlight-source'
           dest.mkdir()
           for name in inputs:
