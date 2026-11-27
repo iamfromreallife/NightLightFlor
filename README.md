@@ -51,3 +51,7 @@ Designed for modern Windows 10 and Windows 11 systems. DDC/CI features depend on
 <img width="772" height="756" alt="Captura de ecrã 2026-11-26 013315" src="https://github.com/user-attachments/assets/515c6330-c201-415f-966d-6ca7134f2df2" />
 
 <img width="742" height="791" alt="Captura de ecrã 2026-11-26 013230" src="https://github.com/user-attachments/assets/f3ba794c-781c-4cb8-972f-cfc0eaa5872a" />
+
+## License
+
+NightLight is licensed under the [MIT License](LICENSE).
