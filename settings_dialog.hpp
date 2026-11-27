@@ -62,6 +62,15 @@ private:
         }
         return DefSubclassProc(h,m,w,l);
     }
+    static LRESULT CALLBACK hotkeyProc(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR id,DWORD_PTR data){
+        auto* self=reinterpret_cast<NightLightSettingsDialog*>(data);
+        if(m==WM_SETFOCUS)self->general_(25,1);
+        else if(m==WM_KILLFOCUS || m==WM_NCDESTROY){
+            self->general_(25,0);
+            if(m==WM_NCDESTROY)RemoveWindowSubclass(h,hotkeyProc,id);
+        }
+        return DefSubclassProc(h,m,w,l);
+    }
     void fonts(){
         HFONT f=CreateFontW(-px(14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
@@ -166,7 +175,8 @@ private:
             tr(L"Decrease temperature (-100 K)",L"Reduzir temperatura (-100 K)")};
         for(int i=0;i<4;++i){
             const int y=267+i*30;label(labels[i],26,y,250);
-            add(HotkeyFirst+i,HOTKEY_CLASSW,L"",WS_TABSTOP|WS_BORDER,280,y,254,26);
+            if(HWND field=add(HotkeyFirst+i,HOTKEY_CLASSW,L"",WS_TABSTOP|WS_BORDER,280,y,254,26))
+                SetWindowSubclass(field,hotkeyProc,1,reinterpret_cast<DWORD_PTR>(this));
         }
         refreshHotkeyFields();
         button(ClearHotkeys,tr(L"Clear",L"Limpar"),280,392,95);
@@ -300,8 +310,9 @@ private:
         if(id>=EngineFirst && id<EngineFirst+6 && code==CBN_SELCHANGE){
             const size_t index=static_cast<size_t>(id-EngineFirst);
             const int selection=static_cast<int>(SendMessageW(ctrl(id),CB_GETCURSEL,0,0));
-            if(index<backendKeys_.size() && selection>=0)backend_(backendKeys_[index],selection);
-            PostMessageW(window_,WM_APP+1,0,0);return;
+            if(index<backendKeys_.size() && selection>=0 && !backend_(backendKeys_[index],selection))
+                PostMessageW(window_,WM_APP+1,0,0);
+            return;
         }
         if((id==Previous || id==Next) && code==BN_CLICKED){
             behaviorPage_+=id==Next?1:-1;rebuild();return;
@@ -400,7 +411,6 @@ public:
         WNDCLASSEXW wc{};wc.cbSize=sizeof(wc);wc.hInstance=instance_;wc.lpfnWndProc=proc;wc.lpszClassName=cls_;
         wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=LoadIconW(instance_,MAKEINTRESOURCEW(101));wc.hIconSm=wc.hIcon;
         if(!RegisterClassExW(&wc) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return false;
-        RECT ownerRect{};GetWindowRect(owner_,&ownerRect);
         POINT cursor{};GetCursorPos(&cursor);
         MONITORINFO mi{sizeof(mi)};
         if(!GetMonitorInfoW(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),&mi))return false;

@@ -60,7 +60,8 @@ constexpr int ID_TRAY_DISABLE_BASE = 3000, ID_TRAY_EXIT = 3999;
 constexpr int ID_TRAY_CLOSE_OUTSIDE = 4103, ID_TRAY_STARTUP = 4104;
 constexpr int ID_DIM_SETTINGS=12000;
 constexpr int ID_UPDATE_MANUAL=12001,ID_UPDATE_AUTO=12002,ID_UPDATE_AVAILABLE=12003;
-constexpr UINT TIMER_UPDATE=25;
+constexpr UINT TIMER_UPDATE=25,TIMER_COLOR_SCHEDULE=26;
+constexpr int ID_SETTINGS=12004, HOTKEY_ID_BASE=0x5000;
 constexpr UINT TIMER_INACTIVE_DIM=22, TIMER_DIM_FADE=23, TIMER_STARTUP_COLOR=24;
 constexpr UINT WM_DIM_POINTER_ACTIVITY=WM_APP+45;
 constexpr int ID_TRAY_LANGUAGE_BASE = 4200, ID_TRAY_THEME_BASE = 4300;
@@ -642,6 +643,7 @@ void applyNightLightFrame(HWND window,const Palette& p,bool dark,bool highContra
 // The settings frame uses the same palette and primitive painters as the main UI.
 #include "inactive_dialog.hpp"
 #include "update_dialog.hpp"
+#include "settings_dialog.hpp"
 
 class NativeApp {
 public:
@@ -655,6 +657,8 @@ public:
         shuttingDown_=true;
         if(dimSettings_) dimSettings_->close();
         dimSettings_.reset();
+        settingsWindow_.reset();
+        clearGlobalHotkeys();
         updateWindow_.reset();
         updateRequest_.reset();
         removeTray();
@@ -676,6 +680,8 @@ public:
                         MB_ICONERROR | MB_OK);
             return 2;
         }
+        ddcVisible_=model_.preferences().ddcControls;
+        hardwareReveal_.snap(ddcVisible_?1:0);
         model_.armStartupColorTransition();
         // Previous NightLight cursor-test scripts set MouseTrails=-1,
         // deliberately forcing software pointer composition. Undo ONLY that
@@ -760,11 +766,14 @@ public:
         ::UpdateWindow(window_);
         noteWindowPosition();
         initializeUpdates();
+        registerGlobalHotkeys(model_.preferences().hotkeys,false);
+        syncColorSchedule();
         MSG msg{};
         BOOL messageResult=0;
         while ((messageResult=GetMessageW(&msg, nullptr, 0, 0)) > 0) {
             if(dimSettings_ && dimSettings_->pretranslate(msg)) continue;
             if(updateWindow_ && updateWindow_->pretranslate(msg)) continue;
+            if(settingsWindow_ && settingsWindow_->pretranslate(msg)) continue;
             const bool inlineKey=msg.hwnd==editName_ && msg.message==WM_KEYDOWN &&
                 (msg.wParam==VK_RETURN || msg.wParam==VK_ESCAPE);
             if (inlineKey || !IsDialogMessageW(window_, &msg)) {
@@ -789,6 +798,11 @@ private:
     bool dimTopologyDirty_=true,dimDialogOpen_=false;
     std::unique_ptr<InactiveSettingsWindow> dimSettings_;
     std::unique_ptr<ReleaseUpdateDialog> updateWindow_;
+    std::unique_ptr<NightLightSettingsDialog> settingsWindow_;
+    std::map<int,std::pair<std::wstring,int>> registeredHotkeys_;
+    std::map<std::wstring,int> lastScheduledTargets_;
+    bool hotkeysSuspended_=false,scheduleDirty_=false;
+    ULONGLONG lastScheduleSave_=0;
     std::shared_ptr<nightlight::UpdateRequest> updateRequest_;
     bool updateManual_=false,updatePromptPending_=false,trayIconBadged_=false;
     DWORD lastDimInput_=0,lastDimKeyboardInput_=0;
@@ -843,7 +857,7 @@ private:
     std::wstring editingDevice_;
     std::map<std::wstring,int> tabDesiredWidths_;
     std::vector<HWND> tabs_;
-    HWND btnGamma_ = nullptr;
+    HWND btnGamma_ = nullptr,btnSettings_=nullptr;
     bool gammaUnlocked_ = false;
     bool trayMenuOpen_=false;
     int temperatureHeight_ = 180;
@@ -1243,7 +1257,7 @@ private:
         sectionTitleFont_ = boldFont_;
         headlineFont_ = create(20, FW_NORMAL);
         tabDesiredWidths_.clear();
-        const HWND controls[] = {btnRefresh_,btnScreenOff_,btnGamma_,editName_};
+        const HWND controls[] = {btnRefresh_,btnScreenOff_,btnGamma_,btnSettings_,editName_};
         for (HWND control : controls) {
             if (control) SendMessageW(control, WM_SETFONT,
                 reinterpret_cast<WPARAM>(font_), TRUE);
@@ -1289,6 +1303,7 @@ private:
         btnRefresh_=createButton(ID_REFRESH,L"");
         btnScreenOff_=createButton(ID_SCREEN_OFF,L"");
         btnGamma_ = createButton(ID_GAMMA, L"");
+        btnSettings_=createButton(ID_SETTINGS,L"");
         ShowWindow(btnGamma_, gammaUnlocked_ ? SW_HIDE : SW_SHOW);
         createTooltips();
         editName_ = CreateWindowExW(0, L"EDIT", L"",
@@ -1335,12 +1350,13 @@ private:
         applyNightLightFrame(window_,palette(),dark,highContrast_);
         if(dimSettings_ && dimSettings_->hwnd()) dimSettings_->refreshTheme();
         if(updateWindow_ && updateWindow_->hwnd())updateWindow_->refreshTheme();
+        if(settingsWindow_ && settingsWindow_->hwnd())settingsWindow_->refreshTheme();
         // Repaint the native non-client caption as well as app contents;
         // the standard title bar must retain the matching text colour.
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME);
         repaint();
         for (HWND h : tabs_) InvalidateRect(h, nullptr,FALSE);
-        const HWND buttons[] = {btnRefresh_,btnScreenOff_,btnGamma_};
+        const HWND buttons[] = {btnRefresh_,btnScreenOff_,btnGamma_,btnSettings_};
         for (HWND b : buttons) if (b) InvalidateRect(b, nullptr,FALSE);
         for (const auto& row:hardwareRows_) { InvalidateRect(row.nameButton,nullptr,FALSE); InvalidateRect(row.brightness,nullptr,FALSE); InvalidateRect(row.contrast,nullptr,FALSE); }
     }
@@ -1352,6 +1368,7 @@ private:
             SetWindowTextW(row.contrast,(tr(L"Contrast",L"Contraste")+suffix).c_str());
         }
         SetWindowTextW(btnRefresh_,tr(L"Refresh displays",L"Atualizar ecrãs").c_str());
+        SetWindowTextW(btnSettings_,tr(L"Settings...",L"Definições...").c_str());
         screenOffHelp_=tr(
             L"Turn off screens (mouse and keyboard ignored for 3 seconds)",
             L"Desligar ecrãs (rato e teclado ignorados durante 3 segundos)");
@@ -1485,7 +1502,7 @@ private:
     SIZE requiredWindowSizeForWidth(int outerWidth) const {
         const SIZE frame=frameThickness();
         const auto needed=minimumContentForWidth(std::max(1,outerWidth-static_cast<int>(frame.cx)));
-        return SIZE{needed.clientWidth+frame.cx,needed.clientHeight+frame.cy+px(30)};
+        return SIZE{needed.clientWidth+frame.cx,needed.clientHeight+frame.cy+px(66)};
     }
     bool ensureWindowFitsContents() {
         if (!window_ || IsIconic(window_) || IsZoomed(window_)) return false;
@@ -1555,6 +1572,8 @@ private:
         const int innerLeft=margin+inset,innerRight=width_-margin-inset;
         const int tabH=px(32),tabGap=px(6);
         const int tabsRight=innerRight;
+        const int settingsWidth=std::min(px(118),std::max(px(1),width_-2*margin));
+        place(btnSettings_,width_-margin-settingsWidth,height_-px(66),settingsWidth,px(28),TRUE);
         // Exactly 4px from the top and right edges of the Screens card.
         place(btnRefresh_,width_-margin-px(4)-px(32),panelTop_+px(4),px(32),tabH,TRUE);
         const int tabStart=innerLeft;
@@ -2222,6 +2241,178 @@ private:
         dimOverlays_.cursorMask(!inputKnown || age>=250);
         syncInactiveDimming();
     }
+    void clearGlobalHotkeys() {
+        if(taskbarOwner_)for(const auto& item:registeredHotkeys_)UnregisterHotKey(taskbarOwner_,item.first);
+        registeredHotkeys_.clear();
+    }
+    static UINT hotkeyModifiers(int binding) {
+        const int flags=(binding>>8)&255;
+        return MOD_NOREPEAT|((flags&HOTKEYF_SHIFT)?MOD_SHIFT:0)|
+            ((flags&HOTKEYF_CONTROL)?MOD_CONTROL:0)|((flags&HOTKEYF_ALT)?MOD_ALT:0);
+    }
+    bool registerGlobalHotkeys(const nightlight::HotkeyBindings& groups,bool strict) {
+        clearGlobalHotkeys();
+        if(!taskbarOwner_ || shuttingDown_)return false;
+        int id=HOTKEY_ID_BASE;bool success=true;
+        for(const auto& group:groups)for(int action=0;action<4;++action){
+            const int binding=group.second[action];if(!binding)continue;
+            if(id>=0xbfff || !nightlight::validHotkey(binding) ||
+                !RegisterHotKey(taskbarOwner_,id,hotkeyModifiers(binding),static_cast<UINT>(binding&255))){
+                success=false;
+                if(strict){clearGlobalHotkeys();return false;}
+                continue;
+            }
+            registeredHotkeys_[id++]={group.first,action};
+        }
+        return success;
+    }
+    void suspendGlobalHotkeys(bool suspended) {
+        if(hotkeysSuspended_==suspended || shuttingDown_)return;
+        hotkeysSuspended_=suspended;
+        if(suspended)clearGlobalHotkeys();
+        else registerGlobalHotkeys(model_.preferences().hotkeys,false);
+    }
+    bool applyGlobalHotkeys(const std::wstring& key,const std::array<int,4>& bindings) {
+        auto pref=model_.preferences();
+        auto next=pref.hotkeys;
+        if(std::any_of(bindings.begin(),bindings.end(),[](int v){return v!=0;}))next[key]=bindings;
+        else next.erase(key);
+        if(next.size()>256)return false;
+        std::set<std::pair<UINT,int>> used;
+        for(const auto& group:next)for(const int binding:group.second)if(binding &&
+            (!nightlight::validHotkey(binding) || !used.emplace(hotkeyModifiers(binding),binding&255).second))return false;
+        if(!registerGlobalHotkeys(next,true)){
+            registerGlobalHotkeys(pref.hotkeys,false);
+            if(hotkeysSuspended_)clearGlobalHotkeys();
+            return false;
+        }
+        pref.hotkeys=std::move(next);model_.updatePreferences(pref);
+        if(hotkeysSuspended_)clearGlobalHotkeys();
+        return true;
+    }
+    void runGlobalHotkey(int id,LPARAM message) {
+        if(shuttingDown_ || hotkeysSuspended_ || !displayAwake_ || displayRecoveryActive_ || screenOffGuard_.guarding())return;
+        const auto it=registeredHotkeys_.find(id);if(it==registeredHotkeys_.end())return;
+        const auto& key=it->second.first;const int action=it->second.second;
+        const auto& groups=model_.preferences().hotkeys;
+        const auto group=groups.find(key);if(group==groups.end())return;
+        const int binding=group->second[action];
+        // Ignore stale WM_HOTKEY messages queued before a settings change.
+        if(HIWORD(message)!=(binding&255) || LOWORD(message)!=(hotkeyModifiers(binding)&~MOD_NOREPEAT))return;
+        bool changed=false,brightnessChanged=false;
+        for(size_t i=0;i<model_.monitors().size();++i){
+            const auto& mon=model_.monitors()[i];
+            if(!key.empty() && nightlight::monitorProfileKey(mon)!=key)continue;
+            if(action<2){
+                const auto state=ddc_.state(mon.device);
+                if(state.loading || !state.brightness.supported || !state.brightness.hasValue){ddc_.refresh(mon.device);continue;}
+                const int next=std::clamp(state.brightness.percent+(action==0?5:-5),0,100);
+                if(next!=state.brightness.percent && ddc_.set(mon.device,nightlight::DdcFeature::Brightness,next)){
+                    model_.rememberHardwarePercent(mon.device,false,next);brightnessChanged=true;
+                }
+            }else if(mon.enabled){
+                const int next=std::clamp(mon.kelvin+(action==2?100:-100),1000,6500);
+                if(next!=mon.kelvin && model_.previewKelvin(i,next))changed=true;
+            }
+        }
+        if(changed || brightnessChanged){
+            // Batch settings writes for all displays; repeated presses coalesce.
+            SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);
+            syncColorWatchdog();if(brightnessChanged)syncHardware();updateTrayTooltip();repaint();
+        }
+    }
+    void syncColorSchedule() {
+        KillTimer(taskbarOwner_,TIMER_COLOR_SCHEDULE);
+        lastScheduledTargets_.clear();
+        if(model_.preferences().colorSchedule.enabled && !shuttingDown_)tickColorSchedule();
+        else if(scheduleDirty_){model_.save();scheduleDirty_=false;}
+    }
+    void tickColorSchedule() {
+        if(shuttingDown_ || !model_.preferences().colorSchedule.enabled){
+            KillTimer(taskbarOwner_,TIMER_COLOR_SCHEDULE);return;
+        }
+        if(!displayAwake_ || displayRecoveryActive_ || model_.startupColorActive() || screenOffGuard_.guarding()){
+            SetTimer(taskbarOwner_,TIMER_COLOR_SCHEDULE,5000,nullptr);return;
+        }
+        SYSTEMTIME local{};GetLocalTime(&local);
+        const auto schedule=model_.preferences().colorSchedule;
+        const auto desired=nightlight::scheduledColor(schedule,local.wHour*3600+local.wMinute*60+local.wSecond);
+        bool changed=false;
+        for(size_t i=0;i<model_.monitors().size();++i){
+            const auto& mon=model_.monitors()[i];const auto key=nightlight::monitorProfileKey(mon);
+            if(!mon.enabled){lastScheduledTargets_.erase(key);continue;}
+            if(dragging_ && i==selected_)continue;
+            const auto previous=lastScheduledTargets_.find(key);
+            // Do not fight manual adjustment during a stable schedule phase.
+            if(previous!=lastScheduledTargets_.end() && previous->second==desired.kelvin)continue;
+            lastScheduledTargets_[key]=desired.kelvin;
+            if(mon.kelvin!=desired.kelvin && model_.previewKelvin(i,desired.kelvin))changed=true;
+        }
+        const auto now=GetTickCount64();
+        scheduleDirty_=scheduleDirty_||changed;
+        if(scheduleDirty_ && (!desired.transitioning || !lastScheduleSave_ || now-lastScheduleSave_>=60000)){
+            model_.save();scheduleDirty_=false;lastScheduleSave_=now;
+        }
+        if(changed){syncColorWatchdog();updateTrayTooltip();repaint();}
+        // No timer at all when disabled. During stable periods wake only at
+        // the next local-clock minute (or the next phase boundary).
+        const UINT interval=desired.transitioning?5000:static_cast<UINT>(std::max(1,60-static_cast<int>(local.wSecond))*1000);
+        SetTimer(taskbarOwner_,TIMER_COLOR_SCHEDULE,interval,nullptr);
+    }
+    void openSettings() {
+        if(settingsWindow_ && settingsWindow_->hwnd()){settingsWindow_->activate();return;}
+        settingsWindow_.reset();
+        settingsWindow_=std::make_unique<NightLightSettingsDialog>(instance_,taskbarOwner_,
+            [this]{return model_.preferences();},[this]{return model_.monitors();},
+            [this](int kind,int value)->bool {
+                if(kind==25){suspendGlobalHotkeys(value!=0);return true;}
+                if(kind==20){populateLanguage(value==1?0:1);return true;}
+                if(kind==21){setTheme(value==1?L"light":value==2?L"dark":L"system");return true;}
+                if(kind==22){auto p=model_.preferences();p.closeByClickingOutside=value!=0;model_.updatePreferences(p);return true;}
+                if(kind==23){
+                    const HRESULT result=nightlight::setStartupTask(value!=0);
+                    if(FAILED(result)){
+                        MessageBoxW(settingsWindow_->hwnd(),tr(L"Could not change Windows startup.",L"Não foi possível alterar o arranque com o Windows.").c_str(),L"NightLight",MB_OK|MB_ICONWARNING);
+                        return false;
+                    }return true;
+                }
+                if(kind==24){if(ddcVisible_!=(value!=0))toggleHardware();return true;}
+                return false;
+            },
+            [this](const std::wstring& key,int backend){
+                for(size_t i=0;i<model_.monitors().size();++i)if(nightlight::monitorProfileKey(model_.monitors()[i])==key)
+                    return setMonitorBackend(i,backend==1?nightlight::ColorBackend::MonitorHardware:
+                        backend==2?nightlight::ColorBackend::NvidiaTargetGamma:nightlight::ColorBackend::GpuGamma);
+                return false;
+            },
+            [this](const std::wstring& key,const std::array<int,4>& values){return applyGlobalHotkeys(key,values);},
+            [this](nightlight::ColorSchedule schedule){auto p=model_.preferences();p.colorSchedule=schedule;model_.updatePreferences(p);syncColorSchedule();},
+            [this]{openInactiveSettings();},
+            []{bool enabled=false;return SUCCEEDED(nightlight::queryStartupTask(enabled)) && enabled;},
+            [this]{return pt();},[this]{return palette();},
+            [this]{return nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);},
+            [this]{return highContrast_;});
+        if(!settingsWindow_->open())settingsWindow_.reset();
+    }
+    bool setMonitorBackend(size_t index,nightlight::ColorBackend backend) {
+        if(index>=model_.monitors().size())return false;
+        bool proceed=true;
+        const bool hardware=backend==nightlight::ColorBackend::MonitorHardware;
+        const bool target=backend==nightlight::ColorBackend::NvidiaTargetGamma;
+        const HWND parent=settingsWindow_ && settingsWindow_->hwnd()?settingsWindow_->hwnd():window_;
+                if(hardware && !model_.monitors()[index].hardwareColor)
+                    proceed=MessageBoxW(parent,tr(
+                        L"Use monitor RGB gain controls instead of GPU gamma? Requires DDC/CI and a compatible monitor. White cursor and all screen pixels will be warmed. Original gains are backed up beside NightLight.exe. Kelvin values are approximate.",
+                        L"Usar os ganhos RGB do ecrã em vez da gama da GPU? Requer DDC/CI e um ecrã compatível. O cursor branco e todos os píxeis ficam mais quentes. Os ganhos originais são guardados junto ao NightLight.exe. Os valores Kelvin são aproximados.").c_str(),
+                        L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
+                if(target && !model_.monitors()[index].nvidiaTargetColor)
+                    proceed=MessageBoxW(parent,tr(
+                        L"Experimental NVIDIA target gamma: reset NVIDIA Control Panel desktop colour settings to defaults BEFORE using this mode. Requires SDR with Advanced Color disabled. The API cannot read back the original target LUT; NightLight restores a neutral LUT, not your custom NVIDIA calibration. No browser or MPO settings are changed. Continue?",
+                        L"Gama alvo NVIDIA experimental: restaure as predefinições de cor do ambiente de trabalho no Painel de Controlo NVIDIA ANTES de usar este modo. Requer SDR sem cor avançada. A API não permite ler a LUT original; o NightLight restaura uma LUT neutra, não a calibração personalizada. O navegador e o MPO não são alterados. Continuar?").c_str(),
+                        L"NightLight",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES;
+        if(!proceed)return false;
+        model_.updateColorBackend(index,backend);syncColorWatchdog();updateTrayTooltip();repaint();return true;
+    }
     void openInactiveSettings() {
         if(dimSettings_ && dimSettings_->hwnd()) {
             dimSettings_->activate();
@@ -2331,6 +2522,7 @@ private:
     }
     void toggleHardware() {
         ddcVisible_=!ddcVisible_;
+        auto prefs=model_.preferences();prefs.ddcControls=ddcVisible_;model_.updatePreferences(prefs);
         animate(hardwareReveal_,ddcVisible_?1:0,240);
         if (ddcVisible_ && windowPresented()) refreshHardware();
         else { hardwareDiscovered_=false; syncHardware(); }
@@ -2469,7 +2661,7 @@ private:
         bool active=false;
         COLORREF background=p.chip,foreground=p.text,border=p.border;
         int id=static_cast<int>(item.CtlID);
-        fill(dc,rc,p.card);
+        fill(dc,rc,id==ID_SETTINGS?p.page:p.card);
         std::wstring label;
         const bool screenButton=id>=ID_MONITOR_BASE &&
             id<ID_MONITOR_BASE+static_cast<int>(model_.monitors().size());
@@ -3160,20 +3352,7 @@ private:
             const size_t index=cmd-(target?ID_TRAY_COLOR_TARGET_BASE:hardware?ID_TRAY_COLOR_HW_BASE:ID_TRAY_COLOR_GPU_BASE);
             const auto backend=target?nightlight::ColorBackend::NvidiaTargetGamma:
                 hardware?nightlight::ColorBackend::MonitorHardware:nightlight::ColorBackend::GpuGamma;
-            if (index<model_.monitors().size()) {
-                bool proceed=true;
-                if(hardware && !model_.monitors()[index].hardwareColor)
-                    proceed=MessageBoxW(window_,tr(
-                        L"Use monitor RGB gain controls instead of GPU gamma? Requires DDC/CI and a compatible monitor. White cursor and all screen pixels will be warmed. Original gains are backed up beside NightLight.exe. Kelvin values are approximate.",
-                        L"Usar os ganhos RGB do ecrã em vez da gama da GPU? Requer DDC/CI e um ecrã compatível. O cursor branco e todos os píxeis ficam mais quentes. Os ganhos originais são guardados junto ao NightLight.exe. Os valores Kelvin são aproximados.").c_str(),
-                        L"NightLight",MB_YESNO|MB_ICONINFORMATION|MB_DEFBUTTON2)==IDYES;
-                if(target && !model_.monitors()[index].nvidiaTargetColor)
-                    proceed=MessageBoxW(window_,tr(
-                        L"Experimental NVIDIA target gamma: reset NVIDIA Control Panel desktop colour settings to defaults BEFORE using this mode. Requires SDR with Advanced Color disabled. The API cannot read back the original target LUT; NightLight restores a neutral LUT, not your custom NVIDIA calibration. No browser or MPO settings are changed. Continue?",
-                        L"Gama alvo NVIDIA experimental: restaure as predefinições de cor do ambiente de trabalho no Painel de Controlo NVIDIA ANTES de usar este modo. Requer SDR sem cor avançada. A API não permite ler a LUT original; o NightLight restaura uma LUT neutra, não a calibração personalizada. O navegador e o MPO não são alterados. Continuar?").c_str(),
-                        L"NightLight",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES;
-                if(proceed) {model_.updateColorBackend(index,backend); syncColorWatchdog(); updateTrayTooltip(); repaint();}
-            }
+            setMonitorBackend(index,backend);
         } else if (cmd==ID_DDC) {
             toggleHardware();
         } else if (cmd==ID_TRAY_LANGUAGE_BASE || cmd==ID_TRAY_LANGUAGE_BASE+1) {
@@ -3211,6 +3390,7 @@ private:
             if (id==ID_REFRESH) { refreshTurn_.to(refreshTurn_.value(uiTime())+360.0,uiTime(),460,animations_ && windowPresented()); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
             else if (id==ID_SCREEN_OFF) turnOffScreens();
             else if (id==ID_GAMMA) unlockGamma();
+            else if(id==ID_SETTINGS)openSettings();
             else if (id>=ID_MONITOR_BASE &&
                      id<ID_MONITOR_BASE+static_cast<int>(tabs_.size())) {
                 select(static_cast<size_t>(id-ID_MONITOR_BASE));
@@ -3265,7 +3445,7 @@ private:
                 IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                 // Avoid hiding when switching to a modal/owned dialog of this app.
                 const HWND next=reinterpret_cast<HWND>(lParam);
-                bool belongsToApp=false;
+                bool belongsToApp=settingsWindow_ && next==settingsWindow_->hwnd();
                 for (HWND owner=next;owner;owner=GetWindow(owner,GW_OWNER)) {
                     if (owner==hwnd) { belongsToApp=true; break; }
                 }
@@ -3566,7 +3746,10 @@ private:
                 syncColorWatchdog(); syncHardwarePoll(); syncInactiveDimming();
             }
             return TRUE;
+        case WM_HOTKEY:
+            runGlobalHotkey(static_cast<int>(wParam),lParam);return 0;
         case WM_TIMER:
+            if(wParam==TIMER_COLOR_SCHEDULE){tickColorSchedule();return 0;}
             if(wParam==TIMER_UPDATE){tickUpdate();return 0;}
             if(wParam==TIMER_INACTIVE_DIM) { if(dimTimerRunning_) tickInactiveDimming(); return 0; }
             if(wParam==TIMER_DIM_FADE) {dimOverlays_.tickFade();syncInactiveDimming();return 0;}
@@ -3723,6 +3906,7 @@ private:
                 ddc_.finishRestore();
                 displayRecoveryActive_=false;
                 restoreDdcAfterWake_=false;
+                if(model_.preferences().colorSchedule.enabled)tickColorSchedule();
                 syncInactiveDimming();
                 recoveryPass_=0;
                 recoveryVerificationIssued_=false;
@@ -3745,6 +3929,8 @@ private:
             return 0;
         case WM_DESTROY:
             shuttingDown_=true;
+            if(settingsWindow_)settingsWindow_->close();
+            clearGlobalHotkeys();KillTimer(taskbarOwner_,TIMER_COLOR_SCHEDULE);
             if(updateWindow_)updateWindow_->close();
             KillTimer(taskbarOwner_,TIMER_UPDATE);updateRequest_.reset();
             if(dimSettings_) dimSettings_->close();
@@ -3812,7 +3998,7 @@ private:
         // frame only supplies UI context. Broadcast display/resume messages
         // are handled by the actual frame to avoid duplicate processing.
         if(app && app->window_ && IsWindow(app->window_) && !app->shuttingDown_ &&
-           (msg==WM_TIMER || msg==WM_TRAY_ICON || msg==WM_GAMMA_COMPLETE ||
+           (msg==WM_TIMER || msg==WM_HOTKEY || msg==WM_TRAY_ICON || msg==WM_GAMMA_COMPLETE ||
             msg==nightlight::WM_DDC_COMPLETE ||
             (app->taskbarCreated_ && msg==app->taskbarCreated_) ||
             (msg==WM_POWERBROADCAST && wp==PBT_POWERSETTINGCHANGE)))
