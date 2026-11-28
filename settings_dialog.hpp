@@ -15,7 +15,7 @@ public:
     using DisplayAction=std::function<bool(int,const std::wstring&,const std::wstring&)>;
 private:
     enum : int { GeneralTab=10,BehaviorTab=11,AutomationTab=12,AboutTab=13,
-        Language=20,Theme=21,CloseOutside=22,Startup=23,Ddc=24,
+        Language=20,Theme=21,CloseOutside=22,Startup=23,Ddc=24,TrayWheel=28,TrayWheelMode=29,CaptureLogs=96,
         Scope=30,HotkeyFirst=31,SaveHotkeys=35,ClearHotkeys=36,HotkeyStep=40,
         EngineFirst=50,Previous=60,Next=61,
         ScheduleEnabled=70,Transition=71,Duration=75,ApplySchedule=76,DimSettings=77,
@@ -683,7 +683,26 @@ private:
         }
         check(Startup,startupText,26,174,startupWidth,startup_());
         add(StartupHint,L"STATIC",startupHint,SS_LEFT|SS_NOPREFIX,26+startupWidth+8,177,508-startupWidth-8,hintHeight);
-        const int extra=std::max(0,hintHeight-24);cards_.back().bottom+=extra;
+        const int startupExtra=std::max(0,hintHeight-24);
+        const std::wstring wheelLabel=tr(L"Tray icon mousewheel control",L"Controlo pela roda do rato no ícone");
+        const std::vector<std::wstring> wheelChoices{tr(L"Color temperature",L"Temperatura de cor"),tr(L"Brightness",L"Brilho"),tr(L"Contrast",L"Contraste")};
+        int checkboxNeeded=280,choiceNeeded=180;
+        if(HDC dc=GetDC(window_)){
+            auto old=SelectObject(dc,font_?font_:GetStockObject(DEFAULT_GUI_FONT));
+            auto measure=[&](const std::wstring& value,int padding){
+                SIZE size{};GetTextExtentPoint32W(dc,value.c_str(),static_cast<int>(value.size()),&size);
+                return (static_cast<int>(size.cx)*96+static_cast<int>(dpi_)-1)/static_cast<int>(dpi_)+padding;
+            };
+            checkboxNeeded=measure(wheelLabel,28);choiceNeeded=0;
+            for(const auto& choice:wheelChoices)choiceNeeded=std::max(choiceNeeded,measure(choice,41));
+            if(old && old!=HGDI_ERROR)SelectObject(dc,old);ReleaseDC(window_,dc);
+        }
+        const int wheelWidth=nightlight::trayWheelDropdownWidth(checkboxNeeded,choiceNeeded);
+        const int wheelY=207+startupExtra;
+        check(TrayWheel,wheelLabel,26,wheelY,500-wheelWidth,p.trayWheelEnabled);
+        combo(TrayWheelMode,wheelChoices,p.trayWheelMode,534-wheelWidth,wheelY,wheelWidth);
+        EnableWindow(ctrl(TrayWheelMode),p.trayWheelEnabled);
+        const int extra=startupExtra+38;cards_.back().bottom+=extra;
         section(217+extra,452+extra,tr(L"Global hotkeys",L"Atalhos de teclado globais"));
         const auto connected=monitors_();
         std::vector<std::wstring> names{tr(L"All monitors",L"Todos os ecrãs")};scopeKeys_={L""};
@@ -952,11 +971,12 @@ private:
         SetWindowTextW(ctrl(AboutTab),tr(L"About",L"Acerca"));
         SetWindowTextW(ctrl(CloseButton),tr(L"Close",L"Fechar"));
         SetWindowTextW(ctrl(CheckUpdates),tr(L"Check for updates...",L"Procurar atualizações..."));
+        SetWindowTextW(ctrl(CaptureLogs),general_(27,-1)?tr(L"Stop capture",L"Parar captura"):tr(L"Capture logs",L"Capturar registos"));
         SetWindowTextW(window_,tr(L"NightLight settings",L"Definições do NightLight"));
         desiredClientHeight_=550;
         if(tab_==0)buildGeneral();else if(tab_==1)buildBehavior();else if(tab_==2)buildAutomation();else buildAbout();
         if(!cards_.empty())cards_.front().top=42;
-        for(auto& item:children_)if(item.id==CloseButton || item.id==CheckUpdates)item.y=desiredClientHeight_-40;
+        for(auto& item:children_)if(item.id==CloseButton || item.id==CheckUpdates || item.id==CaptureLogs)item.y=desiredClientHeight_-40;
         resizeForContent();
         if(tab_==2&&!draft_.locationName.empty())SetTimer(window_,SolarUiTimer,30000,nullptr);else KillTimer(window_,SolarUiTimer);
         refreshTheme();
@@ -1043,10 +1063,11 @@ private:
         auto bp=BeginBufferedPaint(item.hDC,&r,BPBF_TOPDOWNDIB,nullptr,&dc);if(!bp)dc=item.hDC;
         const auto p=palette_();const int id=static_cast<int>(item.CtlID);
         const bool tab=id>=GeneralTab && id<=AboutTab,selected=tab && id-GeneralTab==tab_;
-        fill(dc,r,tab || id==CloseButton || id==CheckUpdates?p.page:p.card);
+        fill(dc,r,tab || id==CloseButton || id==CheckUpdates || id==CaptureLogs?p.page:p.card);
         const bool hover=hovered_.count(item.hwndItem)!=0,pressed=(item.itemState&ODS_SELECTED)!=0;
         const bool focus=(item.itemState&ODS_FOCUS)!=0;
-        COLORREF bg=selected?mix(p.chip,p.accent,0.12):p.chip;
+        const bool recording=id==CaptureLogs && general_(27,-1);
+        COLORREF bg=(selected || recording)?mix(p.chip,p.accent,0.12):p.chip;
         if(hover || pressed)bg=mix(bg,p.text,pressed?0.08:0.035);
         const auto fg=(item.itemState&ODS_DISABLED)?p.muted:p.text;
         wchar_t labelText[512]{};GetWindowTextW(item.hwndItem,labelText,512);
@@ -1105,8 +1126,8 @@ private:
                 Gdiplus::Pen pen(drawingColor(p.muted),1.5f);
                 const Gdiplus::PointF points[]={{x-px(4),y-px(2)},{x,y+px(2)},{x+px(4),y-px(2)}};g.DrawLines(&pen,points,3);}
         }else{
-            rounded(dc,r,px(8),bg,selected || focus?p.accent:p.border);
-            text(dc,labelText,r,selected?bold_:font_,fg,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+            rounded(dc,r,px(8),bg,selected || focus || recording?p.accent:p.border);
+            text(dc,labelText,r,selected || recording?bold_:font_,fg,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
         }
         if(bp)EndBufferedPaint(bp,TRUE);
     }
@@ -1120,6 +1141,7 @@ private:
         }
         if(id==CloseButton && code==BN_CLICKED){close();return;}
         if(id==CheckUpdates && code==BN_CLICKED){general_(26,0);return;}
+        if(id==CaptureLogs && code==BN_CLICKED){general_(27,0);SetWindowTextW(ctrl(CaptureLogs),general_(27,-1)?tr(L"Stop capture",L"Parar captura"):tr(L"Capture logs",L"Capturar registos"));InvalidateRect(ctrl(CaptureLogs),nullptr,FALSE);return;}
         if(id==AboutLicense && code==BN_CLICKED){
             if(reinterpret_cast<INT_PTR>(ShellExecuteW(window_,L"open",L"https://github.com/iamfromreallife/NightLightFlor/blob/main/LICENSE",nullptr,nullptr,SW_SHOWNORMAL))<=32)
                 showError(L"Could not open the MIT license.",L"Não foi possível abrir a licença MIT.");
@@ -1148,6 +1170,8 @@ private:
             const size_t index=static_cast<size_t>(id-PointRemove);
             if(draft_.points.size()>2 && index<draft_.points.size() && collectTimes()){draft_.points.erase(draft_.points.begin()+index);rebuild();}return;
         }
+        if(id==TrayWheelMode && code==CBN_SELCHANGE){general_(id,selection(id));return;}
+        if(id==TrayWheel && code==BN_CLICKED){if(!general_(id,checked(id)?1:0)){checks_[id]=false;InvalidateRect(ctrl(id),nullptr,FALSE);}EnableWindow(ctrl(TrayWheelMode),checked(id));return;}
         if((id==Language || id==Theme) && code==CBN_SELCHANGE){
             const int index=selection(id);
             if(index>=0)general_(id,index);
@@ -1197,6 +1221,7 @@ private:
             button(BehaviorTab,tr(L"Displays",L"Ecrãs"),149,12,127,31,false);
             button(AutomationTab,tr(L"Automation",L"Automatização"),284,12,127,31,false);
             button(AboutTab,tr(L"About",L"Acerca"),419,12,127,31,false);
+            button(CaptureLogs,tr(L"Capture logs",L"Capturar registos"),54,desiredClientHeight_-40,174,28,false);
             button(CheckUpdates,tr(L"Check for updates...",L"Procurar atualizações..."),236,desiredClientHeight_-40,182,28,false);
             button(CloseButton,tr(L"Close",L"Fechar"),426,desiredClientHeight_-40,120,28,false);
             rebuild();
@@ -1308,18 +1333,6 @@ public:
         startup_(std::move(startup)),language_(std::move(language)),dark_(std::move(dark)),hc_(std::move(hc)),palette_(std::move(palette)){}
     ~NightLightSettingsDialog(){close();if(font_)DeleteObject(font_);if(bold_)DeleteObject(bold_);}
     HWND hwnd()const{return window_;}
-    // Real Win32 ownership keeps Settings above its main window, not above
-    // unrelated apps. Detach to the stable service owner before hiding or
-    // destroying/recreating the main frame.
-    void setOwner(HWND owner){
-        if(!owner || !IsWindow(owner) || owner==owner_)return;
-        if(window_){
-            SetLastError(ERROR_SUCCESS);
-            const auto previous=SetWindowLongPtrW(window_,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(owner));
-            if(!previous && GetLastError()!=ERROR_SUCCESS)return;
-        }
-        owner_=owner;
-    }
     void savePlacement(){
         if(!placementReady_ || !window_ || !IsWindowVisible(window_) || IsIconic(window_) || IsZoomed(window_))return;
         RECT r{};if(!GetWindowRect(window_,&r))return;
@@ -1331,7 +1344,7 @@ public:
     void displaysChanged(){if(window_ && tab_==1 && !closing_ && !building_ && !displayRefreshPending_){displayRefreshPending_=true;PostMessageW(window_,WM_APP+2,0,0);}}
     void hideToTray(){if(window_ && IsWindowVisible(window_)){savePlacement();if(refreshTooltip_)SendMessageW(refreshTooltip_,TTM_POP,0,0);closeChoice();KillTimer(window_,DisplaySpinTimer);displayRefreshTurn_.finish();finishRename(true);if(dragChip_ && GetCapture()==dragChip_)ReleaseCapture();if(activeSlider_>=0 && GetCapture()==ctrl(activeSlider_))ReleaseCapture();KillTimer(window_,PreviewTimer);preview_(std::nullopt);ShowWindow(window_,SW_HIDE);}}
     void close(){closing_=true;if(window_){savePlacement();destroyRefreshTooltip();closeChoice();KillTimer(window_,DisplaySpinTimer);finishRename(true);KillTimer(window_,PreviewTimer);preview_(std::nullopt);DestroyWindow(window_);}}
-    void activate(){if(window_){if(IsIconic(window_))ShowWindow(window_,SW_RESTORE);else if(!IsWindowVisible(window_))ShowWindow(window_,SW_SHOW);SetForegroundWindow(window_);}}
+    void activate(){if(window_){if(IsIconic(window_))ShowWindow(window_,SW_RESTORE);else if(!IsWindowVisible(window_))ShowWindow(window_,SW_SHOW);raiseNormalAppWindow(window_);}}
     void refreshTheme(){
         if(!window_)return;
         applyNightLightFrame(window_,palette_(),dark_(),hc_());
@@ -1389,6 +1402,6 @@ public:
         const auto actual=frameSize(monitor);const auto restored=position(actual);
         SetWindowPos(created,nullptr,restored.x,restored.y,actual.cx,actual.cy,SWP_NOZORDER|SWP_NOACTIVATE);
         placementReady_=true;
-        ShowWindow(created,SW_SHOW);SetFocus(ctrl(GeneralTab));SetForegroundWindow(created);return true;
+        ShowWindow(created,SW_SHOW);raiseNormalAppWindow(created);nightlight::focusActiveFrameControl(created,ctrl(GeneralTab));return true;
     }
 };

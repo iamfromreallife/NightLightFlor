@@ -227,6 +227,8 @@ void DdcController::refresh(const std::wstring& device) {
     if (device.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) return;
+    // Keep loading for recovery verification; known capabilities remain
+    // writable during this read, independently of the loading flag.
     states_[device].loading=true; jobs_[{device,-1}]={}; wake_.notify_one();
 }
 void DdcController::poll(const std::wstring& device) {
@@ -242,10 +244,10 @@ void DdcController::poll(const std::wstring& device) {
     jobs_[{device,-1}]={};
     wake_.notify_one();
 }
-bool DdcController::set(const std::wstring& device,DdcFeature feature,int percent) {
+bool DdcController::set(const std::wstring& device,DdcFeature feature,int percent,const std::wstring& physicalId) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto found=states_.find(device);
-    if (stopping_ || found==states_.end() || found->second.loading) return false;
+    if (stopping_ || found==states_.end()) return false;
     auto& value=feature==DdcFeature::Brightness?found->second.brightness:found->second.contrast;
     if (!value.supported) return false;
     percent=std::clamp(percent,0,100);
@@ -253,7 +255,7 @@ bool DdcController::set(const std::wstring& device,DdcFeature feature,int percen
     value.restoring=false;
     value.awaitingWriteReadback=false;value.differingReadback=-1;
     value.percent=percent; value.hasValue=true; value.managed=true; value.pending=true; value.failed=false; ++value.generation;
-    jobs_[{device,static_cast<int>(feature)}]={percent,value.generation}; wake_.notify_one();
+    jobs_[{device,static_cast<int>(feature)}]={percent,value.generation,false,physicalId}; wake_.notify_one();
     return true;
 }
 DdcState DdcController::state(const std::wstring& device) {
@@ -348,10 +350,10 @@ void DdcController::run() {
                 const auto& latest=key.second==0?state.brightness:state.contrast;
                 if (latest.generation!=job.generation) continue;
             }
-            // A saved restoration job must still address the same physical
+            // A recovery-period job must still address the same physical
             // panel at execution time, not merely the old DISPLAYx number.
             bool correctTarget=true;
-            if(job.restoring && !job.physicalId.empty()) {
+            if(!job.physicalId.empty()) {
                 const auto snapshot=queryPhysicalDisplayTargets();
                 correctTarget=matchPhysicalTarget(snapshot,key.first,job.physicalId)!=nullptr;
             }

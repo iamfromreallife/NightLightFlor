@@ -239,7 +239,7 @@ public:
         HWND created=CreateWindowExW(0,cls_,tr(L"Set location",L"Definir localização"),style,mi.rcWork.left+(mi.rcWork.right-mi.rcWork.left-w)/2,mi.rcWork.top+(mi.rcWork.bottom-mi.rcWork.top-h)/2,w,h,owner_,nullptr,instance_,this);
         if(!created)return {};
         if(!current.locationName.empty()){initializingQuery_=true;cities_.push_back({current.locationName,current.latitude,current.longitude});SetWindowTextW(query_,current.locationName.c_str());searchState_.query=queryText();searchState_.completed=searchState_.query;initializingQuery_=false;listCities(true);}
-        EnableWindow(owner_,FALSE);ShowWindow(created,SW_SHOW);SetForegroundWindow(created);SetFocus(query_);SendMessageW(query_,EM_SETSEL,0,-1);
+        EnableWindow(owner_,FALSE);ShowWindow(created,SW_SHOW);raiseNormalAppWindow(created);nightlight::focusActiveFrameControl(created,query_);SendMessageW(query_,EM_SETSEL,0,-1);
         MSG msg{};while(window_){const BOOL n=GetMessageW(&msg,nullptr,0,0);if(n<=0){if(n==0)PostQuitMessage(static_cast<int>(msg.wParam));close();break;}
             // Wheel messages may be sent to the focused search/list control
             // rather than the map HWND. Hit-test their screen coordinates.
@@ -252,8 +252,8 @@ public:
                     select(index);SetFocus(results_);continue;}
                 if(msg.wParam==VK_RETURN&&msg.hwnd==query_){beginSearch();continue;}
                 if(msg.wParam==VK_RETURN&&msg.hwnd==results_){const int index=static_cast<int>(SendMessageW(results_,LB_GETCURSEL,0,0));if(index>=0&&index!=selected_)select(index);SetFocus(apply_);continue;}}
-            if(!window_||!IsDialogMessageW(window_,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
-        if(IsWindow(owner_)){EnableWindow(owner_,TRUE);SetForegroundWindow(owner_);}
+            if(!nightlight::frameReceivesMessage(window_,msg.hwnd)||!IsDialogMessageW(window_,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
+        if(IsWindow(owner_)){EnableWindow(owner_,TRUE);raiseNormalAppWindow(owner_);}
         return answer_;
     }
 };

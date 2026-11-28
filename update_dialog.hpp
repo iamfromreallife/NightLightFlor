@@ -189,7 +189,7 @@ public:
     ~ReleaseUpdateDialog(){close();if(font_)DeleteObject(font_);if(bold_)DeleteObject(bold_);if(richEdit_)FreeLibrary(richEdit_);}
     HWND hwnd()const{return window_;}
     void close(){if(window_)DestroyWindow(window_);}
-    void activate(){if(window_){if(IsIconic(window_))ShowWindow(window_,SW_RESTORE);SetForegroundWindow(window_);}}
+    void activate(){if(window_){if(IsIconic(window_))ShowWindow(window_,SW_RESTORE);raiseNormalAppWindow(window_);}}
     void refreshTheme(){if(window_){applyNightLightFrame(window_,palette_(),dark_(),hc_());
         if(notes_){SetWindowTheme(notes_,dark_() && !hc_()?L"DarkMode_Explorer":L"Explorer",nullptr);renderNotes(true);}
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME|RDW_ALLCHILDREN|RDW_NOERASE);}}
@@ -217,6 +217,6 @@ public:
         const int dh=std::min(static_cast<int>(actual.bottom-actual.top),static_cast<int>(mi.rcWork.bottom-mi.rcWork.top));
         if(dw!=w || dh!=h)SetWindowPos(created,nullptr,mi.rcWork.left+(mi.rcWork.right-mi.rcWork.left-dw)/2,
             mi.rcWork.top+(mi.rcWork.bottom-mi.rcWork.top-dh)/2,dw,dh,SWP_NOZORDER|SWP_NOACTIVATE);
-        ShowWindow(created,SW_SHOW);SetFocus(buttons_[0]);SetForegroundWindow(created);return true;
+        ShowWindow(created,SW_SHOW);raiseNormalAppWindow(created);nightlight::focusActiveFrameControl(created,buttons_[0]);return true;
     }
 };

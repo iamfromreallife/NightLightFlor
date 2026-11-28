@@ -61,6 +61,8 @@ struct Preferences {
     std::wstring theme = L"system"; // system, light, dark
     bool closeByClickingOutside = true;
     bool ddcControls=true;
+    bool linkDisplays=false, trayWheelEnabled=false;
+    int trayWheelMode=0; // 0 temperature, 1 brightness, 2 contrast
     ColorSchedule colorSchedule;
     HotkeyBindings hotkeys,hotkeySteps;
     bool dimInactive=false;

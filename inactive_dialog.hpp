@@ -611,7 +611,7 @@ public:
     HWND hwnd() const {return window_;}
     void savePlacement() {persistGeometry();}
     void close() {if(window_) DestroyWindow(window_);}
-    void activate() {if(window_) {if(IsIconic(window_)) ShowWindow(window_,SW_RESTORE);SetForegroundWindow(window_);}}
+    void activate() {if(window_) {if(IsIconic(window_)) ShowWindow(window_,SW_RESTORE);raiseNormalAppWindow(window_);}}
     void cancelTest() {
         if(window_) KillTimer(window_,TestTimer);
         if(testing_) {
@@ -677,7 +677,7 @@ public:
         DwmSetWindowAttribute(created,DWMWA_TRANSITIONS_FORCEDISABLED,&disable,sizeof(disable));
         ShowWindow(created,SW_SHOW);
         recordNormalGeometry();
-        SetForegroundWindow(created);
+        raiseNormalAppWindow(created);
         return true;
     }
 };

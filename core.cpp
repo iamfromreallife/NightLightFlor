@@ -530,6 +530,9 @@ bool Model::load() {
         appearance=="dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = general.get("close_by_clicking_outside").boolean(true);
     preferences_.ddcControls=general.get("ddc_controls").boolean(true);
+    preferences_.linkDisplays=general.get("link_displays").boolean(false);
+    preferences_.trayWheelEnabled=general.get("tray_wheel_enabled").boolean(false);
+    preferences_.trayWheelMode=std::clamp(general.get("tray_wheel_mode").integer(0),0,2);
     const auto& schedule=general.get("color_schedule");
     ColorSchedule loadedSchedule;
     loadedSchedule.enabled=schedule.get("enabled").boolean(false);
@@ -681,6 +684,9 @@ bool Model::save() {
     root_["general"]["appearance"] = toUtf8(preferences_.theme);
     root_["general"]["close_by_clicking_outside"] = preferences_.closeByClickingOutside;
     root_["general"]["ddc_controls"]=preferences_.ddcControls;
+    root_["general"]["link_displays"]=preferences_.linkDisplays;
+    root_["general"]["tray_wheel_enabled"]=preferences_.trayWheelEnabled;
+    root_["general"]["tray_wheel_mode"]=preferences_.trayWheelMode;
     const auto& schedule=preferences_.colorSchedule;
     auto& scheduleJson=root_["general"]["color_schedule"];
     scheduleJson=portable::Json::object();
@@ -730,7 +736,7 @@ bool Model::save() {
     auto clean=portable::Json::object();
     clean["screen"]["kelvin"]=std::clamp(root_.get("screen").get("kelvin").integer(5000),1000,6500);
     clean["general"]=portable::Json::object();
-    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_seconds","dim_all","dim_displays","ddc_controls","color_schedule","hotkeys","hotkey_steps"})
+    for(const char* key:{"language","appearance","close_by_clicking_outside","dim_inactive","dim_amount","dim_minutes","dim_seconds","dim_all","dim_displays","ddc_controls","link_displays","tray_wheel_enabled","tray_wheel_mode","color_schedule","hotkeys","hotkey_steps"})
         clean["general"][key]=root_.get("general").get(key);
     if (windowPosition_) {
         clean["general"]["window_position"]["x"]=windowPosition_->x;
@@ -1461,6 +1467,9 @@ void Model::updatePreferences(const Preferences& updated) {
         updated.theme==L"dark"?L"dark":L"system";
     preferences_.closeByClickingOutside = updated.closeByClickingOutside;
     preferences_.ddcControls=updated.ddcControls;
+    preferences_.linkDisplays=updated.linkDisplays;
+    preferences_.trayWheelEnabled=updated.trayWheelEnabled;
+    preferences_.trayWheelMode=std::clamp(updated.trayWheelMode,0,2);
     preferences_.colorSchedule=normalizedSchedule(updated.colorSchedule);
     preferences_.hotkeys=updated.hotkeys;
     preferences_.hotkeySteps=updated.hotkeySteps;

@@ -6,6 +6,8 @@
 #include "display_identity.hpp"
 #include "ddc.hpp"
 #include "motion.hpp"
+#include "normal_window.hpp"
+#include "display_controls.hpp"
 #include "update_version.hpp"
 #include "release_markdown.hpp"
 #include "wmi_brightness.hpp"
@@ -24,6 +26,53 @@ void check(bool ok,const char* message) {
 }
 int main() {
     try {
+        {
+            check(trayWheelDropdownWidth(220,160)==254 && trayWheelDropdownWidth(310,160)==190,
+                "Tray wheel checkbox and dropdown share one row with room for localized text");
+            for(int checkbox=80;checkbox<=500;++checkbox)for(int choice=80;choice<=300;choice+=10){
+                const int width=trayWheelDropdownWidth(checkbox,choice);
+                check(width>=120 && width<=254 && 26+500-width+8==534-width,
+                    "Tray wheel row keeps the gap and right alignment");
+            }
+            for(int dpi:{96,120,144,168,192,240,288}){
+                const int row=(110*dpi+48)/96;
+                const int oldMinimum=450+row, newMinimum=450;
+                for(int padding:{0,25,100})for(int bottom:{-200,200,900,1700}){
+                    const int full=oldMinimum+padding;
+                    const int compact=linkedWindowHeight(full,oldMinimum,newMinimum);
+                    check(compact==full-row && linkedWindowHeight(compact,newMinimum,oldMinimum)==full,
+                        "Link and unlink preserve extra height and reverse the resize");
+                    check(bottomAnchoredWindowTop(bottom,compact)+compact==bottom &&
+                        bottomAnchoredWindowTop(bottom,full)+full==bottom,
+                        "Link and unlink preserve the outer window bottom edge");
+                }
+            }
+            check(bottomAnchoredWindowTop(900,400,0,1000)==500 &&
+                bottomAnchoredWindowTop(300,600,0,1000)==0 &&
+                bottomAnchoredWindowTop(-100,400,-1080,0)==-500,
+                "Bottom anchor is exact when feasible and clamped to work area otherwise");
+            std::vector<int> chips{180,190,126};
+            fitLinkedDisplayChips(chips,365,108,6);
+            check(chips[0]>=108 && chips[1]>=108 && chips[2]==126 && chips[0]+chips[1]+chips[2]+12<=365,"Linked display switch fits beside shortened monitor labels");
+            std::vector<int> narrow{180,190,126};fitLinkedDisplayChips(narrow,200,108,6);
+            check(narrow==std::vector<int>({180,190,126}),"Narrow windows retain normal wrapping");
+            int wheel=0;check(accumulateTrayWheel(wheel,60)==0 && accumulateTrayWheel(wheel,60)==1 && wheel==0,"High resolution wheel accumulates one notch");
+            check(accumulateTrayWheel(wheel,-240)==-2 && wheel==0,"Negative multi-notch wheel input");
+            check(steppedDisplayValue(6400,2,100,100,1000,6500)==6500 && steppedDisplayValue(5,-2,5,7,0,100)==0,"Group adjustment clamps ranges");
+            check(hardwareWheelPosition(4700,1)==4800 && hardwareWheelPosition(4700,-2)==4500 && hardwareWheelPosition(9950,2)==10000 && hardwareWheelPosition(20,-1)==0,"Buffered DDC wheel uses one percent per notch and clamps endpoints");
+            check(!hardwareInputReady(true,true,0,false) && hardwareInputReady(true,true,1,false) && !hardwareInputReady(false,false,1,false) && !hardwareInputReady(true,true,1,true),"Hardware controls wait for stable topology, not for all recovery retries");
+            const std::array<std::wstring,3> labels{L"Color temperature",L"Brightness",L"Contrast"};
+            std::vector<TrayDisplayValues> values{{L"AOC",{4110,47,50}},{L"Ntech",{4110,47,50}}};
+            const auto common=displayTrayTooltip(values,labels);
+            check(common==L"NightLight\nColor temperature: 4110 K\nBrightness: 47%\nContrast: 50%","Tray tooltip shows common values");
+            values[1].values[1]=65;
+            const auto differing=displayTrayTooltip(values,labels);
+            check(differing.find(L"AOC: 4110 K / 47% / 50%")!=std::wstring::npos && differing.find(L"Ntech: 4110 K / 65% / 50%")!=std::wstring::npos,"Tray tooltip shows individual values when they differ");
+            values[1].name=std::wstring(200,L'X');values[0].values[2]=std::nullopt;
+            const auto compact=displayTrayTooltip(values,labels);
+            check(compact.size()<=127 && compact.find(L"47–65%")!=std::wstring::npos && compact.find(L"50% / —")!=std::wstring::npos,"Tray tooltip bounds length, preserves differing and unavailable values");
+
+        }
         {
             // Match separately rounded Win32 layout coordinates and row height.
             for(int dpi : {96,120,144,168,192,240,288}) {
@@ -918,6 +967,33 @@ int main() {
             check(percent.right==(width-sliderWidth)/2+sliderWidth,
                 "Odd window sizes keep percentages exactly aligned with Kelvin labels");
         }
+        // Hidden windows exercise real Win32 ownership without changing the
+        // user's foreground window or displaying any regression-test UI.
+        {
+            NormalFrameOwner mainOwner,settingsOwner;
+            const HINSTANCE instance=GetModuleHandleW(nullptr);
+            const HWND a=mainOwner.ensure(instance),b=settingsOwner.ensure(instance);
+            check(a&&b&&a!=b,"Modeless frames have separate private owners");
+            check(mainOwner.ensure(instance)==a && !IsWindowVisible(a) && !IsWindowVisible(b),
+                "Private owners remain hidden and survive frame recreation");
+            check((GetWindowLongPtrW(a,GWL_EXSTYLE)&WS_EX_NOACTIVATE)!=0 && !isTopmostFrame(a),
+                "Private owner cannot activate and is not topmost");
+            const HWND mainFrame=CreateWindowExW(0,L"NightLight.NormalFrameOwner.Win32",L"",WS_OVERLAPPEDWINDOW,
+                0,0,100,100,a,nullptr,instance,nullptr);
+            const HWND settingsFrame=CreateWindowExW(0,L"NightLight.NormalFrameOwner.Win32",L"",WS_OVERLAPPEDWINDOW,
+                0,0,100,100,b,nullptr,instance,nullptr);
+            check(mainFrame&&settingsFrame&&GetWindow(mainFrame,GW_OWNER)==a&&GetWindow(settingsFrame,GW_OWNER)==b,
+                "Normal frames never share an ownership group");
+            check(!isTopmostFrame(mainFrame)&&!isTopmostFrame(settingsFrame),"Both normal frames start outside the topmost band");
+            check(frameReceivesMessage(mainFrame,mainFrame)&&!frameReceivesMessage(mainFrame,settingsFrame)&&
+                !frameReceivesMessage(mainFrame,nullptr),"Dialog routing never consumes another frame's messages");
+            normalizeFrameZOrder(mainFrame);normalizeFrameZOrder(settingsFrame);
+            check(!isTopmostFrame(mainFrame)&&!isTopmostFrame(settingsFrame),"Normalization leaves normal frames normal");
+            check(!IsWindowVisible(mainFrame)&&!IsWindowVisible(settingsFrame),"Z-order normalization does not show hidden frames");
+            // Owners destroy only their own frames, not a sibling dialog.
+            mainOwner.reset();
+            check(!IsWindow(mainFrame)&&IsWindow(settingsFrame),"Independent owner lifetime does not close other modeless frames");
+        }
         // Initial silent startup must not activate another window.
         // Interactive show/hide is handled by Win32/DWM.
         check((kHideToTrayFlags&SWP_HIDEWINDOW)!=0 &&
@@ -1041,6 +1117,8 @@ int main() {
             updated.locale=L"en-US";
             updated.theme=L"system";
             check(!updated.dimInactive,"Inactivity dimming defaults to disabled");
+            check(!updated.linkDisplays && !updated.trayWheelEnabled && updated.trayWheelMode==0,"Linked displays and wheel opt-in by default");
+            updated.linkDisplays=true;updated.trayWheelEnabled=true;updated.trayWheelMode=2;
             updated.ddcControls=false;updated.colorSchedule={true,{{360,6000},{720,4500},{1200,3000}},ScheduleMode::Custom,20};
             updated.hotkeys[L""]={0x0241,0,0x0242,0};
             updated.hotkeySteps[L""]={7,8,150,200};updated.hotkeySteps[L"MONITOR-A"]={2,3,50,80};
@@ -1065,6 +1143,7 @@ int main() {
             Model model(root);
             check(model.load(),"Reload from same folder");
             check(model.preferences().locale==L"en-US","Saved language");
+            check(model.preferences().linkDisplays && model.preferences().trayWheelEnabled && model.preferences().trayWheelMode==2,"Linked displays and tray wheel settings round-trip");
             check(!model.preferences().ddcControls && model.preferences().colorSchedule.enabled &&
                   model.preferences().colorSchedule.points.size()==3 && model.preferences().colorSchedule.points.front().minute==360 &&
                   model.preferences().colorSchedule.mode==ScheduleMode::Custom && model.preferences().colorSchedule.transitionMinutes==20 &&

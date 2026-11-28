@@ -81,7 +81,7 @@ public:
     // have been reassigned to different physical panels.
     void invalidateTopology();
     void poll(const std::wstring& device); // silent read; does not disable live sliders
-    bool set(const std::wstring& device, DdcFeature feature, int percent);
+    bool set(const std::wstring& device, DdcFeature feature, int percent, const std::wstring& physicalId=L"");
     DdcState state(const std::wstring& device);
     void stop();
 private:

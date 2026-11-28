@@ -9,6 +9,10 @@
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include <fstream>
+#include <cstdio>
+#include <iterator>
 #include <richedit.h>
 #include <uxtheme.h>
 #include <vssym32.h>
@@ -29,6 +33,7 @@
 #include "location_service.hpp"
 #include <memory>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -40,6 +45,8 @@
 #include "menu_icons.hpp"
 #include "paint_surface.hpp"
 #include "startup_task.hpp"
+#include "normal_window.hpp"
+#include "display_controls.hpp"
 #include "inactive_media.hpp"
 #include "update_checker.hpp"
 #include "release_markdown.hpp"
@@ -53,7 +60,9 @@ using nightlight::Preferences;
 namespace {
 constexpr int ID_DDC_SLIDER_BASE = 5000, ID_DDC_MONITOR_BASE = 6000;
 constexpr int ID_RENAME_EDIT = 1006;
-constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012, ID_SCREEN_OFF = 1013;
+constexpr int ID_GAMMA = 1010, ID_REFRESH = 1012, ID_SCREEN_OFF = 1013, ID_LINK_DISPLAYS=1014;
+constexpr UINT TIMER_TRAY_WHEEL=28,TIMER_WHEEL_POPUP=29,TIMER_CAPTURE_LOG=30;
+constexpr UINT WM_TRAY_WHEEL=WM_APP+46;
 constexpr UINT TIMER_GAMMA = 11;
 constexpr UINT TIMER_SAVE_DDC = 13;
 constexpr UINT TIMER_ANIMATION = 16;
@@ -670,6 +679,12 @@ void paintRefreshGlyph(HDC dc,const RECT& rc,const Gdiplus::GraphicsPath* path,U
     Gdiplus::SolidBrush brush(drawingColor(color));g.FillPath(&brush,path);
 }
 
+// Raise only the explicitly requested normal window, never its hidden tray
+// owner or other NightLight frames. This does not pin it above other apps.
+void raiseNormalAppWindow(HWND window) {
+    nightlight::activateNormalFrame(window);
+}
+
 // The settings frame uses the same palette and primitive painters as the main UI.
 #include "inactive_dialog.hpp"
 #include "update_dialog.hpp"
@@ -933,6 +948,7 @@ public:
     }
     ~NativeApp() {
         shuttingDown_=true;
+        stopTrayWheel();
         if(dimSettings_) dimSettings_->close();
         dimSettings_.reset();
         settingsWindow_.reset();
@@ -940,6 +956,10 @@ public:
         updateWindow_.reset();
         updateRequest_.reset();
         removeTray();
+        // Destroy any surviving frames while their UI resources and tray
+        // host are still valid (normally the main frame has already closed).
+        mainFrameOwner_.reset();settingsFrameOwner_.reset();
+        updateFrameOwner_.reset();dimFrameOwner_.reset();
         if (taskbarOwner_) DestroyWindow(taskbarOwner_);
         for (HFONT font : fonts_) if (font) DeleteObject(font);
         // Cached native paths must die before the GDI+ runtime.
@@ -1018,18 +1038,19 @@ public:
             y=std::clamp(y,static_cast<int>(area.top),
                 std::max(static_cast<int>(area.top),static_cast<int>(area.bottom)-windowHeight));
         }
-        // A hidden owner keeps the visible window off the taskbar without
-        // changing its regular title bar, resizing, or caption buttons.
-        // This permanently hidden top-level owner also hosts the tray icon,
-        // worker callbacks and timers. It survives every visual frame.
+        // The stable tray host keeps tray and transient overlay windows separate
+        // from the regular modeless frames. Private hidden owners retain the
+        // native title bars and taskbar suppression without coupling Z-order.
         taskbarOwner_ = CreateWindowExW(WS_EX_TOOLWINDOW, SERVICE_CLASS_NAME, L"NightLight Service",
             WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, this);
         if (!taskbarOwner_) return 4;
         dimOverlays_.setHost(taskbarOwner_);
+        const HWND mainOwner=mainFrameOwner_.ensure(instance_);
+        if(!mainOwner)return 4;
         window_ = CreateWindowExW(0, CLASS_NAME, L"NightLight",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x, y, windowWidth, windowHeight,
-            taskbarOwner_, nullptr, instance_, this);
+            mainOwner, nullptr, instance_, this);
         if (!window_) return 4;
 
         // Enforce the fully expanded contents before any visible paint.
@@ -1053,7 +1074,8 @@ public:
             if(settingsWindow_ && settingsWindow_->pretranslate(msg)) continue;
             const bool inlineKey=msg.hwnd==editName_ && msg.message==WM_KEYDOWN &&
                 (msg.wParam==VK_RETURN || msg.wParam==VK_ESCAPE);
-            if (inlineKey || !IsDialogMessageW(window_, &msg)) {
+            if (inlineKey || !nightlight::frameReceivesMessage(window_,msg.hwnd) ||
+                !IsDialogMessageW(window_, &msg)) {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -1103,6 +1125,7 @@ private:
     bool colorWatchdogRunning_=false,hardwarePollRunning_=false,hardwareDiscovered_=false;
     nightlight::PaintSurface pageSurface_;
     HWND taskbarOwner_ = nullptr;
+    nightlight::NormalFrameOwner mainFrameOwner_,settingsFrameOwner_,updateFrameOwner_,dimFrameOwner_;
     struct HardwareRow {
         std::wstring device;
         std::wstring physicalKey;
@@ -1127,12 +1150,25 @@ private:
     bool displayRecoveryActive_=false;
     bool restoreDdcAfterWake_=false;
     unsigned recoveryPass_=0;
+    bool recoveryHardwareStable_=false;
     unsigned recoverySettleChecks_=0;
     bool recoveryVerificationIssued_=false;
     bool startupColorTimer_=false;
     int hardwareTop_ = 0;
     int hardwareHeight_ = 186;
-    HWND btnRefresh_=nullptr, btnScreenOff_=nullptr, editName_=nullptr;
+    HWND btnRefresh_=nullptr, btnScreenOff_=nullptr, btnLink_=nullptr, editName_=nullptr;
+    HHOOK trayWheelHook_=nullptr;
+    inline static NativeApp* wheelOwner_=nullptr;
+    RECT wheelIconBounds_{}; DWORD wheelShellPid_=0;
+    HWND wheelPopup_=nullptr;
+    HFONT wheelPopupFont_=nullptr; UINT wheelPopupDpi_=96; int wheelPopupLanguage_=-1;
+    std::wstring wheelPopupText_;
+    int wheelRemainder_=0;
+    bool captureActive_=false;
+    std::string captureLog_;
+    bool captureTruncated_=false;
+    std::map<std::pair<std::wstring,bool>,int> pendingGroupHardware_;
+    std::set<std::pair<std::wstring,bool>> manualRecoveryHardware_;
     ScreenOffInputGuard screenOffGuard_;
     HWND armedTabSwitch_=nullptr;
     bool editingName_=false;
@@ -1172,12 +1208,14 @@ private:
     UINT taskbarCreated_ = 0;
     NOTIFYICONDATAW notify_ = {};
     bool trayTooltipApplied_=false;
+    std::wstring appliedTrayTooltip_;
     HICON trayIcon_=nullptr;
     int trayIconResource_=0, trayIconWidth_=0, trayIconHeight_=0;
 
     struct Interaction {
         nightlight::Motion hover{0},press{0},position;
         bool repainting=false,trackingMouseLeave=false;
+        int wheelRemainder=0;
         std::unique_ptr<nightlight::PaintSurface> surface;
     };
     std::map<HWND,Interaction> interactions_;
@@ -1254,6 +1292,7 @@ private:
         return RECT{bounds.right-px(48),bounds.top,bounds.right,bounds.bottom};
     }
     void toggleMonitor(size_t index) {
+        captureSnapshot("Display enable toggle requested");
         if (index>=model_.monitors().size()) return;
         model_.updateEnabled(index,!model_.monitors()[index].enabled);
         updateTrayTooltip();
@@ -1383,6 +1422,20 @@ private:
             }
         }
         if (app->hardwareRow(control)) {
+            // Native trackbars draw the thumb directly on wheel input, outside
+            // our buffered WM_PAINT. Own the input as well as the painting.
+            if(msg==WM_MOUSEWHEEL) {
+                if(IsWindowEnabled(control)) {
+                    const int steps=nightlight::accumulateTrayWheel(state.wheelRemainder,GET_WHEEL_DELTA_WPARAM(wp));
+                    const int old=static_cast<int>(SendMessageW(control,TBM_GETPOS,0,0));
+                    const int next=nightlight::hardwareWheelPosition(old,steps);
+                    if(next!=old) {
+                        SendMessageW(control,TBM_SETPOS,FALSE,next);
+                        SendMessageW(app->window_,WM_HSCROLL,TB_THUMBPOSITION,reinterpret_cast<LPARAM>(control));
+                    }
+                }
+                return 0;
+            }
             if ((msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK) && IsWindowEnabled(control)) {
                 app->commitDrag(); app->hardwareDrag_=control;
                 SetFocus(control); SetCapture(control); app->measureHardwareDrag(control);
@@ -1543,7 +1596,7 @@ private:
         sectionTitleFont_ = boldFont_;
         headlineFont_ = create(20, FW_NORMAL);
         tabDesiredWidths_.clear();
-        const HWND controls[] = {btnRefresh_,btnScreenOff_,btnGamma_,btnSettings_,editName_};
+        const HWND controls[] = {btnRefresh_,btnScreenOff_,btnGamma_,btnSettings_,btnLink_,editName_};
         for (HWND control : controls) {
             if (control) SendMessageW(control, WM_SETFONT,
                 reinterpret_cast<WPARAM>(font_), TRUE);
@@ -1592,6 +1645,7 @@ private:
         updateMotionPreference();
         ddc_.setWindow(taskbarOwner_);
         btnRefresh_=createButton(ID_REFRESH,L"");
+        btnLink_=createButton(ID_LINK_DISPLAYS,L"");
         btnScreenOff_=createButton(ID_SCREEN_OFF,L"");
         btnGamma_ = createButton(ID_GAMMA, L"");
         btnSettings_=createButton(ID_SETTINGS,L"");
@@ -1615,6 +1669,7 @@ private:
         displayPowerNotification_=RegisterPowerSettingNotification(taskbarOwner_,&displayStateGuid,DEVICE_NOTIFY_WINDOW_HANDLE);
         taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
         trayReady_ = addTray();
+        syncTrayWheel();
         // Explorer can still be starting when a logon task launches this app.
         // TaskbarCreated is not sufficient if NIM_ADD failed the first time.
         if (!trayReady_) SetTimer(taskbarOwner_,TIMER_TRAY_RETRY,1000,nullptr);
@@ -1649,7 +1704,7 @@ private:
         RedrawWindow(window_,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME);
         repaint();
         for (HWND h : tabs_) InvalidateRect(h, nullptr,FALSE);
-        const HWND buttons[] = {btnRefresh_,btnScreenOff_,btnGamma_,btnSettings_};
+        const HWND buttons[] = {btnRefresh_,btnScreenOff_,btnGamma_,btnSettings_,btnLink_};
         for (HWND b : buttons) if (b) InvalidateRect(b, nullptr,FALSE);
         for (const auto& row:hardwareRows_) { InvalidateRect(row.nameButton,nullptr,FALSE); InvalidateRect(row.brightness,nullptr,FALSE); InvalidateRect(row.contrast,nullptr,FALSE); }
     }
@@ -1662,6 +1717,7 @@ private:
         }
         const auto refreshText=nightlight::translate(language(),L"Detect currently attached displays");
         SetWindowTextW(btnRefresh_,refreshText);
+        SetWindowTextW(btnLink_,tr(L"Link displays",L"Associar ecrãs").c_str());
         TOOLINFOW refreshTool{sizeof(refreshTool)};
         refreshTool.uFlags=TTF_IDISHWND|TTF_SUBCLASS;
         refreshTool.hwnd=window_;refreshTool.uId=reinterpret_cast<UINT_PTR>(btnRefresh_);
@@ -1743,6 +1799,7 @@ private:
         if (index >= model_.monitors().size()) return;
         commitDrag();
         selected_ = index;
+        if(linked())syncHardware();
         finishInlineRename(true);
         repaint();
         for (HWND tab : tabs_) InvalidateRect(tab, nullptr,FALSE);
@@ -1785,12 +1842,13 @@ private:
             tabWidths.push_back(std::max(px(108),
                 textWidth(monitor.displayName(),boldFont_)+px(88)));
         // The exit animation still draws hardware while it is collapsing.
+        if(model_.monitors().size()>1){tabWidths.push_back(linkWidth());nightlight::fitLinkedDisplayChips(tabWidths,std::max(1,clientWidth-2*(px(nightlight::kCardOuterMarginDip)+px(nightlight::kCardInnerInsetDip))),px(108),px(6));}
         const auto now=uiTime();
         const bool hardwareShown=ddcVisible_ ||
             (hardwareReveal_.active(now) && hardwareReveal_.value(now)>0);
         return nightlight::calculateWindowContentMinimum(
             static_cast<int>(dpi_),clientWidth,tabWidths,
-            hardwareRows_.size(),gammaUnlocked_,hardwareShown);
+            visibleHardwareRows(),gammaUnlocked_,hardwareShown);
     }
     SIZE frameThickness() const {
         RECT frame{};
@@ -1882,14 +1940,19 @@ private:
             panelTop_+px(4),px(nightlight::kScreenOffButtonSizeDip),tabH,TRUE);
         const int tabStart=innerLeft;
         int tabX=tabStart,tabY=panelTop_+px(40),rows=1;
-        for (size_t i=0;i<tabs_.size();++i) {
-            const auto& m=model_.monitors()[i];
+        std::vector<int> chipWidths;chipWidths.reserve(tabs_.size()+1);
+        for(const auto& m:model_.monitors()){
             auto stored=tabDesiredWidths_.find(m.device);
             if(stored==tabDesiredWidths_.end())stored=tabDesiredWidths_.emplace(
                 m.device,std::max(px(108),textWidth(m.displayName(),boldFont_)+px(88))).first;
+            chipWidths.push_back(stored->second);
+        }
+        if(tabs_.size()>1){chipWidths.push_back(linkWidth());nightlight::fitLinkedDisplayChips(chipWidths,std::max(1,tabsRight-tabStart),px(108),tabGap);}
+        for (size_t i=0;i<tabs_.size();++i) {
+            const auto& m=model_.monitors()[i];
             // On very narrow windows, ellipsize the name rather than
             // enlarging the entire window beyond the user's chosen width.
-            const int tabW=std::min(stored->second,std::max(px(1),tabsRight-tabStart));
+            const int tabW=std::min(chipWidths[i],std::max(px(1),tabsRight-tabStart));
             if (tabX>tabStart && tabX+tabW>tabsRight) { tabX=tabStart; tabY+=px(38); ++rows; }
             place(tabs_[i],tabX,tabY,tabW,tabH,TRUE);
             if(editingName_ && m.device==editingDevice_) {
@@ -1900,6 +1963,12 @@ private:
             }
             tabX+=tabW+tabGap;
         }
+        if(tabs_.size()>1){
+            const int w=std::min(chipWidths.back(),std::max(px(1),tabsRight-tabStart));
+            if(tabX>tabStart && tabX+w>tabsRight){tabX=tabStart;tabY+=px(38);++rows;}
+            place(btnLink_,tabX,tabY,w,tabH,TRUE);
+            if(!(GetWindowLongPtrW(btnLink_,GWL_STYLE)&WS_VISIBLE))ShowWindow(btnLink_,SW_SHOWNA);
+        }else if(GetWindowLongPtrW(btnLink_,GWL_STYLE)&WS_VISIBLE)ShowWindow(btnLink_,SW_HIDE);
         const bool screenOffEnabled=!tabs_.empty();
         if((IsWindowEnabled(btnScreenOff_)!=FALSE)!=screenOffEnabled)
             EnableWindow(btnScreenOff_,screenOffEnabled);
@@ -1926,18 +1995,19 @@ private:
         hardwareTop_=secondPanelTop_+temperatureHeight_+px(nightlight::kCardsGapDip);
         hardwareHeight_=px(hardwareRows_.empty()?72:
             nightlight::kDdcSectionBaseDip+
-                nightlight::kDdcRowStepDip*static_cast<int>(hardwareRows_.size()));
+                nightlight::kDdcRowStepDip*static_cast<int>(visibleHardwareRows()));
         const int percentTextWidth=std::max(px(1),textWidth(L"100 %",smallFont_));
         const int hardwareSliderWidth=nightlight::ddcSliderWidth(
             static_cast<int>(dpi_),width_,percentTextWidth);
         for (size_t i=0;i<hardwareRows_.size();++i) {
             auto& row=hardwareRows_[i];
+            if(i>=visibleHardwareRows()){for(HWND h:{row.nameButton,row.brightness,row.contrast})if(GetWindowLongPtrW(h,GWL_STYLE)&WS_VISIBLE)ShowWindow(h,SW_HIDE);continue;}
             row.topMotion.to(hardwareTop_+px(nightlight::kDdcFirstRowTopDip+
                 nightlight::kDdcRowStepDip*static_cast<int>(i)),
                 layoutTime_,180,
                 reorderInProgress_ && animations_ && windowPresented());
             row.top=static_cast<int>(std::round(row.topMotion.value(layoutTime_)));
-            const auto& name=model_.monitors()[i].displayName();
+            const auto name=linked()?tr(L"All monitors",L"Todos os ecrãs"):model_.monitors()[i].displayName();
             const int nameWidth=std::max(px(44),std::min({
                 // Icon begins 10px from the left; leave the same 10px
                 // after the measured name on the right (32px icon/text
@@ -2054,7 +2124,7 @@ private:
             nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_),highContrast_);
     }
     void drawSlider(HDC dc) {
-        const bool enabled = hasMonitor() && selectedMonitor()->enabled;
+        const bool enabled = temperatureEnabled();
         const Palette p=palette();
         const COLORREF stops[] = {
             RGB(237,103,76), RGB(248,167,99), RGB(255,224,161),
@@ -2077,7 +2147,7 @@ private:
             Gdiplus::LinearGradientBrush brush(Gdiplus::PointF(x,y),Gdiplus::PointF(x+w,y),gradient[0],gradient[4]);
             brush.SetInterpolationColors(gradient,positions,5); graphics.FillPath(&brush,&path);
         }
-        const int current=hasMonitor()?selectedMonitor()->kelvin:5000;
+        const int current=temperatureValue();
         if (dragging_) temperaturePosition_.snap(current);
         else animate(temperaturePosition_,current,160);
         animate(temperatureEngagement_,dragging_?1.0:(temperatureHover_?0.35:0.0),120);
@@ -2143,7 +2213,7 @@ private:
         const bool narrowTemperature=width_<px(350);
         const int temperatureShift=narrowTemperature?
             px(nightlight::kTemperatureNarrowExtraDip):0;
-        const int current=hasMonitor()?selectedMonitor()->kelvin:5000;
+        const int current=temperatureValue();
         const std::wstring temperatureText=formatNumber(current)+L" K";
         // Both headings occupy the same 24-DIP baseline on normal widths.
         // On narrow windows the Kelvin value uses the next line to avoid
@@ -2257,7 +2327,7 @@ private:
                 SendMessageW(slider,TBM_SETRANGE,TRUE,MAKELPARAM(0,10000));
                 SendMessageW(slider,TBM_SETLINESIZE,0,100);
                 SendMessageW(slider,TBM_SETPAGESIZE,0,1000);
-                SendMessageW(slider,TBM_SETPOS,TRUE,model_.hardwarePercent(row.device,offset==1)*100);
+                SendMessageW(slider,TBM_SETPOS,FALSE,model_.hardwarePercent(row.device,offset==1)*100);
                 SendMessageW(slider,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
                 // A custom WM_PAINT subclass replaces the native themed
                 // trackbar paint entirely; its input/range logic remains.
@@ -2597,6 +2667,11 @@ private:
         const int step=nightlight::hotkeyStepsFor(model_.preferences().hotkeySteps,key)[action];
         // Ignore stale WM_HOTKEY messages queued before a settings change.
         if(HIWORD(message)!=(binding&255) || (LOWORD(message)&(MOD_ALT|MOD_CONTROL|MOD_SHIFT|MOD_WIN))!=(hotkeyModifiers(binding)&~MOD_NOREPEAT))return;
+        if(linked()){
+            if(action<2){if(auto current=sharedHardwareValue(false))applyHardwareAll(false,std::clamp(*current+(action==0?step:-step),0,100));else refreshHardware();syncHardware();}
+            else if(temperatureEnabled()){applyTemperature(std::clamp(temperatureValue()+(action==2?step:-step),1000,6500),true,true);syncColorWatchdog();}
+            repaint();return;
+        }
         bool changed=false,brightnessChanged=false;
         for(size_t i=0;i<model_.monitors().size();++i){
             const auto& mon=model_.monitors()[i];
@@ -2668,7 +2743,7 @@ private:
         for(size_t i=0;i<model_.monitors().size();++i){
             const auto& mon=model_.monitors()[i];const auto key=nightlight::monitorProfileKey(mon);
             if(!mon.enabled){lastScheduledTargets_.erase(key);continue;}
-            if(dragging_ && i==selected_)continue;
+            if(dragging_ && (linked() || i==selected_))continue;
             const auto previous=lastScheduledTargets_.find(key);
             // Do not fight manual adjustment during a stable schedule phase.
             if(previous!=lastScheduledTargets_.end() && previous->second==desired.kelvin)continue;
@@ -2718,14 +2793,25 @@ private:
         }
         return false;
     }
+    void normalizeRegularFrames() {
+        nightlight::normalizeFrameZOrder(window_);
+        if(settingsWindow_)nightlight::normalizeFrameZOrder(settingsWindow_->hwnd());
+        if(updateWindow_)nightlight::normalizeFrameZOrder(updateWindow_->hwnd());
+        if(dimSettings_)nightlight::normalizeFrameZOrder(dimSettings_->hwnd());
+    }
     void openSettings() {
-        if(settingsWindow_ && settingsWindow_->hwnd()){settingsWindow_->setOwner(windowPresented()?window_:taskbarOwner_);settingsWindow_->activate();syncFocusToTray();return;}
+        normalizeRegularFrames();
+        if(settingsWindow_ && settingsWindow_->hwnd()){settingsWindow_->activate();syncFocusToTray();return;}
         settingsWindow_.reset();
-        settingsWindow_=std::make_unique<NightLightSettingsDialog>(instance_,windowPresented()?window_:taskbarOwner_,
+        const HWND owner=settingsFrameOwner_.ensure(instance_);
+        if(!owner)return;
+        settingsWindow_=std::make_unique<NightLightSettingsDialog>(instance_,owner,
             [this]() -> const Preferences& {return model_.preferences();},
             [this]() -> const std::vector<Monitor>& {return model_.monitors();},
             [this](int kind,int value)->bool {
                 if(kind==26){startUpdate();return true;}
+                if(kind==27){if(value!=-1)toggleCapture();return captureActive_;}
+                if(kind==28 || kind==29){auto p=model_.preferences();if(kind==28)p.trayWheelEnabled=value!=0;else p.trayWheelMode=std::clamp(value,0,2);model_.updatePreferences(p);wheelRemainder_=0;hideWheelPopup();syncTrayWheel();if(model_.preferences().trayWheelEnabled && model_.preferences().trayWheelMode!=0 && !hardwareDiscovered_)refreshHardware();if(kind==28 && value && !model_.preferences().trayWheelEnabled)MessageBoxW(settingsWindow_->hwnd(),tr(L"Could not enable tray mousewheel control.",L"Não foi possível ativar o controlo pela roda do rato.").c_str(),L"NightLight",MB_OK|MB_ICONWARNING);return kind==29 || !value || model_.preferences().trayWheelEnabled;}
                 if(kind==25){suspendGlobalHotkeys(value!=0);return true;}
                 if(kind==20){populateLanguage(value);return true;}
                 if(kind==21){setTheme(value==1?L"light":value==2?L"dark":L"system");return true;}
@@ -2787,6 +2873,7 @@ private:
         return false;
     }
     void openInactiveSettings() {
+        normalizeRegularFrames();
         if(dimSettings_ && dimSettings_->hwnd()) {
             dimSettings_->activate();
             return;
@@ -2794,6 +2881,8 @@ private:
         // Every opening creates a fresh, normal HWND so DWM can perform the
         // same first-show transition that the main window uses.
         dimSettings_.reset();
+        const HWND owner=dimFrameOwner_.ensure(instance_);
+        if(!owner)return;
         dimDialogOpen_=true;
         // Saved settings remain active while this window is open. Only
         // the explicit preview temporarily owns the dimming overlays.
@@ -2838,7 +2927,7 @@ private:
             syncInactiveDimming();
             tickInactiveDimming();
         };
-        dimSettings_=std::make_unique<InactiveSettingsWindow>(instance_,taskbarOwner_,
+        dimSettings_=std::make_unique<InactiveSettingsWindow>(instance_,owner,
             model_.preferences(),std::move(choices),language(),test,closed,
             model_.inactiveWindowGeometry(),
             [this](const RECT& r){if(model_.rememberInactiveWindowGeometry(r)) model_.save();},
@@ -2854,6 +2943,7 @@ private:
     void scheduleDisplayRecovery() {
         schedulePreviewActive_=false;
         if (!displayRecoveryActive_) {
+            manualRecoveryHardware_.clear();
             recoveryPass_=0;
             recoverySettleChecks_=0;
             recoveryVerificationIssued_=false;
@@ -2870,22 +2960,38 @@ private:
             model_.beginDisplayRecovery();
         }
         displayRecoveryActive_=true;
+        recoveryHardwareStable_=false;
+        syncHardware();
         syncColorWatchdog(); syncHardwarePoll();
         if (displayAwake_) SetTimer(taskbarOwner_,TIMER_DISPLAYS,750,nullptr);
     }
+    bool hardwareInputReady() const {
+        return nightlight::hardwareInputReady(displayAwake_,displayRecoveryActive_,recoveryHardwareStable_?recoveryPass_:0,screenOffGuard_.guarding());
+    }
+    bool setHardwareManual(const Monitor& mon,bool contrast,int percent) {
+        if(!hardwareInputReady())return false;
+        if(!ddc_.set(mon.device,contrast?nightlight::DdcFeature::Contrast:nightlight::DdcFeature::Brightness,percent,displayRecoveryActive_?mon.physicalId:L""))return false;
+        if(displayRecoveryActive_)manualRecoveryHardware_.emplace(nightlight::monitorProfileKey(mon),contrast);
+        if(model_.rememberHardwarePercent(mon.device,contrast,percent))SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);
+        return true;
+    }
     void syncHardware() {
+        flushPendingGroupHardware();
         HWND capture=GetCapture();
         for (auto& row:hardwareRows_) {
             const auto state=ddc_.state(row.device);
             auto sync=[&](HWND slider,bool contrast,const nightlight::DdcValue& value) {
-                const bool enabled=ddcVisible_ && displayAwake_ && !displayRecoveryActive_ && !state.loading && value.supported;
+                const bool representative=linked() && &row==&hardwareRows_.front();
+                const auto shared=representative?sharedHardwareValue(contrast):std::optional<int>{};
+                const bool enabled=ddcVisible_ && hardwareInputReady() && (representative?shared.has_value():value.supported);
+                const int shown=shared.value_or(value.hasValue?value.percent:model_.hardwarePercent(row.device,contrast));
                 bool visualChange=(IsWindowEnabled(slider)!=FALSE)!=enabled;
                 if(visualChange) {EnableWindow(slider,enabled);capture=GetCapture();}
                 const bool captured=capture==slider;
                 if (!captured) {
                     const int current=static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0));
-                    if ((current+50)/100!=value.percent) {
-                        SendMessageW(slider,TBM_SETPOS,FALSE,value.percent*100);
+                    if ((current+50)/100!=shown) {
+                        SendMessageW(slider,TBM_SETPOS,FALSE,shown*100);
                         visualChange=true;
                     }
                 }
@@ -2898,6 +3004,7 @@ private:
             };
             sync(row.brightness,false,state.brightness); sync(row.contrast,true,state.contrast);
         }
+        updateTrayTooltip();
     }
     void toggleHardware() {
         ddcVisible_=!ddcVisible_;
@@ -2944,7 +3051,7 @@ private:
             drawTextAt(dc,tr(L"No connected displays",L"Nenhum ecrã ligado"),empty,font_,p.muted);
         }
         const int percentTextWidth=std::max(px(1),textWidth(L"100 %",smallFont_));
-        for (size_t i=0;i<hardwareRows_.size();++i) {
+        for (size_t i=0;i<visibleHardwareRows();++i) {
             const auto& row=hardwareRows_[i];
             const auto state=ddc_.state(row.device);
             // Centre the actual visible Fluent glyph with the middle of
@@ -2967,14 +3074,16 @@ private:
             drawChannel(row.brightness,row.top+px(36),false);
             drawChannel(row.contrast,row.top+px(66),true);
             std::wstring message;
-            if (state.brightness.failed || state.contrast.failed)
+            bool failed=state.brightness.failed || state.contrast.failed;
+            if(linked())for(const auto& m:model_.monitors()){const auto current=ddc_.state(m.device);failed=failed || current.brightness.failed || current.contrast.failed;}
+            if (failed)
                 message=tr(L"The monitor did not accept the adjustment. Try again.",
                     L"O monitor não aceitou o ajuste. Tente novamente.");
             // Report DDC errors alongside the monitor name rather than
             // reserving a permanently empty footer below the sliders.
             if (!message.empty()) {
                 const int nameWidth=std::max(px(44),std::min({
-                    textWidth(model_.monitors()[i].displayName(),boldFont_)+px(42),
+                    textWidth(linked()?tr(L"All monitors",L"Todos os ecrãs"):model_.monitors()[i].displayName(),boldFont_)+px(42),
                     px(279),right-left}));
                 const int statusLeft=std::min(right-px(1),left+nameWidth+px(6));
                 RECT status{statusLeft,row.top,right-px(4),row.top+px(32)};
@@ -3041,6 +3150,7 @@ private:
             const auto& mon=model_.monitors()[index];
             active=index==selected_;
             label=screenButton && editingName_ && mon.device==editingDevice_?L"":mon.displayName();
+            if(ddcButton && linked())label=tr(L"All monitors",L"Todos os ecrãs");
             if (active) {
                 // Give the selected monitor the same darker background in
                 // both Screens and DDC/CI, without affecting unselected chips.
@@ -3092,6 +3202,13 @@ private:
             text.left+=px(32);
             text.right-=screenButton?px(52):px(8);
         }
+        if(id==ID_LINK_DISPLAYS){
+            text.right-=px(42);
+            const bool on=linked();const int cy=(rc.top+rc.bottom)/2;
+            RECT r{rc.right-px(38),cy-px(9),rc.right-px(6),cy+px(9)};
+            rounded(dc,r,px(18),on?p.accent:p.card,on?p.accent:p.muted);
+            smoothCircle(dc,static_cast<float>(r.left+px(on?23:9)),static_cast<float>(cy),static_cast<float>(px(6)),on?RGB(255,255,255):p.subtle);
+        }
         if (screenButton) {
             // One independent animated switch lives inside every monitor tab.
             const auto& monitor=model_.monitors()[static_cast<size_t>(id-ID_MONITOR_BASE)];
@@ -3114,17 +3231,30 @@ private:
         RestoreDC(dc,savedDC);
         if (paint) EndBufferedPaint(paint,TRUE);
     }
+    std::wstring trayTooltipText() {
+        std::vector<nightlight::TrayDisplayValues> values;
+        for(const auto& m:model_.monitors()) {
+            const auto state=ddc_.state(m.device);
+            auto hardware=[](const nightlight::DdcValue& v)->std::optional<int>{
+                if(v.supported && v.hasValue)return v.percent;return std::nullopt;
+            };
+            values.push_back({m.displayName(),{m.enabled?std::optional<int>(m.kelvin):std::nullopt,hardware(state.brightness),hardware(state.contrast)}});
+        }
+        return nightlight::displayTrayTooltip(values,{tr(L"Color temperature",L"Temperatura de cor"),tr(L"Brightness",L"Brilho"),tr(L"Contrast",L"Contraste")});
+    }
     void updateTrayTooltip() {
-        // The text in the local NOTIFYICONDATA does not prove Explorer
-        // accepted it. Version 4 also needs NIF_SHOWTIP for standard tips.
-        if(!trayReady_ || trayTooltipApplied_) return;
+        if(!trayReady_)return;
+        const auto text=trayTooltipText();
+        if(trayTooltipApplied_ && text==appliedTrayTooltip_)return;
         NOTIFYICONDATAW tip{};
         tip.cbSize=sizeof(tip);tip.hWnd=taskbarOwner_;tip.uID=TRAY_ID;
         tip.uFlags=NIF_TIP|NIF_SHOWTIP;
-        wcscpy_s(tip.szTip,L"NightLight");
+        wcscpy_s(tip.szTip,text.c_str());
         trayTooltipApplied_=Shell_NotifyIconW(NIM_MODIFY,&tip)!=FALSE;
+        if(trayTooltipApplied_)appliedTrayTooltip_=text;
     }
     void refreshConnectedDisplays() {
+        captureSnapshot("Refresh displays requested");
         if(displayRecoveryActive_ || !displayAwake_) { scheduleDisplayRecovery(); return; }
         finishInlineRename(true);commitDrag();endHardwareDrag();
         const std::wstring selectedDevice=hasMonitor()?
@@ -3179,13 +3309,184 @@ private:
         SetTimer(taskbarOwner_, TIMER_GAMMA, 250, nullptr);
     }
 
+    bool linked() const {return model_.preferences().linkDisplays && model_.monitors().size()>1;}
+    size_t visibleHardwareRows() const {return linked()?std::min<size_t>(1,hardwareRows_.size()):hardwareRows_.size();}
+    int linkWidth() const {return std::max(px(125),textWidth(tr(L"Link displays",L"Associar ecrãs"),font_)+px(54));}
+    bool temperatureEnabled() const {
+        if(!hasMonitor())return false;
+        if(!linked())return selectedMonitor()->enabled;
+        return std::any_of(model_.monitors().begin(),model_.monitors().end(),[](const Monitor& m){return m.enabled;});
+    }
+    int temperatureValue() const {
+        if(!hasMonitor())return 5000;
+        if(linked() && !selectedMonitor()->enabled)for(const auto& m:model_.monitors())if(m.enabled)return m.kelvin;
+        return selectedMonitor()->kelvin;
+    }
+    void applyTemperature(int value,bool save,bool all) {
+        if(all){for(size_t i=0;i<model_.monitors().size();++i)model_.previewKelvin(i,value);if(save)model_.save();}
+        else if(hasMonitor()){if(save)model_.updateKelvin(selected_,value);else model_.previewKelvin(selected_,value);}
+        updateTrayTooltip();
+        captureSnapshot("Temperature adjustment");
+    }
+    std::optional<int> sharedHardwareValue(bool contrast) {
+        auto valueFor=[&](const Monitor& m)->std::optional<int>{const auto state=ddc_.state(m.device);const auto& v=contrast?state.contrast:state.brightness;if(v.supported && v.hasValue)return v.percent;return std::nullopt;};
+        if(hasMonitor())if(auto value=valueFor(*selectedMonitor()))return value;
+        for(const auto& m:model_.monitors())if(auto value=valueFor(m))return value;
+        return std::nullopt;
+    }
+    void flushPendingGroupHardware(){
+        if(!hardwareInputReady() || pendingGroupHardware_.empty())return;
+        bool changed=false;
+        for(auto it=pendingGroupHardware_.begin();it!=pendingGroupHardware_.end();){
+            const auto mon=std::find_if(model_.monitors().begin(),model_.monitors().end(),[&](const Monitor& m){return nightlight::monitorProfileKey(m)==it->first.first;});
+            if(mon==model_.monitors().end()){it=pendingGroupHardware_.erase(it);continue;}
+            const auto state=ddc_.state(mon->device);if(state.loading && !(it->first.second?state.contrast:state.brightness).supported){++it;continue;}
+            if(setHardwareManual(*mon,it->first.second,it->second))changed=true;
+            it=pendingGroupHardware_.erase(it);
+        }
+        if(changed)SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);
+    }
+    bool applyHardwareAll(bool contrast,int percent) {
+        if(!hardwareInputReady())return false;
+        bool applied=false;
+        for(const auto& m:model_.monitors()) {
+            const auto key=std::make_pair(nightlight::monitorProfileKey(m),contrast);
+            const auto state=ddc_.state(m.device);
+            if(state.loading && !(contrast?state.contrast:state.brightness).supported){pendingGroupHardware_[key]=percent;continue;}
+            pendingGroupHardware_.erase(key);
+            if(setHardwareManual(m,contrast,percent))applied=true;
+        }
+        if(applied){SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);captureSnapshot(contrast?"Contrast adjustment":"Brightness adjustment");}
+        return applied;
+    }
+    void toggleLink() {
+        if(model_.monitors().size()<2)return;
+        commitDrag();endHardwareDrag();
+        RECT frame{};const bool canResize=window_ && !IsIconic(window_) && !IsZoomed(window_) && GetWindowRect(window_,&frame);
+        const int oldMinimum=canResize?requiredWindowSizeForWidth(frame.right-frame.left).cy:0;
+        const int kelvin=selectedMonitor()->kelvin;
+        auto pref=model_.preferences();pref.linkDisplays=!pref.linkDisplays;model_.updatePreferences(pref);
+        if(!pref.linkDisplays)pendingGroupHardware_.clear();
+        if(linked()){
+            applyTemperature(kelvin,true,true);
+            for(bool contrast:{false,true})if(auto value=sharedHardwareValue(contrast))applyHardwareAll(contrast,*value);
+        }
+        syncHardware();
+        if(canResize){
+            const int newMinimum=requiredWindowSizeForWidth(frame.right-frame.left).cy;
+            const int oldHeight=frame.bottom-frame.top;
+            const int newHeight=nightlight::linkedWindowHeight(oldHeight,oldMinimum,newMinimum);
+            if(newHeight!=oldHeight){
+                int y=nightlight::bottomAnchoredWindowTop(frame.bottom,newHeight);
+                MONITORINFO screen{sizeof(screen)};
+                if(GetMonitorInfoW(MonitorFromRect(&frame,MONITOR_DEFAULTTONEAREST),&screen))
+                    y=nightlight::bottomAnchoredWindowTop(frame.bottom,newHeight,screen.rcWork.top,screen.rcWork.bottom);
+                SetWindowPos(window_,nullptr,frame.left,y,frame.right-frame.left,newHeight,
+                    SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOCOPYBITS);
+            }
+        }
+        layout();repaint();captureSnapshot("Link displays changed");
+    }
+    void captureSnapshot(const char* event) {
+        if(!captureActive_)return;
+        constexpr size_t limit=2*1024*1024;
+        if(captureTruncated_)return;
+        SYSTEMTIME t{};GetLocalTime(&t);char stamp[64]{};
+        std::snprintf(stamp,sizeof(stamp),"%04u-%02u-%02u %02u:%02u:%02u.%03u",unsigned(t.wYear),unsigned(t.wMonth),unsigned(t.wDay),unsigned(t.wHour),unsigned(t.wMinute),unsigned(t.wSecond),unsigned(t.wMilliseconds));
+        auto b=[](bool v){return v?"1":"0";};
+        std::string line=std::string(stamp)+" "+event+" awake="+b(displayAwake_)+" recovery="+b(displayRecoveryActive_)+" linked="+b(linked())+" tray="+b(trayReady_)+" gammaUnlocked="+b(gammaUnlocked_)+" schedule="+b(model_.preferences().colorSchedule.enabled)+" dim="+b(model_.preferences().dimInactive)+" dim_overlay="+b(!dimOverlays_.empty())+" dpi="+std::to_string(dpi_)+"\r\n";
+        for(const auto& m:model_.monitors()){
+            const auto state=ddc_.state(m.device);
+            line+="  "+nightlight::toUtf8(m.device)+" enabled="+b(m.enabled)+" K="+std::to_string(m.kelvin)+" identity_hash="+std::to_string(std::hash<std::wstring>{}(nightlight::monitorProfileKey(m)))+" gamma="+std::to_string(m.gammaStatus)+" backend="+(m.hardwareColor?"hardware":m.nvidiaTargetColor?"nvidia":"gpu")+" loading="+b(state.loading);
+            for(const auto* v:{&state.brightness,&state.contrast})line+=std::string(v==&state.brightness?" brightness=":" contrast=")+std::to_string(v->percent)+" supported="+b(v->supported)+" value="+b(v->hasValue)+" pending="+b(v->pending)+" failed="+b(v->failed)+" backend="+std::to_string(static_cast<int>(v->backend));
+            line+="\r\n";
+        }
+        if(captureLog_.size()+line.size()<=limit)captureLog_+=line;else {captureLog_+="[Capture size limit reached]\r\n";captureTruncated_=true;}
+    }
+    void toggleCapture() {
+        if(!captureActive_){captureLog_="NightLight diagnostic capture 2.0\r\nNo keystrokes, location data or user file contents recorded.\r\n";captureActive_=true;captureTruncated_=false;captureSnapshot("Capture started");SetTimer(taskbarOwner_,TIMER_CAPTURE_LOG,2000,nullptr);return;}
+        wchar_t path[32768]=L"NightLight-capture.txt";
+        OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=settingsWindow_?settingsWindow_->hwnd():window_;
+        dialog.lpstrFilter=L"Text files (*.txt)\0*.txt\0All files (*.*)\0*.*\0\0";dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));dialog.lpstrDefExt=L"txt";dialog.Flags=OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
+        if(!GetSaveFileNameW(&dialog))return;
+        captureSnapshot("Capture stopped");
+        std::ofstream out(std::filesystem::path(path),std::ios::binary|std::ios::trunc);out.write(captureLog_.data(),static_cast<std::streamsize>(captureLog_.size()));out.close();
+        if(!out){MessageBoxW(dialog.hwndOwner,tr(L"Could not save capture log.",L"Não foi possível guardar o registo.").c_str(),L"NightLight",MB_OK|MB_ICONERROR);return;}
+        captureActive_=false;KillTimer(taskbarOwner_,TIMER_CAPTURE_LOG);std::string{}.swap(captureLog_);
+    }
+    void refreshWheelBounds() {
+        wheelIconBounds_={};wheelShellPid_=0;
+        if(!trayReady_)return;
+        NOTIFYICONIDENTIFIER icon{};icon.cbSize=sizeof(icon);icon.hWnd=taskbarOwner_;icon.uID=TRAY_ID;
+        if(FAILED(Shell_NotifyIconGetRect(&icon,&wheelIconBounds_)))wheelIconBounds_={};
+        if(HWND bar=FindWindowW(L"Shell_TrayWnd",nullptr))GetWindowThreadProcessId(bar,&wheelShellPid_);
+    }
+    static LRESULT CALLBACK trayWheelProc(int code,WPARAM wp,LPARAM lp) {
+        auto* self=wheelOwner_;
+        if(code==HC_ACTION && wp==WM_MOUSEWHEEL && self && !self->shuttingDown_ && !self->trayMenuOpen_ && self->wheelShellPid_){
+            const auto& input=*reinterpret_cast<const MSLLHOOKSTRUCT*>(lp);
+            if(PtInRect(&self->wheelIconBounds_,input.pt)){
+                DWORD pid=0;GetWindowThreadProcessId(WindowFromPoint(input.pt),&pid);
+                if(pid==self->wheelShellPid_)PostMessageW(self->taskbarOwner_,WM_TRAY_WHEEL,static_cast<WPARAM>(static_cast<INT_PTR>(static_cast<short>(HIWORD(input.mouseData)))),MAKELPARAM(input.pt.x,input.pt.y));
+            }
+        }
+        return CallNextHookEx(nullptr,code,wp,lp);
+    }
+    void hideWheelPopup(){KillTimer(taskbarOwner_,TIMER_WHEEL_POPUP);if(wheelPopup_)ShowWindow(wheelPopup_,SW_HIDE);}
+    void stopTrayWheel(){if(trayWheelHook_){UnhookWindowsHookEx(trayWheelHook_);trayWheelHook_=nullptr;}if(wheelOwner_==this)wheelOwner_=nullptr;KillTimer(taskbarOwner_,TIMER_TRAY_WHEEL);hideWheelPopup();if(wheelPopup_){DestroyWindow(wheelPopup_);wheelPopup_=nullptr;}if(wheelPopupFont_){DeleteObject(wheelPopupFont_);wheelPopupFont_=nullptr;}wheelPopupLanguage_=-1;wheelRemainder_=0;}
+    void syncTrayWheel(){
+        if(!model_.preferences().trayWheelEnabled){stopTrayWheel();return;}
+        if(trayWheelHook_)return;
+        wheelOwner_=this;trayWheelHook_=SetWindowsHookExW(WH_MOUSE_LL,trayWheelProc,instance_,0);
+        if(!trayWheelHook_){wheelOwner_=nullptr;auto p=model_.preferences();p.trayWheelEnabled=false;model_.updatePreferences(p);return;}
+        refreshWheelBounds();SetTimer(taskbarOwner_,TIMER_TRAY_WHEEL,500,nullptr);
+    }
+    static LRESULT CALLBACK wheelPopupProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        auto* self=reinterpret_cast<NativeApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        if(m==WM_NCCREATE){self=static_cast<NativeApp*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
+        if(m==WM_NCHITTEST)return HTTRANSPARENT;
+        if(m==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
+        if(m==WM_ERASEBKGND)return 1;
+        if(m==WM_PAINT && self){PAINTSTRUCT ps{};HDC dc=BeginPaint(h,&ps);RECT r{};GetClientRect(h,&r);const auto p=self->trayPalette();const auto scale=[self](int v){return MulDiv(v,self->wheelPopupDpi_,96);};fill(dc,r,p.page);rounded(dc,r,scale(10),p.card,p.border);InflateRect(&r,-scale(10),-scale(4));self->drawTextAt(dc,self->wheelPopupText_,r,self->wheelPopupFont_?self->wheelPopupFont_:self->boldFont_,p.text,DT_CENTER|DT_VCENTER|DT_SINGLELINE);EndPaint(h,&ps);return 0;}
+        return DefWindowProcW(h,m,w,l);
+    }
+    void showWheelPopup(const std::wstring& label) {
+        refreshWheelBounds();if(IsRectEmpty(&wheelIconBounds_))return;
+        if(!wheelPopup_){WNDCLASSW wc{};wc.hInstance=instance_;wc.lpfnWndProc=wheelPopupProc;wc.lpszClassName=L"NightLight.Tray.Wheel";RegisterClassW(&wc);wheelPopup_=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST|WS_EX_TRANSPARENT,wc.lpszClassName,L"",WS_POPUP,0,0,1,1,taskbarOwner_,nullptr,instance_,this);}
+        if(!wheelPopup_)return;
+        wheelPopupText_=label;
+        const POINT iconCenter{(wheelIconBounds_.left+wheelIconBounds_.right)/2,(wheelIconBounds_.top+wheelIconBounds_.bottom)/2};
+        HWND shell=WindowFromPoint(iconCenter);UINT targetDpi=shell?GetDpiForWindow(shell):dpi_;if(!targetDpi)targetDpi=96;
+        if(!wheelPopupFont_ || wheelPopupDpi_!=targetDpi || wheelPopupLanguage_!=language()){
+            if(wheelPopupFont_)DeleteObject(wheelPopupFont_);wheelPopupFont_=nullptr;
+            LOGFONTW lf{};if(boldFont_ && GetObjectW(boldFont_,sizeof(lf),&lf)){lf.lfHeight=MulDiv(lf.lfHeight,targetDpi,dpi_?dpi_:96);lf.lfWidth=MulDiv(lf.lfWidth,targetDpi,dpi_?dpi_:96);wheelPopupFont_=CreateFontIndirectW(&lf);}
+            wheelPopupDpi_=targetDpi;wheelPopupLanguage_=language();
+        }
+        const auto scale=[targetDpi](int v){return MulDiv(v,targetDpi,96);};
+        SIZE measured{};if(HDC dc=GetDC(wheelPopup_)){auto old=SelectObject(dc,wheelPopupFont_?wheelPopupFont_:boldFont_);GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&measured);if(old && old!=HGDI_ERROR)SelectObject(dc,old);ReleaseDC(wheelPopup_,dc);}
+        const int w=std::max(scale(160),static_cast<int>(measured.cx)+scale(30)),h=scale(40);
+        MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromRect(&wheelIconBounds_,MONITOR_DEFAULTTONEAREST),&mi);
+        int x=(wheelIconBounds_.left+wheelIconBounds_.right-w)/2,y=wheelIconBounds_.top-h-scale(6);
+        x=std::clamp(x,static_cast<int>(mi.rcMonitor.left),std::max(static_cast<int>(mi.rcMonitor.left),static_cast<int>(mi.rcMonitor.right)-w));
+        if(y<mi.rcMonitor.top)y=wheelIconBounds_.bottom+scale(6);
+        SetWindowPos(wheelPopup_,HWND_TOPMOST,x,y,w,h,SWP_NOACTIVATE|SWP_SHOWWINDOW);InvalidateRect(wheelPopup_,nullptr,FALSE);SetTimer(taskbarOwner_,TIMER_WHEEL_POPUP,1300,nullptr);
+    }
+    void adjustTrayWheel(int delta) {
+        if(!model_.preferences().trayWheelEnabled || !hardwareInputReady() || schedulePreviewActive_ || !hasMonitor())return;
+        if(displayRecoveryActive_ && model_.preferences().trayWheelMode==0)return;
+        const int steps=nightlight::accumulateTrayWheel(wheelRemainder_,delta);if(!steps)return;
+        const int mode=model_.preferences().trayWheelMode;
+        const auto increments=nightlight::hotkeyStepsFor(model_.preferences().hotkeySteps,L"");
+        if(mode==0){if(!std::any_of(model_.monitors().begin(),model_.monitors().end(),[](const Monitor& m){return m.enabled;})){showWheelPopup(tr(L"Color temperature",L"Temperatura de cor")+L": "+tr(L"Not available",L"Indisponível"));return;}const int base=selectedMonitor()->enabled?selectedMonitor()->kelvin:std::find_if(model_.monitors().begin(),model_.monitors().end(),[](const Monitor& m){return m.enabled;})->kelvin;const int value=nightlight::steppedDisplayValue(base,steps,increments[2],increments[3],1000,6500);applyTemperature(value,false,true);SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);syncColorWatchdog();showWheelPopup(tr(L"Color temperature",L"Temperatura de cor")+L": "+std::to_wstring(value)+L" K");}
+        else {const bool contrast=mode==2;const auto label=contrast?tr(L"Contrast",L"Contraste"):tr(L"Brightness",L"Brilho");auto base=sharedHardwareValue(contrast);if(!base){refreshHardware();showWheelPopup(label+L": "+tr(L"Not available",L"Indisponível"));return;}const int value=nightlight::steppedDisplayValue(*base,steps,increments[0],increments[1],0,100);if(applyHardwareAll(contrast,value))showWheelPopup(label+L": "+std::to_wstring(value)+L" %");else showWheelPopup(label+L": "+tr(L"Not available",L"Indisponível"));syncHardware();}
+        repaint();
+    }
     void setKelvinFromX(int x, bool save) {
-        if (!hasMonitor() || !selectedMonitor()->enabled) return;
+        if (!temperatureEnabled()) return;
         const int k=nightlight::kelvinFromTemperatureSliderX(
             x,slider_.left,slider_.right);
-        if (save) model_.updateKelvin(selected_,k);
-        else if (selectedMonitor()->kelvin != k) model_.previewKelvin(selected_,k);
-        else return;
+        if(k==temperatureValue() && !save)return;
+        applyTemperature(k,save,linked());
         // The Kelvin number updates immediately. The graphics
         // driver's gamma call is coalesced on Model's background worker.
         updateTrayTooltip();
@@ -3195,7 +3496,7 @@ private:
         if (!dragging_) return;
         dragging_=false;
         if (GetCapture()==window_) ReleaseCapture();
-        if (hasMonitor()) model_.updateKelvin(selected_,selectedMonitor()->kelvin);
+        if (hasMonitor()) applyTemperature(temperatureValue(),true,linked());
         repaint();
     }
     void populateLanguage(int idx) {
@@ -3289,7 +3590,6 @@ private:
         // entrance effect while reused show/restore windows do not.
         const HWND old=window_;
         if(!old || windowPresented() || replacingFrame_) return false;
-        if(settingsWindow_)settingsWindow_->setOwner(taskbarOwner_);
         RECT rect{};
         if(!GetWindowRect(old,&rect)) return false;
         if(IsIconic(old) || IsZoomed(old)) {
@@ -3308,13 +3608,15 @@ private:
                         mi.rcWork.top-mi.rcMonitor.top);
             }
         }
-        // The owner exists before and after the frame. Never create an
-        // unowned visible window or introduce WS_EX_APPWINDOW, even briefly.
+        // The private owner survives the frame recreation. Never join
+        // the tray menu's owner group or another regular frame's group.
+        const HWND owner=mainFrameOwner_.ensure(instance_);
+        if(!owner)return false;
         replacingFrame_=true;
         HWND fresh=CreateWindowExW(0,CLASS_NAME,L"NightLight",
             WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
             rect.left,rect.top,std::max(1L,rect.right-rect.left),
-            std::max(1L,rect.bottom-rect.top),taskbarOwner_,nullptr,instance_,this);
+            std::max(1L,rect.bottom-rect.top),owner,nullptr,instance_,this);
         if(!fresh) { replacingFrame_=false; return false; }
         std::vector<HWND> children;
         for(HWND child=GetWindow(old,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT))
@@ -3376,7 +3678,7 @@ private:
         hideWindowToTray(false);
     }
     void openWindow() {
-        if(windowPresented()) { if(settingsWindow_)settingsWindow_->setOwner(window_);SetForegroundWindow(window_);syncFocusToTray(); return; }
+        if(windowPresented()) { raiseNormalAppWindow(window_);syncFocusToTray(); return; }
         ++visibilityGeneration_;
         visibilityChanging_=true;
         const bool maximize=IsZoomed(window_)!=FALSE;
@@ -3389,8 +3691,7 @@ private:
         if(!windowPresented()) ShowWindow(window_,showMode);
         if(windowPresented()) {
             frameHasOpened_=true;
-            if(settingsWindow_)settingsWindow_->setOwner(window_);
-            SetForegroundWindow(window_);
+            raiseNormalAppWindow(window_);
             repaint();
             if(ddcVisible_ && displayAwake_ && !displayRecoveryActive_) {
                 if(!hardwareDiscovered_) refreshHardware();
@@ -3411,10 +3712,7 @@ private:
         finishInlineRename(true);
         noteWindowPosition();
         // Automatic focus-loss dismissal affects only the main window.
-        if(settingsWindow_){
-            if(hideSettings)settingsWindow_->hideToTray();
-            settingsWindow_->setOwner(taskbarOwner_);
-        }
+        if(settingsWindow_ && hideSettings)settingsWindow_->hideToTray();
         // Native hide, not iconification; no taskbar or desktop icon.
         ShowWindow(window_,SW_HIDE);
         if(IsWindowVisible(window_))
@@ -3465,9 +3763,12 @@ private:
     }
     void startUpdate() {
         if(shuttingDown_)return;
+        normalizeRegularFrames();
         if(updateWindow_ && updateWindow_->hwnd()) {updateWindow_->activate();return;}
         updateWindow_.reset();latestReleaseTag_.clear();
-        updateWindow_=std::make_unique<ReleaseUpdateDialog>(instance_,taskbarOwner_,language(),L"",L"",
+        const HWND owner=updateFrameOwner_.ensure(instance_);
+        if(!owner)return;
+        updateWindow_=std::make_unique<ReleaseUpdateDialog>(instance_,owner,language(),L"",L"",
             [this]{return palette();},
             [this]{return nightlight::effectiveDarkTheme(model_.preferences().theme,systemDark_);},
             [this]{return highContrast_;},
@@ -3518,9 +3819,10 @@ private:
             update.hWnd=taskbarOwner_; update.uID=TRAY_ID;
             // Preserve the standard tooltip when replacing the theme icon.
             update.uFlags=NIF_ICON|NIF_TIP|NIF_SHOWTIP; update.hIcon=next;
-            wcscpy_s(update.szTip,L"NightLight");
+            const auto text=trayTooltipText();
+            wcscpy_s(update.szTip,text.c_str());
             if(!Shell_NotifyIconW(NIM_MODIFY,&update)) { DestroyIcon(next);trayTooltipApplied_=false;updateTrayTooltip();return; }
-            trayTooltipApplied_=true;
+            trayTooltipApplied_=true;appliedTrayTooltip_=text;
             notify_.hIcon=next;
         }
         if(trayIcon_) DestroyIcon(trayIcon_);
@@ -3537,7 +3839,7 @@ private:
         notify_.uCallbackMessage=WM_TRAY_ICON;
         refreshTrayIcon(true);
         notify_.hIcon=trayIcon_?trayIcon_:LoadIconW(instance_,MAKEINTRESOURCEW(ICON_RESOURCE));
-        wcscpy_s(notify_.szTip,L"NightLight");
+        wcscpy_s(notify_.szTip,trayTooltipText().c_str());
         if (!Shell_NotifyIconW(NIM_ADD,&notify_)) return false;
         notify_.uVersion=NOTIFYICON_VERSION_4;
         // Version 4 changes the callback wParam/lParam layout; mouse-down
@@ -3680,6 +3982,7 @@ private:
     }
     void popupTray() {
         if(trayMenuOpen_)return;
+        hideWheelPopup();
         // Capture the same physical display identities as the main UI. The
         // menu loop can process topology changes, so resolve by key on click.
         const auto displaySnapshot=model_.monitors();
@@ -3728,6 +4031,7 @@ private:
         const UINT cmd=picked.value_or(0);
         PostMessageW(taskbarOwner_,WM_NULL,0,0);
         if (cmd==ID_TRAY_EXIT) {
+            if(captureActive_){toggleCapture();if(captureActive_)return;}
             shuttingDown_=true;
             DestroyWindow(window_);
         } else if(cmd==ID_UPDATE_MANUAL) {
@@ -3746,6 +4050,7 @@ private:
         if (code==BN_CLICKED) {
             if (id==ID_REFRESH) { nightlight::startRefreshSpin(refreshTurn_,uiTime(),animations_ && windowPresented()); if(animations_)startAnimationTimer(); refreshConnectedDisplays(); }
             else if (id==ID_SCREEN_OFF) turnOffScreens();
+            else if(id==ID_LINK_DISPLAYS)toggleLink();
             else if (id==ID_GAMMA) unlockGamma();
             else if(id==ID_SETTINGS)openSettings();
             else if (id>=ID_MONITOR_BASE &&
@@ -3753,7 +4058,7 @@ private:
                 select(static_cast<size_t>(id-ID_MONITOR_BASE));
             } else if (id>=ID_DDC_MONITOR_BASE &&
                        id<ID_DDC_MONITOR_BASE+static_cast<int>(hardwareRows_.size())) {
-                select(static_cast<size_t>(id-ID_DDC_MONITOR_BASE));
+                if(!linked())select(static_cast<size_t>(id-ID_DDC_MONITOR_BASE));
             }
         }
     }
@@ -3778,13 +4083,11 @@ private:
             break;
         case WM_SIZE:
             if (wParam==SIZE_MINIMIZED) {
-                if(settingsWindow_)settingsWindow_->setOwner(taskbarOwner_);
                 suspendWindowRendering();
                 // Win+M and external minimize can bypass our tray path.
                 if (trayReady_ && !shuttingDown_ && !visibilityChanging_)
                     PostMessageW(hwnd,WM_MINIMIZE_TO_TRAY,FALSE,static_cast<LPARAM>(visibilityGeneration_));
             } else {
-                if(settingsWindow_ && windowPresented())settingsWindow_->setOwner(window_);
                 layout();
             }
             return 0;
@@ -3801,9 +4104,13 @@ private:
             }
             return 0;
         case WM_ACTIVATE:
+            // Dismiss a lingering topmost tooltip and correct an inherited
+            // pin, without raising the main panel when focus moves away.
+            if(LOWORD(wParam)==WA_INACTIVE && gammaTooltip_)SendMessageW(gammaTooltip_,TTM_POP,0,0);
+            if(LOWORD(wParam)!=WA_INACTIVE)nightlight::normalizeFrameZOrder(hwnd);
+            [[fallthrough]];
         case WM_ACTIVATEAPP:
-            // Evaluate the final foreground HWND on the stable owner timer;
-            // WM_ACTIVATE alone can miss focus changes via an owned dialog.
+            // Evaluate the final foreground HWND on the stable owner timer.
             if(!visibilityChanging_)syncFocusToTray();
             break;
         case WM_CLOSE:
@@ -3916,6 +4223,11 @@ private:
             } else if (static_cast<UINT>(wParam)!=TRAY_ID) return 0;
             const UINT event=trayVersion4_?LOWORD(lParam):
                 static_cast<UINT>(lParam);
+            if(event==NIN_POPUPOPEN) {
+                updateTrayTooltip();
+                if(hardwareInputReady() && !displayRecoveryActive_)for(const auto& row:hardwareRows_)ddc_.poll(row.device);
+                return 0;
+            }
             if (event==WM_CONTEXTMENU || event==WM_RBUTTONUP) {
                 popupTray();
                 return 0;
@@ -3950,16 +4262,20 @@ private:
             if (toggle) handleTrayActivation();
             return 0;
         }
+        case WM_TRAY_WHEEL: {refreshWheelBounds();const POINT at{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};if(PtInRect(&wheelIconBounds_,at))adjustTrayWheel(static_cast<int>(static_cast<INT_PTR>(wParam)));return 0;}
         case nightlight::WM_DDC_COMPLETE:
-            syncHardware(); repaint(); return 0;
+            captureSnapshot("DDC result");syncHardware(); repaint(); return 0;
         case WM_HSCROLL: {
             HWND slider=reinterpret_cast<HWND>(lParam);
             if (auto* row=hardwareRow(slider)) {
                 const bool contrast=slider==row->contrast;
                 const int percent=(static_cast<int>(SendMessageW(slider,TBM_GETPOS,0,0))+50)/100;
-                if (displayAwake_ && !displayRecoveryActive_ && ddcVisible_ && ddc_.set(row->device,contrast?nightlight::DdcFeature::Contrast:nightlight::DdcFeature::Brightness,percent)) {
-                    if (model_.rememberHardwarePercent(row->device,contrast,percent)) SetTimer(taskbarOwner_,TIMER_SAVE_DDC,400,nullptr);
+                if(linked() && hardwareInputReady() && ddcVisible_) {applyHardwareAll(contrast,percent);syncHardware();}
+                else if (hardwareInputReady() && ddcVisible_) {
+                    const auto mon=std::find_if(model_.monitors().begin(),model_.monitors().end(),[&](const Monitor& m){return m.device==row->device && nightlight::monitorProfileKey(m)==row->physicalKey;});
+                    if(mon!=model_.monitors().end() && setHardwareManual(*mon,contrast,percent))pendingGroupHardware_.erase({row->physicalKey,contrast});
                 }
+                updateTrayTooltip();
                 // Repaint the whole channel once; native partial thumb redraws
                 // otherwise leave stale pieces of the custom filled track.
                 InvalidateRect(slider,nullptr,FALSE);
@@ -3974,7 +4290,7 @@ private:
             break;
         case WM_GAMMA_COMPLETE:
             if (model_.collectGammaResults()) { updateTrayTooltip(); repaint(); }
-            syncColorWatchdog();
+            captureSnapshot("Gamma result");syncColorWatchdog();
             return 0;
         case WM_SETCURSOR: {
             POINT point{};GetCursorPos(&point);ScreenToClient(hwnd,&point);
@@ -3988,7 +4304,7 @@ private:
             // Slight extra horizontal padding makes the endpoints reachable.
             RECT touch=nightlight::sliderHitRect(slider_,px(12),px(30));
 
-            if (PtInRect(&touch,p) && hasMonitor() && selectedMonitor()->enabled) {
+            if (PtInRect(&touch,p) && temperatureEnabled()) {
                 dragging_=true;
                 SetCapture(hwnd);
                 SetFocus(hwnd);
@@ -4023,8 +4339,8 @@ private:
             return 0;
         case WM_KEYDOWN:
             if(screenDragArmed_ && wParam==VK_ESCAPE){finishScreenDrag();return 0;}
-            if (hasMonitor() && selectedMonitor()->enabled) {
-                int value=selectedMonitor()->kelvin;
+            if (temperatureEnabled()) {
+                int value=temperatureValue();
                 if (wParam==VK_LEFT || wParam==VK_DOWN) value-=10;
                 else if (wParam==VK_RIGHT || wParam==VK_UP) value+=10;
                 else if (wParam==VK_PRIOR) value+=100;
@@ -4032,14 +4348,14 @@ private:
                 else if (wParam==VK_HOME) value=1000;
                 else if (wParam==VK_END) value=6500;
                 else break;
-                model_.updateKelvin(selected_,value);
+                applyTemperature(value,true,linked());
                 updateTrayTooltip();
                 repaint(); return 0;
             }
             break;
         case WM_DISPLAYCHANGE:
         case WM_DEVICECHANGE:
-            dimTopologyDirty_=true;
+            captureSnapshot("Display topology notification");dimTopologyDirty_=true;
             if (msg==WM_DISPLAYCHANGE) {
                 // Remove any old-coordinate overlay before the next tick.
                 if(dimSettings_) dimSettings_->cancelTest();
@@ -4052,6 +4368,7 @@ private:
             scheduleDisplayRecovery();
             return 0;
         case WM_POWERBROADCAST:
+            captureSnapshot("Power broadcast");
             if (wParam==PBT_POWERSETTINGCHANGE && lParam) {
                 const auto* setting=reinterpret_cast<const POWERBROADCAST_SETTING*>(lParam);
                 if (IsEqualGUID(setting->PowerSetting,displayStateGuid) && setting->DataLength==sizeof(DWORD)) {
@@ -4070,6 +4387,8 @@ private:
                         }
                         KillTimer(taskbarOwner_,TIMER_DISPLAYS);
                         displayRecoveryActive_=false;
+                        recoveryHardwareStable_=false;
+                        syncHardware();
                         syncColorWatchdog(); syncHardwarePoll(); syncInactiveDimming();
                     } else {
                         if(!wasAwake) {restoreDdcAfterWake_=true;dimTopologyDirty_=true;}
@@ -4096,12 +4415,17 @@ private:
                 ddc_.invalidateTopology();
                 model_.beginDisplayRecovery();
                 KillTimer(taskbarOwner_,TIMER_DISPLAYS);
+                recoveryHardwareStable_=false;
+                syncHardware();
                 syncColorWatchdog(); syncHardwarePoll(); syncInactiveDimming();
             }
             return TRUE;
         case WM_HOTKEY:
             runGlobalHotkey(static_cast<int>(wParam),lParam);return 0;
         case WM_TIMER:
+            if(wParam==TIMER_TRAY_WHEEL){refreshWheelBounds();return 0;}
+            if(wParam==TIMER_WHEEL_POPUP){hideWheelPopup();return 0;}
+            if(wParam==TIMER_CAPTURE_LOG){captureSnapshot("Periodic state");return 0;}
             if(wParam==TIMER_FOCUS_TO_TRAY){tickFocusToTray();return 0;}
             if(wParam==TIMER_COLOR_SCHEDULE){tickColorSchedule();return 0;}
             if(wParam==TIMER_UPDATE){tickUpdate();return 0;}
@@ -4163,8 +4487,11 @@ private:
                 const bool changed=model_.refreshMonitors(true,&stable);
                 syncStartupColorTimer();
                 if(!stable) {
+                    recoveryHardwareStable_=false;
                     if(recoveryPass_!=0) ddc_.invalidateTopology();
+                    manualRecoveryHardware_.clear();
                     recoveryPass_=0;
+                    syncHardware();
                     recoverySettleChecks_=0;
                     recoveryVerificationIssued_=false;
                     SetTimer(taskbarOwner_,TIMER_DISPLAYS,1000,nullptr);
@@ -4174,6 +4501,7 @@ private:
                     // GDI display numbers may have swapped. Never reuse the
                     // former device's queued DDC jobs or cached percentages.
                     ddc_.invalidateTopology();
+                    manualRecoveryHardware_.clear();
                     recoveryPass_=0;
                     recoverySettleChecks_=0;
                     recoveryVerificationIssued_=false;
@@ -4187,6 +4515,10 @@ private:
                         static_cast<size_t>(found-monitors.begin());
                     refreshTabs();
                 }
+                recoveryHardwareStable_=true;
+                // A notification may have temporarily blocked controls during
+                // a later verification pass; re-enable on the stable sample.
+                if(recoveryPass_>0)syncHardware();
                 constexpr UINT delays[]{1500,2500,4000,6000,8000,12000};
                 if(recoveryPass_<std::size(delays)) {
                     // Reassert ALL screens, including ones already marked
@@ -4202,7 +4534,9 @@ private:
                         const bool savedContrast=model_.hasHardwarePercent(mon.device,true);
                         ddc_.seed(mon.device,brightness,contrast,savedBrightness,savedContrast);
                         if(restoreDdcAfterWake_)
-                            ddc_.restore(mon.device,brightness,contrast,savedBrightness,savedContrast,mon.physicalId);
+                            ddc_.restore(mon.device,brightness,contrast,
+                                savedBrightness && !manualRecoveryHardware_.count({nightlight::monitorProfileKey(mon),false}),
+                                savedContrast && !manualRecoveryHardware_.count({nightlight::monitorProfileKey(mon),true}),mon.physicalId);
                     }
                     const auto delay=delays[recoveryPass_++];
                     if(recoveryPass_==1) refreshHardware();
@@ -4241,9 +4575,9 @@ private:
                     failed=failed || mon.gammaStatus==0;
                     const auto current=ddc_.state(mon.device);
                     pending=pending || current.loading || current.brightness.pending || current.contrast.pending;
-                    const bool retryBrightness=restoreDdcAfterWake_ && current.brightness.failed &&
+                    const bool retryBrightness=restoreDdcAfterWake_ && !manualRecoveryHardware_.count({nightlight::monitorProfileKey(mon),false}) && current.brightness.failed &&
                         model_.hasHardwarePercent(mon.device,false);
-                    const bool retryContrast=restoreDdcAfterWake_ && current.contrast.failed &&
+                    const bool retryContrast=restoreDdcAfterWake_ && !manualRecoveryHardware_.count({nightlight::monitorProfileKey(mon),true}) && current.contrast.failed &&
                         model_.hasHardwarePercent(mon.device,true);
                     failed=failed || retryBrightness || retryContrast;
                     if(recoverySettleChecks_<3 && (retryBrightness || retryContrast))
@@ -4258,6 +4592,7 @@ private:
                     return 0;
                 }
                 ddc_.finishRestore();
+                manualRecoveryHardware_.clear();
                 displayRecoveryActive_=false;
                 restoreDdcAfterWake_=false;
                 if(model_.preferences().colorSchedule.enabled)tickColorSchedule();
@@ -4285,6 +4620,7 @@ private:
             return 0;
         case WM_DESTROY:
             shuttingDown_=true;
+            stopTrayWheel();KillTimer(taskbarOwner_,TIMER_CAPTURE_LOG);
             if(settingsWindow_)settingsWindow_->close();
             clearGlobalHotkeys();KillTimer(taskbarOwner_,TIMER_COLOR_SCHEDULE);KillTimer(taskbarOwner_,TIMER_FOCUS_TO_TRAY);
             if(updateWindow_)updateWindow_->close();
@@ -4358,7 +4694,7 @@ private:
         // frame only supplies UI context. Broadcast display/resume messages
         // are handled by the actual frame to avoid duplicate processing.
         if(app && app->window_ && IsWindow(app->window_) && !app->shuttingDown_ &&
-           (msg==WM_TIMER || msg==WM_HOTKEY || msg==WM_TRAY_ICON || msg==WM_GAMMA_COMPLETE ||
+           (msg==WM_TIMER || msg==WM_HOTKEY || msg==WM_TRAY_ICON || msg==WM_TRAY_WHEEL || msg==WM_GAMMA_COMPLETE ||
             msg==nightlight::WM_DDC_COMPLETE ||
             (app->taskbarCreated_ && msg==app->taskbarCreated_) ||
             (msg==WM_POWERBROADCAST && wp==PBT_POWERSETTINGCHANGE)))
